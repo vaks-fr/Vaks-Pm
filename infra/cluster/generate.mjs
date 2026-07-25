@@ -280,9 +280,10 @@ function appEnv(extra = {}) {
     APP_URL: 'http://localhost',
     DEPLOYMENT_MODE: m.deploymentMode,
     TENANCY_BASE_DOMAIN: m.baseDomain,
-    // TLS interne (DORA) : app↔PostgreSQL chiffré (cert auto-signé → no-verify via
-    // option code dans pg-adapter, cf. api/src/prisma/pg-adapter.ts).
-    PG_TLS: '"1"',
+    // TLS interne (DORA) : app↔PostgreSQL chiffré. Activé en HA (Patroni écoute en
+    // SSL via le bootstrap). En single, PostgreSQL tourne en conteneur SANS SSL →
+    // PG_TLS="1" ferait crash-looper l'api ('server does not support SSL') → "0".
+    PG_TLS: ha ? '"1"' : '"0"',
     // Vérification stricte du cert serveur Postgres si encryption.pgVerify (sinon
     // chiffré-sans-vérification, défaut). La CA est montée en config (cf. pg_ca_v1).
     ...(encPgVerify ? { PG_TLS_CA: PG_CA_TARGET, PG_TLS_MODE: encPgMode } : {}),
@@ -889,7 +890,7 @@ const workers = m.hosts.filter((h) => !role(h, 'manager'));
 // Données host interpolées pour le script bash (name|ip|isDb|isManager).
 const hostRows = m.hosts.map((h) => `${h.name}|${h.ip}|${role(h, 'db') ? 1 : 0}|${role(h, 'manager') ? 1 : 0}`).join('\n');
 const provisionLines = m.tenants
-  .map((t) => `provision_tenant ${t.slug}${t.seed ? ` ${t.seed}` : ''}`)
+  .map((t) => `provision_tenant ${t.slug} "${t.adminEmail || ''}"${t.seed ? ` ${t.seed}` : ''}`)
   .join('\n');
 
 // Étapes conditionnelles primary/standby — consts au MÊME niveau que deployOrch
@@ -905,10 +906,12 @@ done <<< "\$HOSTS_DATA"`
 const provisionStep = isPrimaryZone
   ? `echo "=== 7) Provision tenants ==="
 provision_tenant(){
-  # \${2:-} : le seed est optionnel — sans ça, set -u tue le script sur un tenant sans seed.
-  local SEED="\${2:-}" SEED_ARG=""; [ -n "\$SEED" ] && SEED_ARG="--seed \$SEED";
-  echo "  -> tenant \$1 \${SEED:+(seed: \$SEED)} (runs provision-tenant.js in an api container)";
-  SUDO "\$MANAGER_IP" "CID=\\\$(docker ps -q -f name=vaks-pm_api | head -1); [ -n \\\"\\\$CID\\\" ] && docker exec \\\$CID sh -c 'export DATABASE_URL=\\\$(cat /run/secrets/database_url) && cd /app/api && node prisma/provision-tenant.js \$1 \$SEED_ARG' || echo 'api pas encore prêt — relancer'";
+  # \$1 = slug, \$2 = admin email (optional, quoted so it may be empty), \$3 = seed (optional).
+  local EMAIL="\${2:-}" SEED="\${3:-}" EMAIL_ARG="" SEED_ARG="";
+  [ -n "\$EMAIL" ] && EMAIL_ARG="\$EMAIL";
+  [ -n "\$SEED" ] && SEED_ARG="--seed \$SEED";
+  echo "  -> tenant \$1 \${EMAIL:+<\$EMAIL>}\${SEED:+ (seed: \$SEED)} (runs provision-tenant.js in an api container)";
+  SUDO "\$MANAGER_IP" "CID=\\\$(docker ps -q -f name=vaks-pm_api | head -1); [ -n \\\"\\\$CID\\\" ] && docker exec \\\$CID sh -c 'export DATABASE_URL=\\\$(cat /run/secrets/database_url) && cd /app/api && node prisma/provision-tenant.js \$1 \$EMAIL_ARG \$SEED_ARG' || echo 'api not ready yet — re-run'";
 }
 ${provisionLines || 'echo "  (no tenant declared)"'}`
   : `echo "=== 6) STANDBY zone: no provisioning — tenants arrive by replication from the primary ==="`;

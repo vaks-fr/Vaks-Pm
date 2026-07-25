@@ -96,6 +96,22 @@ if [ "$MODE" = "single" ]; then
   BASE="$(ask 'Base domain ONLY (e.g. example.com — orgs are served at <slug>.<basedomain>, NOT the full host); blank for an IP/LAN test' '')"
   DBN="$(ask 'Database name' 'vakspm')"
   DM="$(ask 'deploymentMode (pooled|dedicated)' 'pooled')"
+  # First organization — provisioned automatically at deploy (step 7), so no manual
+  # org bootstrap is needed. Blank = create none now (bootstrap later by hand).
+  echo ""
+  echo "First organization (created automatically at deploy: org + admin, password shown once)."
+  echo "  slug = short url-safe id ([a-z0-9-]); the org is reached at <slug>.${BASE:-<host>}."
+  TSLUG="$(ask 'organization slug (blank = none)' '')"
+  TEN_JSON=""
+  if [ -n "$TSLUG" ]; then
+    if echo "$TSLUG" | grep -qE '^[a-z0-9-]+$'; then
+      TADMIN="$(ask "  first admin email for $TSLUG" "admin@$TSLUG.local")"
+      TEN_JSON="
+    { \"slug\": \"$TSLUG\", \"domain\": \"$TSLUG.$BASE\", \"profile\": \"$DM\", \"ha\": false, \"placement\": \"auto\", \"adminEmail\": \"$TADMIN\" }"
+    else
+      echo "  ✗ invalid slug \"$TSLUG\" (lowercase, digits, hyphens only) — no tenant created."
+    fi
+  fi
   cat > infra/cluster.json <<JSON
 {
   "mode": "single",
@@ -106,7 +122,8 @@ if [ "$MODE" = "single" ]; then
   $TLS_JSON
   "sshKey": "\${SSH_KEY}",
   "hosts": [ { "name": "node1", "ip": "$IP", "sshUser": "\${VM_USER}", "roles": ["manager","db","etcd","cp","app"] } ],
-  "tenants": []
+  "tenants": [$TEN_JSON
+  ]
 }
 JSON
   echo "→ infra/cluster.json written (single)."
@@ -180,9 +197,10 @@ if [ -n "$TLIST" ]; then
     PROF="$(ask "  $t : profile (pooled|dedicated)" 'pooled')"
     HA='false'
     if [ "$PROF" = "dedicated" ]; then HA="$(ask "  $t : HA (true|false)" 'true')"; fi
+    TADMIN="$(ask "  $t : first admin email" "admin@$t.local")"
     SEP=""; [ -n "$TEN_JSON" ] && SEP=","
     TEN_JSON="${TEN_JSON}${SEP}
-    { \"slug\": \"$t\", \"domain\": \"$t.$BASE\", \"profile\": \"$PROF\", \"ha\": $HA, \"placement\": \"auto\" }"
+    { \"slug\": \"$t\", \"domain\": \"$t.$BASE\", \"profile\": \"$PROF\", \"ha\": $HA, \"placement\": \"auto\", \"adminEmail\": \"$TADMIN\" }"
   done
 fi
 
