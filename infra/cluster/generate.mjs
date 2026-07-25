@@ -931,6 +931,7 @@ exec > >(tee -a "$VAKS_DEPLOY_LOG") 2>&1
 echo "# log du déploiement → $VAKS_DEPLOY_LOG"
 set -a; . "$ROOT/.env.local"; set +a
 : "\${VM_USER:?}"; : "\${SSH_KEY:?}"; : "\${VM_PASS:=}"
+case "\$SSH_KEY" in /*) ;; *) SSH_KEY="\$ROOT/\$SSH_KEY";; esac  # relative key = from repo root, so the script runs from any CWD
 SSHOPT="-o StrictHostKeyChecking=accept-new -i \$SSH_KEY"
 SSH(){ ssh -n $SSHOPT "\${VM_USER}@\$1" "\$2"; }
 SCP(){ scp $SSHOPT -r "\$2" "\${VM_USER}@\$1:\$3"; }
@@ -1040,6 +1041,7 @@ exec > >(tee -a "$VAKS_DEPLOY_LOG") 2>&1
 echo "# log du déploiement → $VAKS_DEPLOY_LOG"
 set -a; . "$ROOT/.env.local"; set +a
 : "\${SSH_KEY:?}"; : "\${VM_PASS:=}"
+case "\$SSH_KEY" in /*) ;; *) SSH_KEY="\$ROOT/\$SSH_KEY";; esac  # relative key = from repo root, so the script runs from any CWD
 SSHOPT="-o StrictHostKeyChecking=accept-new -i \$SSH_KEY"
 # -n : stdin depuis /dev/null. SANS ça, un ssh dans une boucle while-read sur
 # un here-string consomme le here-string et la boucle ne traite que le 1er
