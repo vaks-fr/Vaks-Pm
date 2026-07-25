@@ -1,47 +1,46 @@
 # Vaks-PM
 
-**Outil de gestion de projet 100 % auto-hébergeable (on-premise), multi-utilisateurs, conçu pour des organisations de 200+ personnes.**
-*Self-hostable project-management platform — API-first, multi-tenant, with AI agents as first-class actors.*
+**Fully self-hostable (on-premise), multi-user project-management platform, built for organizations of 200+ people.**
+*API-first, multi-tenant, with AI agents as first-class actors.*
 
-Kanban · listes de tâches · Gantt (dépendances, chemin critique) · suivi du temps &
-reporting · timesheet hebdo · gestion de la charge (capacité) · jours fériés par pays ·
-commentaires & @mentions · pièces jointes · notifications email · API REST + webhooks ·
-clients & contacts · équipes & compétences · **agents IA** (acteurs de première classe :
-identité, cycle de vie, budgets, vérification des livrables) · SSO (OIDC/SAML/SCIM) ·
-connecteur MCP.
+Kanban · task lists · Gantt (dependencies, critical path) · time tracking &
+reporting · weekly timesheets · workload management (capacity) · per-country public
+holidays · comments & @mentions · attachments · email notifications · REST API + webhooks ·
+clients & contacts · teams & skills · **AI agents** (first-class actors:
+identity, lifecycle, budgets, deliverable verification) · SSO (OIDC/SAML/SCIM) ·
+MCP connector.
 
 ---
 
-## Licence
+## License
 
-Ce dépôt est distribué sous **Elastic License 2.0** (licence *source-available*, voir
-[`LICENSE`](LICENSE)) — **et non une licence open source au sens OSI**.
+This repository is distributed under the **Elastic License 2.0** (a *source-available*
+license, see [`LICENSE`](LICENSE)) — **not an OSI-approved open source license**.
 
-En résumé, vous pouvez librement utiliser, copier, modifier et **auto-héberger** le logiciel.
-Vous ne pouvez pas le proposer à des tiers comme service hébergé/managé, ni contourner le
-mécanisme de clé de licence. Certaines **fonctionnalités premium** (SSO, SCIM, MCP,
-provisioning Microsoft Teams…) sont présentes dans le code mais activées par une **clé de
-licence** ; le cœur de l'application et toutes vos données restent pleinement accessibles
-sans clé.
+In short, you may freely use, copy, modify and **self-host** the software.
+You may not offer it to third parties as a hosted/managed service, nor circumvent the
+license-key mechanism. Certain **premium features** (SSO, SCIM, MCP, Microsoft Teams
+provisioning…) are present in the code but unlocked by a **license key**; the core of the
+application and all of your data stay fully accessible without any key.
 
 ---
 
 ## Stack
 
-| Couche | Techno |
+| Layer | Technology |
 |---|---|
 | Frontend | React 18 + TypeScript (Vite), Tailwind + Radix/shadcn |
-| Backend | NestJS (Node/TS) — API REST + WebSocket (Socket.IO) |
+| Backend | NestJS (Node/TS) — REST API + WebSocket (Socket.IO) |
 | ORM / migrations | Prisma 7 |
-| Base de données | PostgreSQL 17 en HA (Patroni + etcd, LB HAProxy) |
-| Cache / queues | Redis 7 (cache/pub-sub, jobs BullMQ) |
-| Fichiers | Garage (S3 on-premise, compatible AWS SDK v3) |
+| Database | PostgreSQL 17 in HA (Patroni + etcd, HAProxy LB) |
+| Cache / queues | Redis 7 (cache/pub-sub, BullMQ jobs) |
+| Files | Garage (on-premise S3, AWS SDK v3 compatible) |
 | Reverse proxy / TLS | Traefik v3 |
 | Orchestration | Docker Swarm / Kubernetes (prod) |
-| OS VMs | Debian 13 Trixie |
+| VM OS | Debian 13 Trixie |
 
-TypeScript de bout en bout ; les services `api` / `worker` / `mcp` sont **sans état** et
-scalables horizontalement.
+TypeScript end to end; the `api` / `worker` / `mcp` services are **stateless** and
+horizontally scalable.
 
 ## Structure (monorepo)
 
@@ -49,74 +48,73 @@ scalables horizontalement.
 vaks-pm/
 ├── web/               # React + Vite
 ├── api/               # NestJS (REST + WebSocket)
-├── worker/            # NestJS mode worker (BullMQ)
-├── mcp/               # Serveur MCP (connecteur IA, Streamable-HTTP stateless)
-├── packages/shared/   # Types & DTO partagés
-├── infra/             # Patroni, HAProxy, Traefik, bootstrap cluster, backup
-├── deploy/helm/       # Chart Kubernetes
-├── docker-stack.yml   # Prod Docker Swarm
-└── setup.sh           # Point d'entrée du déploiement on-premise
+├── worker/            # NestJS worker mode (BullMQ)
+├── mcp/               # MCP server (AI connector, stateless Streamable-HTTP)
+├── packages/shared/   # Shared types & DTOs
+├── infra/             # Patroni, HAProxy, Traefik, cluster bootstrap, backup
+├── deploy/helm/       # Kubernetes chart
+├── docker-stack.yml   # Docker Swarm (prod)
+└── setup.sh           # On-premise deployment entry point
 ```
 
 ---
 
-## Déploiement (production)
+## Deployment (production)
 
-### Docker Swarm (on-premise, HA 3 nœuds)
+### Docker Swarm (on-premise, 3-node HA)
 
-Le déploiement est orchestré depuis une machine de pilotage via SSH par clés — **aucun
-build local requis**, les images sont récupérées depuis GHCR.
+Deployment is orchestrated from a control workstation over key-based SSH — **no local
+build required**, images are pulled from GHCR.
 
 ```bash
-cp .env.example .env.local          # credentials & hôtes (jamais commité)
-bash setup.sh                       # wizard → infra/cluster.json → artefacts out/
-bash setup.sh --deploy              # wizard puis orchestrateur de déploiement
+cp .env.example .env.local          # credentials & hosts (never committed)
+bash setup.sh                       # wizard → infra/cluster.json → artifacts in out/
+bash setup.sh --deploy              # wizard, then the deployment orchestrator
 ```
 
-Topologie cible : PostgreSQL en HA (Patroni/etcd/HAProxy), Redis et Garage (S3) répartis
-en services Swarm, Traefik en frontal (80/443). Le backend se connecte à PostgreSQL **via
-HAProxy**. Voir `infra/` pour le détail (`patroni.yml`, `haproxy.cfg`, `traefik.yml`,
-scripts `infra/bootstrap/`).
+Target topology: PostgreSQL in HA (Patroni/etcd/HAProxy), Redis and Garage (S3) spread
+across Swarm services, Traefik at the edge (80/443). The backend connects to PostgreSQL
+**via HAProxy**. See `infra/` for the details (`patroni.yml`, `haproxy.cfg`, `traefik.yml`,
+the `infra/bootstrap/` scripts).
 
 ### Kubernetes
 
-Un chart Helm est fourni : [`deploy/helm/vaks-pm`](deploy/helm/vaks-pm) (les deux modes de
-tenancy, PostgreSQL/Redis/MinIO bundlés optionnels).
+A Helm chart is provided: [`deploy/helm/vaks-pm`](deploy/helm/vaks-pm) (both tenancy
+modes, optional bundled PostgreSQL/Redis/MinIO).
 
 ---
 
-## Images Docker
+## Docker images
 
-Les images des 4 services sont buildées par GitHub Actions
-([`.github/workflows/build-images.yml`](.github/workflows/build-images.yml)) et poussées vers
-le **GitHub Container Registry** :
+The images for the 4 services are built by GitHub Actions
+([`.github/workflows/build-images.yml`](.github/workflows/build-images.yml)) and pushed to
+the **GitHub Container Registry**:
 
 ```
 ghcr.io/itsmepoy/vakspm-{api,web,worker,mcp}
-  :latest        (branche par défaut)
-  :sha-<short>   (immuable — pour épingler ou rollback un déploiement)
+  :latest        (default branch)
+  :sha-<short>   (immutable — to pin or roll back a deployment)
 ```
 
-`docker-stack.yml` consomme ces images via `${VAKS_TAG:-latest}`. Pour tirer depuis un
-registre miroir, surcharger `VAKS_IMAGE_PREFIX` (défaut `ghcr.io/itsmepoy/vakspm`). Le
-déploiement effectue un rolling update (`docker service update --force --image …`) sans
-downtime.
+`docker-stack.yml` consumes these images via `${VAKS_TAG:-latest}`. To pull from a mirror
+registry, override `VAKS_IMAGE_PREFIX` (default `ghcr.io/itsmepoy/vakspm`). Deployment
+performs a rolling update (`docker service update --force --image …`) with no downtime.
 
 ---
 
-## Sécurité & conformité
+## Security & compliance
 
-RBAC appliqué côté serveur sur chaque route et événement WebSocket · audit log append-only
-avec export SIEM (syslog RFC 5424) · anonymisation/portabilité RGPD · chiffrement au repos
-(enveloppe DEK/KEK) · traçabilité des actions d'agents IA (`actorType=AGENT`) · jetons API
-scopés (PAT & clés org) avec rate-limit.
+Server-side RBAC enforced on every route and WebSocket event · append-only audit log with
+SIEM export (syslog RFC 5424) · GDPR anonymization/portability · encryption at rest
+(DEK/KEK envelope) · AI-agent action traceability (`actorType=AGENT`) · scoped API tokens
+(PATs & org keys) with rate limiting.
 
 ---
 
 ## Documentation
 
-La documentation utilisateur complète (installation, déploiement, sauvegarde/restauration,
-SSO, API…) est publiée en ligne :
+The full user documentation (installation, deployment, backup/restore, SSO, API…) is
+published online:
 
-- 🇫🇷 **https://vaks-pm.com/docs/fr/index.html**
 - 🇬🇧 **https://vaks-pm.com/docs/en/index.html**
+- 🇫🇷 **https://vaks-pm.com/docs/fr/index.html**

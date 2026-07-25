@@ -196,13 +196,17 @@ function validate(cfg) {
     const passwordHash = await argon2.hash(password);
     const adminUser = await prisma.user.upsert({
       where: { organizationId_email: { organizationId: organization.id, email: admin.email } },
-      update: { isAdmin: true, mustChangePassword: generated },
+      // The bootstrap admin is the org's only way into the admin portal, which is
+      // seat-gated — always give this account a license seat, or a from-scratch
+      // deploy locks itself out ("no license seat assigned").
+      update: { isAdmin: true, licensed: true, mustChangePassword: generated },
       create: {
         organizationId: organization.id,
         email: admin.email,
         name: admin.name || 'Org Admin',
         passwordHash,
         isAdmin: true,
+        licensed: true,
         timezone,
         mustChangePassword: generated,
       },
