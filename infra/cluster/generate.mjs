@@ -62,14 +62,14 @@ let raw;
 try {
   raw = readFileSync(manifestPath, 'utf8');
 } catch (e) {
-  console.error(`ERREUR: manifeste introuvable: ${manifestPath}`);
+  console.error(`ERROR: manifest not found: ${manifestPath}`);
   process.exit(1);
 }
 let m;
 try {
   m = JSON.parse(raw);
 } catch (e) {
-  console.error(`ERREUR: JSON invalide dans ${manifestPath}: ${e.message}`);
+  console.error(`ERROR: invalid JSON in ${manifestPath}: ${e.message}`);
   process.exit(1);
 }
 m = resolveEnv(m);
@@ -129,7 +129,7 @@ if (acme && !acmeDomains.length) warn('tls.acme sans domaine : Traefik émettra 
 const encPgCaFile = (enc.pgCaFile || 'infra/certs/pg-ca.crt').replace(/^\.?\//, '');
 const PG_CA_TARGET = '/etc/vaks/pg-ca/ca.crt';
 if (encPgVerify && !encPgCaFile.startsWith('infra/certs/')) {
-  warn(`encryption.pgCaFile hors infra/certs/ (${encPgCaFile}) : deploy-ssh.sh ne copie que infra/certs/ vers les hôtes — placer la CA dans infra/certs/.`);
+  warn(`encryption.pgCaFile is outside infra/certs/ (${encPgCaFile}): deploy-ssh.sh only copies infra/certs/ to the hosts — put the CA under infra/certs/.`);
 }
 
 // ---------- multi-DC (zones) ----------
@@ -155,7 +155,7 @@ if (multiZone && !selectedZone) {
   if (!checkOnly) {
     mkdirSync(outDir, { recursive: true });
     writeFileSync(join(outDir, 'multidc.md'), multidcRunbook(m, allZones, primaryZone));
-    console.log(`✓ multi-DC : ${allZones.length} zone(s) → ${outDir}/<zone>/ + multidc.md`);
+    console.log(`✓ multi-DC: ${allZones.length} zone(s) → ${outDir}/<zone>/ + multidc.md`);
   }
   process.exit(0);
 }
@@ -194,7 +194,7 @@ const hostsWith = (r) => m.hosts.filter((h) => role(h, r));
 const hostByName = (n) => m.hosts.find((h) => h.name === n);
 
 // ---------- validation ----------
-if (!['single', 'ha'].includes(m.mode)) err(`mode invalide: ${m.mode} (single|ha)`);
+if (!['single', 'ha'].includes(m.mode)) err(`invalid mode: ${m.mode} (single|ha)`);
 if (!m.hosts.length) err('aucun host défini');
 
 const names = new Set();
@@ -212,28 +212,28 @@ if (m.mode === 'single') {
   const etcd = hostsWith('etcd');
   const app = hostsWith('app');
   if (cp.length < 2) err(`mode ha: control plane non-HA — il faut >=2 hosts avec le rôle "cp" (actuel: ${cp.length})`);
-  for (const h of cp) if (!role(h, 'manager')) err(`host cp ${h.name} doit aussi être "manager" (Traefik en ports host)`);
+  for (const h of cp) if (!role(h, 'manager')) err(`cp host ${h.name} must also be a "manager" (Traefik binds host ports)`);
   if (etcd.length < 3 || etcd.length % 2 === 0) warn(`etcd: ${etcd.length} membre(s) — recommandé impair >=3 (quorum)`);
   if (!app.length) err('mode ha: aucun host avec le rôle "app" (services data)');
-  if (!m.infraPlacement.redis) warn('infraPlacement.redis non spécifié : redis sans contrainte → Swarm le replace/auto-répare sur un nœud sain au crash (volume vide au déplacement, état soft → OK ; jobs en file perdus)');
-  else if (!hostByName(m.infraPlacement.redis)) err(`infraPlacement.redis = "${m.infraPlacement.redis}" : host inconnu`);
-  else warn('redis épinglé : au crash de son hôte il reste down jusqu\'au retour (le volume — donc la file BullMQ — est préservé). Omettre infraPlacement.redis pour l\'auto-heal Swarm.');
-  if (!garageHosts.length) err('infraPlacement.garage manquant');
-  for (const n of garageHosts) if (!hostByName(n)) err(`infraPlacement.garage : host inconnu "${n}"`);
+  if (!m.infraPlacement.redis) warn('infraPlacement.redis not set: redis is unconstrained → Swarm reschedules it on a healthy node on crash (empty volume after the move, soft state → OK; queued jobs are lost)');
+  else if (!hostByName(m.infraPlacement.redis)) err(`infraPlacement.redis = "${m.infraPlacement.redis}": unknown host`);
+  else warn('redis is pinned: on its host crash it stays down until the host returns (the volume — hence the BullMQ queue — is preserved). Omit infraPlacement.redis for Swarm auto-heal.');
+  if (!garageHosts.length) err('infraPlacement.garage is missing');
+  for (const n of garageHosts) if (!hostByName(n)) err(`infraPlacement.garage: unknown host "${n}"`);
   if (garageHosts.length === 1) warn('garage sur 1 seul host : SPOF (pas de HA du S3). Mettre une liste de >=2 hosts pour répliquer.');
-  if (!m.controlPlane.vip && cp.length >= 2) warn('controlPlane.vip absent : prévoir un DNS round-robin sur les hosts cp pour une entrée unique');
+  if (!m.controlPlane.vip && cp.length >= 2) warn('controlPlane.vip is absent: set up DNS round-robin over the cp hosts for a single entry point');
 }
 
 const slugs = new Set();
 for (const t of m.tenants) {
-  if (!/^[a-z0-9-]+$/.test(t.slug || '')) err(`slug tenant invalide: ${t.slug}`);
+  if (!/^[a-z0-9-]+$/.test(t.slug || '')) err(`invalid tenant slug: ${t.slug}`);
   if (slugs.has(t.slug)) err(`slug tenant dupliqué: ${t.slug}`);
   slugs.add(t.slug);
-  if (!['pooled', 'dedicated'].includes(t.profile || 'pooled')) err(`tenant ${t.slug}: profile invalide (pooled|dedicated)`);
+  if (!['pooled', 'dedicated'].includes(t.profile || 'pooled')) err(`tenant ${t.slug}: invalid profile (pooled|dedicated)`);
   if (Array.isArray(t.placement)) {
     for (const hn of t.placement) {
       const h = hostByName(hn);
-      if (!h) err(`tenant ${t.slug}: placement host inconnu "${hn}"`);
+      if (!h) err(`tenant ${t.slug}: unknown placement host "${hn}"`);
       else if (m.mode === 'ha' && !role(h, 'app')) err(`tenant ${t.slug}: host "${hn}" n'a pas le rôle "app"`);
     }
   }
@@ -244,11 +244,11 @@ if (m.deploymentMode === 'pooled' && !m.baseDomain) warn('deploymentMode pooled 
 for (const w of warnings) console.error(`⚠  ${w}`);
 if (errors.length) {
   for (const e of errors) console.error(`✖  ${e}`);
-  console.error(`\n${errors.length} erreur(s) — rien généré.`);
+  console.error(`\n${errors.length} error(s) — nothing generated.`);
   process.exit(1);
 }
 if (checkOnly) {
-  console.log(`✓ manifeste valide (${m.mode}, ${m.hosts.length} host(s), ${m.tenants.length} tenant(s))${warnings.length ? `, ${warnings.length} avertissement(s)` : ''}`);
+  console.log(`✓ manifest valid (${m.mode}, ${m.hosts.length} host(s), ${m.tenants.length} tenant(s))${warnings.length ? `, ${warnings.length} warning(s)` : ''}`);
   process.exit(0);
 }
 
@@ -1262,5 +1262,5 @@ if (m.mode === 'single') {
   out('bootstrap/00-common.sh', common, true);
 }
 
-console.log(`✓ généré dans ${outDir}/ : docker-stack.gen.yml, traefik-dynamic.gen.yml, garage.gen.toml, labels.sh, secrets.md, deploy-ssh.sh${garageMulti ? ', garage-cluster.md' : ''}, ${m.hosts.length} host-*.sh`);
-if (warnings.length) console.log(`  (${warnings.length} avertissement(s) ci-dessus)`);
+console.log(`✓ generated in ${outDir}/: docker-stack.gen.yml, traefik-dynamic.gen.yml, garage.gen.toml, labels.sh, secrets.md, deploy-ssh.sh${garageMulti ? ', garage-cluster.md' : ''}, ${m.hosts.length} host-*.sh`);
+if (warnings.length) console.log(`  (${warnings.length} warning(s) above)`);
