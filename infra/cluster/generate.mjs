@@ -107,6 +107,25 @@ const enc = m.encryption || {};
 const encDiskLuks = enc.diskLuks !== false;
 const encPgVerify = enc.pgVerify === true;
 const encPgMode = enc.pgTlsMode === 'verify-full' ? 'verify-full' : 'verify-ca';
+
+// ---------- ACME / Let's Encrypt (TLS public trusted) ----------
+// tls.acme: { email, staging?, domains?: [...] }. Si présent, Traefik émet un
+// vrai certificat via Let's Encrypt (challenge TLS-ALPN-01 sur le port 443) ;
+// le self-signed reste le fallback (defaultCertificate). Domaines = ceux fournis
+// sinon dérivés des domaines de tenants. ⚠️ le stockage acme.json est mono-writer
+// → Traefik est épinglé à UN seul nœud cp quand ACME est actif (cf. bloc traefik).
+const acme = (m.tls && m.tls.acme) || null;
+const acmeStaging = acme ? acme.staging === true : false;
+const acmeDomains = acme
+  ? (Array.isArray(acme.domains) && acme.domains.length
+      ? acme.domains
+      : (m.tenants || []).map((t) => t.domain).filter(Boolean))
+  : [];
+// Nœud qui porte Traefik quand ACME est actif (stockage acme.json épinglé) :
+// le 1er cp en HA, l'unique hôte en single.
+const traefikNode = (m.hosts || []).find((h) => (h.roles || []).includes('cp')) || (m.hosts || [])[0];
+if (acme && !acme.email) err("tls.acme.email requis (email de contact Let's Encrypt).");
+if (acme && !acmeDomains.length) warn('tls.acme sans domaine : Traefik émettra un cert à la demande par Host (risque de rate-limit). Renseigner tls.acme.domains ou déclarer des tenants.');
 const encPgCaFile = (enc.pgCaFile || 'infra/certs/pg-ca.crt').replace(/^\.?\//, '');
 const PG_CA_TARGET = '/etc/vaks/pg-ca/ca.crt';
 if (encPgVerify && !encPgCaFile.startsWith('infra/certs/')) {
@@ -471,6 +490,17 @@ if (garageMulti) {
     '      - --accesslog.fields.headers.defaultmode=drop',
     '      - --accesslog.fields.headers.names.User-Agent=keep',
     '      - --accesslog.fields.headers.names.X-Forwarded-For=keep',
+    // ACME / Let's Encrypt : émission d'un vrai cert (challenge TLS-ALPN-01 sur
+    // :443). Le defaultCertificate self-signed reste le fallback. domains[i].main
+    // = domaines demandés d'avance (évite un appel ACME par Host inconnu).
+    ...(acme ? [
+      `      - --certificatesresolvers.le.acme.email=${acme.email}`,
+      '      - --certificatesresolvers.le.acme.storage=/acme/acme.json',
+      '      - --certificatesresolvers.le.acme.tlschallenge=true',
+      ...(acmeStaging ? ['      - --certificatesresolvers.le.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory'] : []),
+      '      - --entrypoints.websecure.http.tls.certresolver=le',
+      ...acmeDomains.map((d, i) => `      - --entrypoints.websecure.http.tls.domains[${i}].main=${d}`),
+    ] : []),
   ].join('\n');
   const cfgs = [
     '    configs:',
@@ -483,10 +513,17 @@ if (garageMulti) {
     '        mode: 0400',
   ].join('\n');
   const ports = ['    ports:', '      - target: 80\n        published: 80\n        mode: host', '      - target: 443\n        published: 443\n        mode: host'].join('\n');
-  const tdeploy = ha
-    ? ['    deploy:', '      mode: global', '      placement:', `        constraints: [${cpConstraint}]`].join('\n')
-    : deployBlock({ replicas: 1, constraint: null, spread: false, startFirst: false });
-  services.push(['  traefik:', '    image: traefik:v3.4', cmd, cfgs, ports, '    networks: [vakspm]', tdeploy].join('\n'));
+  // Stockage ACME persistant (acme.json) : bind mount sur le nœud épinglé.
+  const tvols = acme ? "    volumes:\n      - '/srv/vaks/acme:/acme'" : null;
+  // ACME = stockage acme.json mono-writer → Traefik épinglé à UN nœud (hostname),
+  // pas `mode: global`, sinon 2 réplicas se battent sur acme.json (double émission,
+  // rate-limit Let's Encrypt). Sans ACME : global sur les cp (HA) ou 1 (single).
+  const tdeploy = acme
+    ? ['    deploy:', '      replicas: 1', '      placement:', `        constraints: [node.hostname == ${traefikNode.name}]`].join('\n')
+    : ha
+      ? ['    deploy:', '      mode: global', '      placement:', `        constraints: [${cpConstraint}]`].join('\n')
+      : deployBlock({ replicas: 1, constraint: null, spread: false, startFirst: false });
+  services.push(['  traefik:', '    image: traefik:v3.4', cmd, cfgs, ...(tvols ? [tvols] : []), ports, '    networks: [vakspm]', tdeploy].join('\n'));
 }
 // postgres (single uniquement)
 if (!ha) {
@@ -954,7 +991,10 @@ SCP "\$NODE_IP" "\$HERE/docker-stack.gen.yml" "\$REMOTE/docker-stack.gen.yml"
 SCP "\$NODE_IP" "\$HERE/traefik-dynamic.gen.yml" "\$REMOTE/infra/traefik-dynamic.gen.yml"
 SCP "\$NODE_IP" "\$HERE/garage.gen.toml" "\$REMOTE/infra/garage.gen.toml"
 SCP "\$NODE_IP" "\$ROOT/infra/certs" "\$REMOTE/infra/certs"
-SUDO "\$NODE_IP" "cd \$REMOTE && docker stack deploy -c docker-stack.gen.yml vaks-pm"
+# Garage bind-monte /srv/vaks/garage ; en single il n'y a pas de LUKS pour le
+# créer → le garantir sinon Garage refuse de démarrer (bind source manquante).
+SUDO "\$NODE_IP" "mkdir -p /srv/vaks/garage"
+${acme ? 'SUDO "\\$NODE_IP" "mkdir -p /srv/vaks/acme"\n' : ''}SUDO "\$NODE_IP" "cd \$REMOTE && docker stack deploy -c docker-stack.gen.yml vaks-pm"
 
 echo "=== 6) Init Garage (single-node) ==="
 SUDO "\$NODE_IP" "for i in \\\$(seq 1 40); do docker ps -q -f name=vaks-pm_garage | grep -q . && break; sleep 5; done"
@@ -1032,9 +1072,15 @@ fi
 chmod 600 "\$CERT_TMP/server.key"
 
 echo "=== 1) Tier DB (etcd+patroni+haproxy) sur les hosts 'db' ==="
+# Pass A — distribution sur tous les db-hosts + (si LUKS) pré-passe Tang.
+# Le bind LUKS (18-luks) pinne les serveurs Tang des PAIRS : ils doivent TOUS être
+# up AVANT la moindre liaison, sinon le 1er hôte échoue (pairs pas encore
+# provisionnés car les hôtes sont bootstrappés en série). Tang est indépendant
+# (certs/etcd non requis) donc on peut le monter en amont, puis host-\$name.sh le
+# re-lance idempotemment.
 while IFS='|' read -r name ip isdb ismgr; do
   [ "\$isdb" = "1" ] || continue
-  echo "--- \$name (\$ip) ---"
+  echo "--- distribute \$name (\$ip) ---"
   SSH "\$ip" "mkdir -p \$REMOTE"
   SCP "\$ip" "\$ROOT/infra/bootstrap" "\$REMOTE/"
   SCP "\$ip" "\$ROOT/infra/patroni.yml" "\$REMOTE/bootstrap/patroni.yml"
@@ -1043,6 +1089,11 @@ while IFS='|' read -r name ip isdb ismgr; do
   SCP "\$ip" "\$CERT_TMP/server.crt" "\$REMOTE/bootstrap/certs/server.crt"
   SCP "\$ip" "\$CERT_TMP/server.key" "\$REMOTE/bootstrap/certs/server.key"
   SCP "\$ip" "\$HERE/host-\$name.sh" "\$REMOTE/host-\$name.sh"
+${encDiskLuks ? '  SUDO "$ip" "cd $REMOTE/bootstrap && bash 15-tang.sh"  # Tang up AVANT tout bind LUKS des pairs\n' : ''}done <<< "\$HOSTS_DATA"
+# Pass B — bootstrap complet : 15-tang idempotent, 18-luks trouve tous les Tang pairs up.
+while IFS='|' read -r name ip isdb ismgr; do
+  [ "\$isdb" = "1" ] || continue
+  echo "--- bootstrap \$name (\$ip) ---"
   SUDO "\$ip" "cd \$REMOTE && REPL_USER='\${PATRONI_REPLICATION_USER:-replicator}' REPL_PASSWORD='\${PATRONI_REPLICATION_PASSWORD:?}' SUPERUSER_PASSWORD='\${PATRONI_SUPERUSER_PASSWORD:?}' bash host-\$name.sh"
 done <<< "\$HOSTS_DATA"
 rm -rf "\$CERT_TMP"
@@ -1113,8 +1164,12 @@ SSH "\$MANAGER_IP" "mkdir -p \$REMOTE/infra && rm -rf \$REMOTE/infra/certs"
 SCP "\$MANAGER_IP" "\$HERE/docker-stack.gen.yml" "\$REMOTE/docker-stack.gen.yml"
 SCP "\$MANAGER_IP" "\$HERE/traefik-dynamic.gen.yml" "\$REMOTE/infra/traefik-dynamic.gen.yml"
 SCP "\$MANAGER_IP" "\$HERE/garage.gen.toml" "\$REMOTE/infra/garage.gen.toml"
-SCP "\$MANAGER_IP" "\$ROOT/infra/certs" "\$REMOTE/infra/certs"
-SUDO "\$MANAGER_IP" "cd \$REMOTE && docker stack deploy -c docker-stack.gen.yml vaks-pm"
+${garageMulti ? 'SCP "$MANAGER_IP" "$ROOT/infra/garage-reconnect.sh" "$REMOTE/infra/garage-reconnect.sh"\n' : ''}SCP "\$MANAGER_IP" "\$ROOT/infra/certs" "\$REMOTE/infra/certs"
+# Garage bind-monte /srv/vaks/garage : le garantir sur chaque garage-host. Ce
+# dossier est créé par le mount LUKS quand diskLuks=on ; s'il est off, rien ne le
+# crée → Garage refuse de démarrer. mkdir -p = no-op si le volume LUKS y est monté.
+for gip in ${garageHosts.map((hn) => hostByName(hn).ip).join(' ')}; do SUDO "\$gip" "mkdir -p /srv/vaks/garage"; done
+${acme ? `SUDO "${traefikNode.ip}" "mkdir -p /srv/vaks/acme"  # stockage ACME persistant (acme.json)\n` : ''}SUDO "\$MANAGER_IP" "cd \$REMOTE && docker stack deploy -c docker-stack.gen.yml vaks-pm"
 
 echo "=== 6) Init Garage (cluster S3) ==="
 GARAGE_IPS="${garageHosts.map((n) => { const h = m.hosts.find((x) => x.name === n); return h ? h.ip : ''; }).filter(Boolean).join(' ')}"

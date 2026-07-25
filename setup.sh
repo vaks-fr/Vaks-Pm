@@ -48,6 +48,8 @@ echo "=== Vaks-PM — setup ==="
 MODE="$(ask 'Mode (single|ha)' 'ha')"
 IMGSRC="$(ask 'Images (ghcr|build) — ghcr = tirer les images publiques pré-buildées, build = compiler depuis les sources sur les hôtes (air-gapped)' 'ghcr')"
 [ "$IMGSRC" = "build" ] || IMGSRC="ghcr"
+LE_EMAIL="$(ask 'Email Let'\''s Encrypt pour un cert TLS reconnu sur le(s) domaine(s) tenant (vide = self-signed)' '')"
+TLS_JSON=""; [ -n "$LE_EMAIL" ] && TLS_JSON="\"tls\": { \"acme\": { \"email\": \"$LE_EMAIL\" } },"
 
 if [ "$MODE" = "single" ]; then
   IP="$(ask 'IP/hostname de la machine' "${VM_HOST1:-}")"
@@ -61,6 +63,7 @@ if [ "$MODE" = "single" ]; then
   "dbName": "$DBN",
   "deploymentMode": "$DM",
   "imageSource": "$IMGSRC",
+  $TLS_JSON
   "sshKey": "\${SSH_KEY}",
   "hosts": [ { "name": "node1", "ip": "$IP", "sshUser": "\${VM_USER}", "roles": ["manager","db","etcd","cp","app"] } ],
   "tenants": []
@@ -168,6 +171,7 @@ cat > infra/cluster.json <<JSON
   "dbName": "$DBN",
   "deploymentMode": "pooled",
   "imageSource": "$IMGSRC",
+  $TLS_JSON
   $ENC_JSON,
   "sshKey": "\${SSH_KEY}",
   "hosts": [$HOSTS_JSON
