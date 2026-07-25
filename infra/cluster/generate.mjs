@@ -847,7 +847,7 @@ function hostScript(h) {
       '# mais Docker Engine est requis pour faire tourner le Swarm single-node.',
       '# 00-common.sh installe Docker (idempotent), copié dans out/bootstrap/ par le générateur.',
       'bash 00-common.sh',
-      'echo "[single] Docker installé. Suite : bash out/deploy-ssh.sh depuis le poste de pilotage (ou secrets + stack deploy à la main, cf. doc)."',
+      'echo "[single] Docker installed. Next: bash out/deploy-ssh.sh from the control workstation (or secrets + stack deploy by hand, see the doc)."',
     );
     return L.join('\n');
   }
@@ -895,23 +895,23 @@ const provisionLines = m.tenants
 // Étapes conditionnelles primary/standby — consts au MÊME niveau que deployOrch
 // (échappement bash d'origine, pas de double-niveau de template literal).
 const bootstrapStep = isPrimaryZone
-  ? `echo "=== bootstrap rôle + base — Patroni élit un leader QUELCONQUE ; on tente sur chaque nœud db (les replicas s'auto-ignorent via pg_is_in_recovery) ==="
+  ? `echo "=== bootstrap role + database — Patroni elects SOME leader; we try on each db node (replicas skip themselves via pg_is_in_recovery) ==="
 while IFS='|' read -r bname bip bisdb bismgr; do
   [ "\$bisdb" = "1" ] || continue
   SUDO "\$bip" "cd \$REMOTE/bootstrap && POSTGRES_USER='\${POSTGRES_USER:?}' POSTGRES_PASSWORD='\${POSTGRES_PASSWORD:?}' POSTGRES_DB='\${POSTGRES_DB:?}' bash 25-bootstrap-db.sh"
 done <<< "\$HOSTS_DATA"`
-  : `echo "=== zone STANDBY (${selectedZone}) : pas de bootstrap-db — Patroni clone la primary (${standbyPrimaryHost}) en async ==="`;
+  : `echo "=== STANDBY zone (${selectedZone}): no bootstrap-db — Patroni clones the primary (${standbyPrimaryHost}) asynchronously ==="`;
 
 const provisionStep = isPrimaryZone
-  ? `echo "=== 7) Provision des tenants ==="
+  ? `echo "=== 7) Provision tenants ==="
 provision_tenant(){
   # \${2:-} : le seed est optionnel — sans ça, set -u tue le script sur un tenant sans seed.
   local SEED="\${2:-}" SEED_ARG=""; [ -n "\$SEED" ] && SEED_ARG="--seed \$SEED";
-  echo "  -> tenant \$1 \${SEED:+(seed: \$SEED)} (lance provision-tenant.js dans un container api)";
+  echo "  -> tenant \$1 \${SEED:+(seed: \$SEED)} (runs provision-tenant.js in an api container)";
   SUDO "\$MANAGER_IP" "CID=\\\$(docker ps -q -f name=vaks-pm_api | head -1); [ -n \\\"\\\$CID\\\" ] && docker exec \\\$CID sh -c 'export DATABASE_URL=\\\$(cat /run/secrets/database_url) && cd /app/api && node prisma/provision-tenant.js \$1 \$SEED_ARG' || echo 'api pas encore prêt — relancer'";
 }
-${provisionLines || 'echo "  (aucun tenant déclaré)"'}`
-  : `echo "=== 6) zone STANDBY : pas de provisioning — les tenants arrivent par réplication depuis la primary ==="`;
+${provisionLines || 'echo "  (no tenant declared)"'}`
+  : `echo "=== 6) STANDBY zone: no provisioning — tenants arrive by replication from the primary ==="`;
 
 const singleHost = m.hosts[0];
 const deployOrch = m.mode === 'single'
@@ -928,7 +928,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 mkdir -p "$HERE/logs"
 VAKS_DEPLOY_LOG="$HERE/logs/deploy-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$VAKS_DEPLOY_LOG") 2>&1
-echo "# log du déploiement → $VAKS_DEPLOY_LOG"
+echo "# deployment log → $VAKS_DEPLOY_LOG"
 set -a; . "$ROOT/.env.local"; set +a
 : "\${VM_USER:?}"; : "\${SSH_KEY:?}"; : "\${VM_PASS:=}"
 case "\$SSH_KEY" in /*) ;; *) SSH_KEY="\$ROOT/\$SSH_KEY";; esac  # relative key = from repo root, so the script runs from any CWD
@@ -941,7 +941,7 @@ REMOTE="/home/\${VM_USER}/vakspm-cluster"
 NODE_IP="${singleHost.ip}"
 MANAGER_IP="\$NODE_IP"   # alias : les étapes partagées (provisioning) parlent au même nœud
 
-echo "=== 1) Docker Engine sur ${singleHost.name} (\$NODE_IP) ==="
+echo "=== 1) Docker Engine on ${singleHost.name} (\$NODE_IP) ==="
 SSH "\$NODE_IP" "mkdir -p \$REMOTE"
 SCP "\$NODE_IP" "\$ROOT/infra/bootstrap" "\$REMOTE/"
 SCP "\$NODE_IP" "\$HERE/host-${singleHost.name}.sh" "\$REMOTE/host-${singleHost.name}.sh"
@@ -950,7 +950,7 @@ SUDO "\$NODE_IP" "cd \$REMOTE && bash host-${singleHost.name}.sh"
 echo "=== 2) Swarm single-node ==="
 SUDO "\$NODE_IP" "docker swarm init --advertise-addr \$NODE_IP 2>/dev/null || true"
 
-echo "=== 3) Secrets (générés ; Postgres + S3 persistés côté pilotage) ==="
+echo "=== 3) Secrets (generated; Postgres + S3 persisted on the control machine) ==="
 mk_secret(){ SUDO "\$NODE_IP" "docker secret inspect \$1 >/dev/null 2>&1 || printf '%s' '\$2' | docker secret create \$1 -"; }
 # Postgres conteneurisé : mot de passe choisi 1× puis persisté (idempotent au re-run ;
 # .pg-creds est gitignoré). La MÊME valeur doit vivre dans postgres_password ET database_url.
@@ -974,18 +974,18 @@ mk_secret garage_rpc_secret "\$(openssl rand -hex 32)"
 mk_secret garage_admin_token "\$(openssl rand -hex 32)"
 mk_secret s3_secret_key "\$S3_SECRET"
 echo "  S3 access key (stack + Garage) : \$S3_ACCESS"
-echo "  mot de passe Postgres → .pg-creds (à conserver : psql, sauvegardes, restauration)"
+echo "  Postgres password → .pg-creds (keep it: psql, backups, restore)"
 
 if ${imageSource === 'build' ? 'true' : 'false'}; then
-echo "=== 4) Images : build sur le nœud ==="
+echo "=== 4) Images: build on the node ==="
 SSH "\$NODE_IP" "mkdir -p \$REMOTE/src"
 for d in package.json package-lock.json tsconfig.base.json packages api web worker; do
   [ -e "\$ROOT/\$d" ] && SCP "\$NODE_IP" "\$ROOT/\$d" "\$REMOTE/src/" || true
 done
 SUDO "\$NODE_IP" "cd \$REMOTE/src && for s in api web worker; do docker build -t vaks-pm/\\\$s:latest -f \\\$s/Dockerfile . ; done"
 else
-echo "=== 4) Images : pull ${imagePrefix}-{api,web,worker}:${imageTag} au déploiement (docker stack deploy) ==="
-echo "  (registre privé/miroir : faire 'docker login' + déployer avec --with-registry-auth)"
+echo "=== 4) Images : pull ${imagePrefix}-{api,web,worker}:${imageTag} at deploy time (docker stack deploy) ==="
+echo "  (private/mirror registry: run 'docker login' + deploy with --with-registry-auth)"
 fi
 
 echo "=== 5) Stack deploy ==="
@@ -1003,7 +1003,7 @@ SCP "\$NODE_IP" "\$ROOT/infra/certs" "\$REMOTE/infra/certs"
 SUDO "\$NODE_IP" "mkdir -p /srv/vaks/garage"
 ${acme ? 'SUDO "\\$NODE_IP" "mkdir -p /srv/vaks/acme"\n' : ''}SUDO "\$NODE_IP" "cd \$REMOTE && docker stack deploy -c docker-stack.gen.yml vaks-pm"
 
-echo "=== 6) Init Garage (single-node) ==="
+echo "=== 6) Init Garage (single node) ==="
 SUDO "\$NODE_IP" "for i in \\\$(seq 1 40); do docker ps -q -f name=vaks-pm_garage | grep -q . && break; sleep 5; done"
 GG="C=\\\$(docker ps -q -f name=vaks-pm_garage | head -1); docker exec \\\$C /garage"
 GID="\$(SUDO "\$NODE_IP" "C=\\\$(docker ps -q -f name=vaks-pm_garage | head -1); docker exec \\\$C /garage node id 2>/dev/null | grep -m1 -oE '^[0-9a-f]{64}'")"
@@ -1013,16 +1013,34 @@ SUDO "\$NODE_IP" "\$GG layout apply --version 1" || true
 SUDO "\$NODE_IP" "\$GG key import --yes -n vakspm-app \$S3_ACCESS \$S3_SECRET" || true
 SUDO "\$NODE_IP" "\$GG key allow --create-bucket \$S3_ACCESS" || true
 SUDO "\$NODE_IP" "docker service update --force vaks-pm_api" || true
-echo "  Garage initialisé ; l'API recrée ses buckets au redémarrage."
+echo "  Garage initialized; the API recreates its buckets on restart."
 
 # Postgres conteneurisé démarre AVEC la stack : l'api peut redémarrer quelques fois
 # le temps que la base soit prête (prisma db push au boot). On attend sa présence.
 SUDO "\$NODE_IP" "for i in \\\$(seq 1 40); do docker ps -q -f name=vaks-pm_api | grep -q . && break; sleep 5; done"
 
 ${provisionStep}
-${m.deploymentMode === 'dedicated' && !m.tenants.length ? `echo "  deploymentMode=dedicated sans tenant : amorcer la première organisation via infra/org-bootstrap.json + prisma/bootstrap-org.js (cf. doc deploy-swarm, section hôte unique)."\n` : ''}
-echo "=== Terminé. Vérifier: docker stack ps vaks-pm (sur ${singleHost.name}) ==="
-echo "# log complet de ce déploiement → $VAKS_DEPLOY_LOG"
+${m.deploymentMode === 'dedicated' && !m.tenants.length ? `echo "  deploymentMode=dedicated with no tenant: bootstrap the first organization via infra/org-bootstrap.json + prisma/bootstrap-org.js (see the deploy-swarm doc, single-host section)."\n` : ''}
+echo ""
+echo "======================================================================"
+echo "  SAVE THESE CREDENTIALS — they are shown only once"
+echo "======================================================================"
+echo "  PostgreSQL user     : vakspm"
+echo "  PostgreSQL password : \$PGPASS"
+echo "  S3 access key       : \$S3_ACCESS"
+echo "  S3 secret key       : \$S3_SECRET"
+echo ""
+echo "  Also persisted (git-ignored) on THIS control machine:"
+echo "    \$ROOT/.pg-creds   — Postgres password (needed for psql, backups, restore)"
+echo "    \$ROOT/.s3-creds   — S3 keys"
+echo "  -> Back up both files somewhere safe, off this machine."
+echo "  -> The org admin password was printed above under 'Provision' (if a tenant"
+echo "     was created) — note it now; a change is forced at first login."
+echo "  -> JWT / MFA / token secrets live inside Swarm (encrypted); nothing to save."
+echo "======================================================================"
+echo ""
+echo "=== Done. Check: docker stack ps vaks-pm (on ${singleHost.name}) ==="
+echo "# full log of this deployment → $VAKS_DEPLOY_LOG"
 `
   : `#!/usr/bin/env bash
 # GÉNÉRÉ — orchestrateur SSH (mode ha, ${m.hosts.length} hosts). Piloté depuis ta machine.
@@ -1038,7 +1056,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 mkdir -p "$HERE/logs"
 VAKS_DEPLOY_LOG="$HERE/logs/deploy-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$VAKS_DEPLOY_LOG") 2>&1
-echo "# log du déploiement → $VAKS_DEPLOY_LOG"
+echo "# deployment log → $VAKS_DEPLOY_LOG"
 set -a; . "$ROOT/.env.local"; set +a
 : "\${SSH_KEY:?}"; : "\${VM_PASS:=}"
 case "\$SSH_KEY" in /*) ;; *) SSH_KEY="\$ROOT/\$SSH_KEY";; esac  # relative key = from repo root, so the script runs from any CWD
@@ -1058,19 +1076,19 @@ LEADER_IP="${leaderDb.ip}"
 # Données: name|ip|isDb|isManager
 HOSTS_DATA="${hostRows}"
 
-echo "=== 0) TLS interne (DORA) : cert self-signed PARTAGÉ (généré 1×, distribué) ==="
+echo "=== 0) Internal TLS (DORA): SHARED self-signed cert (generated once, distributed) ==="
 # Le cert/clé doivent être identiques sur tous les nœuds (mTLS pair etcd auto-ancré).
 # Généré sur le leader db (openssl natif Debian), réutilisé s'il existe déjà
 # (idempotent), distribué dans bootstrap/certs/ de chaque host (12-certs.sh l'installe).
 CERT_TMP="\$(mktemp -d)"
 if SUDO "\$LEADER_IP" "test -f /etc/vaks/server.crt && test -f /etc/vaks/server.key"; then
-  echo "  cert déjà présent sur le leader (\$LEADER_IP) — réutilisation"
+  echo "  cert already present on the leader (\$LEADER_IP) — reusing"
   SUDO "\$LEADER_IP" "cat /etc/vaks/server.crt" > "\$CERT_TMP/server.crt"
   SUDO "\$LEADER_IP" "cat /etc/vaks/server.key" > "\$CERT_TMP/server.key"
 else
   SAN="IP:127.0.0.1,DNS:localhost"
   while IFS='|' read -r cn cip cisdb cismgr; do [ "\$cisdb" = "1" ] && SAN="IP:\$cip,\$SAN"; done <<< "\$HOSTS_DATA"
-  echo "  génération sur le leader \$LEADER_IP (SAN=\$SAN)"
+  echo "  generating on the leader \$LEADER_IP (SAN=\$SAN)"
   SUDO "\$LEADER_IP" "openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout /tmp/vaks-srv.key -out /tmp/vaks-srv.crt -subj '/CN=vaks-internal' -addext 'subjectAltName=\$SAN' -addext 'keyUsage=critical,digitalSignature,keyEncipherment' -addext 'extendedKeyUsage=serverAuth,clientAuth'"
   SUDO "\$LEADER_IP" "cat /tmp/vaks-srv.crt" > "\$CERT_TMP/server.crt"
   SUDO "\$LEADER_IP" "cat /tmp/vaks-srv.key" > "\$CERT_TMP/server.key"
@@ -1079,7 +1097,7 @@ fi
 [ -s "\$CERT_TMP/server.crt" ] && [ -s "\$CERT_TMP/server.key" ] || { echo "FATAL: cert interne génération/pull échoué" >&2; exit 1; }
 chmod 600 "\$CERT_TMP/server.key"
 
-echo "=== 1) Tier DB (etcd+patroni+haproxy) sur les hosts 'db' ==="
+echo "=== 1) Database tier (etcd+patroni+haproxy) on the 'db' hosts ==="
 # Pass A — distribution sur tous les db-hosts + (si LUKS) pré-passe Tang.
 # Le bind LUKS (18-luks) pinne les serveurs Tang des PAIRS : ils doivent TOUS être
 # up AVANT la moindre liaison, sinon le 1er hôte échoue (pairs pas encore
@@ -1108,7 +1126,7 @@ rm -rf "\$CERT_TMP"
 
 ${bootstrapStep}
 
-echo "=== 2) Swarm : init manager + join ==="
+echo "=== 2) Swarm: init manager + join ==="
 SUDO "\$MANAGER_IP" "docker swarm init --advertise-addr \$MANAGER_IP 2>/dev/null || true"
 TOKEN_W="\$(SUDO "\$MANAGER_IP" "docker swarm join-token -q worker" | tr -d '\\r\\n')"
 TOKEN_M="\$(SUDO "\$MANAGER_IP" "docker swarm join-token -q manager" | tr -d '\\r\\n')"
@@ -1122,7 +1140,7 @@ echo "=== node labels ==="
 SCP "\$MANAGER_IP" "\$HERE/labels.sh" "\$REMOTE/labels.sh"
 SUDO "\$MANAGER_IP" "cd \$REMOTE && bash labels.sh"
 
-echo "=== 3) Secrets (tous : core depuis .env.local + générés) ==="
+echo "=== 3) Secrets (all: core from .env.local + generated) ==="
 mk_secret(){ SUDO "\$MANAGER_IP" "docker secret inspect \$1 >/dev/null 2>&1 || printf '%s' '\$2' | docker secret create \$1 -"; }
 # Paire S3 au format Garage (access GK+24hex, secret 64hex), persistée localement
 # (idempotente au re-run ; .s3-creds est gitignoré).
@@ -1144,7 +1162,7 @@ mk_secret s3_secret_key "\$S3_SECRET"
 echo "  S3 access key (stack + Garage) : \$S3_ACCESS"
 
 if ${imageSource === 'build' ? 'true' : 'false'}; then
-echo "=== 4) Images : build sur le manager + distribution aux autres nœuds ==="
+echo "=== 4) Images: build on the manager + distribute to the other nodes ==="
 SSH "\$MANAGER_IP" "mkdir -p \$REMOTE/src"
 for d in package.json package-lock.json tsconfig.base.json packages api web worker; do
   [ -e "\$ROOT/\$d" ] && SCP "\$MANAGER_IP" "\$ROOT/\$d" "\$REMOTE/src/" || true
@@ -1159,8 +1177,8 @@ while IFS='|' read -r name ip isdb ismgr; do
 done <<< "\$HOSTS_DATA"
 rm -f "\$TARTMP"
 else
-echo "=== 4) Images : pull ${imagePrefix}-{api,web,worker}:${imageTag} au déploiement (chaque nœud tire du registre) ==="
-echo "  (registre privé/miroir : 'docker login' sur chaque nœud + déployer avec --with-registry-auth)"
+echo "=== 4) Images : pull ${imagePrefix}-{api,web,worker}:${imageTag} at deploy time (each node pulls from the registry) ==="
+echo "  (private/mirror registry: 'docker login' on each node + deploy with --with-registry-auth)"
 fi
 
 echo "=== 5) Stack deploy ==="
@@ -1179,7 +1197,7 @@ ${garageMulti ? 'SCP "$MANAGER_IP" "$ROOT/infra/garage-reconnect.sh" "$REMOTE/in
 for gip in ${garageHosts.map((hn) => hostByName(hn).ip).join(' ')}; do SUDO "\$gip" "mkdir -p /srv/vaks/garage"; done
 ${acme ? `SUDO "${traefikNode.ip}" "mkdir -p /srv/vaks/acme"  # stockage ACME persistant (acme.json)\n` : ''}SUDO "\$MANAGER_IP" "cd \$REMOTE && docker stack deploy -c docker-stack.gen.yml vaks-pm"
 
-echo "=== 6) Init Garage (cluster S3) ==="
+echo "=== 6) Init Garage (S3 cluster) ==="
 GARAGE_IPS="${garageHosts.map((n) => { const h = m.hosts.find((x) => x.name === n); return h ? h.ip : ''; }).filter(Boolean).join(' ')}"
 for gip in \$GARAGE_IPS; do SUDO "\$gip" "for i in \\\$(seq 1 40); do docker ps -q -f name=vaks-pm_garage | grep -q . && break; sleep 5; done"; done
 GNODES=""
@@ -1196,12 +1214,27 @@ SUDO "\$MANAGER_IP" "\$GG layout apply --version 1" || true
 SUDO "\$MANAGER_IP" "\$GG key import --yes -n vakspm-app \$S3_ACCESS \$S3_SECRET" || true
 SUDO "\$MANAGER_IP" "\$GG key allow --create-bucket \$S3_ACCESS" || true
 SUDO "\$MANAGER_IP" "docker service update --force vaks-pm_api" || true
-echo "  Garage initialisé ; l'API recrée ses buckets au redémarrage."
+echo "  Garage initialized; the API recreates its buckets on restart."
 
 ${provisionStep}
 
-echo "=== Terminé. Vérifier: docker stack ps vaks-pm ==="
-echo "# log complet de ce déploiement → $VAKS_DEPLOY_LOG"
+echo ""
+echo "======================================================================"
+echo "  SAVE THESE CREDENTIALS — they are shown only once"
+echo "======================================================================"
+echo "  S3 access key : \$S3_ACCESS"
+echo "  S3 secret key : \$S3_SECRET"
+echo "     (persisted git-ignored in \$ROOT/.s3-creds — back it up off this machine)"
+echo ""
+echo "  -> The DB / JWT secrets you set in .env.local are the source of truth — keep"
+echo "     .env.local safe (changing them breaks the DB connection or every session)."
+echo "  -> The org admin password was printed above under 'Provision' (if a tenant"
+echo "     was created) — note it now; a change is forced at first login."
+echo "  -> MFA / garage / other secrets live inside Swarm (encrypted); nothing to save."
+echo "======================================================================"
+echo ""
+echo "=== Done. Check: docker stack ps vaks-pm ==="
+echo "# full log of this deployment → $VAKS_DEPLOY_LOG"
 `;
 
 // ---------- multidc runbook (dispatcher) ----------
