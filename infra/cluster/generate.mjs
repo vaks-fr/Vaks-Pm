@@ -515,11 +515,14 @@ if (garageMulti) {
   const ports = ['    ports:', '      - target: 80\n        published: 80\n        mode: host', '      - target: 443\n        published: 443\n        mode: host'].join('\n');
   // Stockage ACME persistant (acme.json) : bind mount sur le nœud épinglé.
   const tvols = acme ? "    volumes:\n      - '/srv/vaks/acme:/acme'" : null;
-  // ACME = stockage acme.json mono-writer → Traefik épinglé à UN nœud (hostname),
-  // pas `mode: global`, sinon 2 réplicas se battent sur acme.json (double émission,
-  // rate-limit Let's Encrypt). Sans ACME : global sur les cp (HA) ou 1 (single).
+  // ACME = acme.json single-writer store → in HA pin Traefik to ONE cp node
+  // (else 2 replicas race on acme.json → double issuance / Let's Encrypt rate-limit).
+  // In single mode there is only one node, so DON'T add a node.hostname constraint
+  // (the placeholder name would never match the real uname -n → nothing schedules).
   const tdeploy = acme
-    ? ['    deploy:', '      replicas: 1', '      placement:', `        constraints: [node.hostname == ${traefikNode.name}]`].join('\n')
+    ? (ha
+        ? ['    deploy:', '      replicas: 1', '      placement:', `        constraints: [node.hostname == ${traefikNode.name}]`].join('\n')
+        : deployBlock({ replicas: 1, constraint: null, spread: false, startFirst: false }))
     : ha
       ? ['    deploy:', '      mode: global', '      placement:', `        constraints: [${cpConstraint}]`].join('\n')
       : deployBlock({ replicas: 1, constraint: null, spread: false, startFirst: false });

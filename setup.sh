@@ -42,7 +42,18 @@ if [ -n "$MANIFEST" ]; then
 fi
 
 # --- Wizard ---
-ask() { local p="$1" d="${2:-}" v; read -r -p "$p${d:+ [$d]}: " v; echo "${v:-$d}"; }
+# Reads an answer and sanitizes it: strips CR (Windows paste) and leading/trailing
+# whitespace, so a copy-pasted value with a stray space/newline can't slip into a
+# hostname, IP or domain and break the deploy later.
+ask() {
+  local p="$1" d="${2:-}" v
+  read -r -p "$p${d:+ [$d]}: " v
+  v="${v:-$d}"
+  v="${v//$'\r'/}"                       # drop carriage returns
+  v="${v#"${v%%[![:space:]]*}"}"         # trim leading whitespace
+  v="${v%"${v##*[![:space:]]}"}"         # trim trailing whitespace
+  echo "$v"
+}
 
 echo "=== Vaks-PM — setup ==="
 MODE="$(ask 'Mode (single|ha)' 'ha')"
