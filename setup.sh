@@ -82,7 +82,7 @@ check_env "$MODE"
 
 if [ "$MODE" = "single" ]; then
   IP="$(ask 'IP/hostname of the machine' "${VM_HOST1:-}")"
-  BASE="$(ask 'Root domain (<slug>.<domain>), blank if none' '')"
+  BASE="$(ask 'Base domain ONLY (e.g. example.com — orgs are served at <slug>.<basedomain>, NOT the full host); blank for an IP/LAN test' '')"
   DBN="$(ask 'Database name' 'vakspm')"
   DM="$(ask 'deploymentMode (pooled|dedicated)' 'pooled')"
   cat > infra/cluster.json <<JSON
@@ -108,7 +108,7 @@ fi
 
 # --- HA ---
 N="$(ask 'Number of hosts' '3')"
-BASE="$(ask 'Root domain (<slug>.<domain>)' 'vaks-pm.com')"
+BASE="$(ask 'Base domain ONLY (e.g. example.com — orgs are served at <slug>.<basedomain>, NOT the full host)' 'vaks-pm.com')"
 DBN="$(ask 'Database name' 'vakspm')"
 echo ""
 echo "Tip: press Enter at any prompt to keep the value shown in [brackets]."
