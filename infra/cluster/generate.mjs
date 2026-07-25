@@ -697,12 +697,15 @@ ${celluleServices ? celluleServices + '\n' : ''}    api:
 tls:
   stores:
     default:
-      defaultCertificate:
+${acme && acmeDomains.length ? `      defaultGeneratedCert:
+        resolver: le
+        domain:
+          main: ${acmeDomains[0]}${acmeDomains.length > 1 ? '\n          sans:\n' + acmeDomains.slice(1).map((d) => '            - ' + d).join('\n') : ''}` : `      defaultCertificate:
         certFile: /certs/wildcard.crt
         keyFile: /certs/wildcard.key
   certificates:
     - certFile: /certs/wildcard.crt
-      keyFile: /certs/wildcard.key
+      keyFile: /certs/wildcard.key`}
 `;
 
 // ----- labels.sh -----
