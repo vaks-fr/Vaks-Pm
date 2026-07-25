@@ -1,0 +1,14 @@
+[Unit]
+Description=Vaks PM — Tier 2 base backup physique (pg_basebackup) + purge WAL
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=postgres
+Environment=VAKS_BACKUP_ENV=/etc/vaks-backup.env
+# Base complète puis purge du WAL orphelin (ExecStartPost ne s'exécute que si la base a réussi).
+ExecStart=/opt/vaks-backup/vaks-backup-base.sh
+ExecStartPost=/opt/vaks-backup/vaks-wal-cleanup.sh
+Nice=10
+IOSchedulingClass=idle

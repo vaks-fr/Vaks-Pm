@@ -1,0 +1,11 @@
+[Unit]
+Description=Vaks PM — Tier 1 sauvegarde logique quotidienne
+
+[Timer]
+# Tous les jours à 02:00 (heure locale de l'hôte), rattrapage si la machine était éteinte.
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

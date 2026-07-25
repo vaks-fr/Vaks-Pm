@@ -1,0 +1,15 @@
+{
+  "id": "backend",
+  "label": "Backend",
+  "color": "#8b5cf6",
+  "skills": [
+    { "name": "Node.js", "description": "Runtime JavaScript serveur, événementiel et non bloquant." },
+    { "name": "NestJS", "description": "Framework Node.js structuré (TypeScript, DI) pour API d'entreprise." },
+    { "name": "Spring Boot", "description": "Framework Java de référence pour microservices et API REST." },
+    { "name": ".NET Core", "description": "Plateforme cross-platform Microsoft pour services et API." },
+    { "name": "Django", "description": "Framework web Python « batteries included » (ORM, admin, auth)." },
+    { "name": "Laravel", "description": "Framework PHP élégant pour applications web modernes." },
+    { "name": "FastAPI", "description": "Framework Python asynchrone et performant pour API typées." },
+    { "name": "GraphQL", "description": "Langage de requête d'API offrant au client des données à la demande." }
+  ]
+}

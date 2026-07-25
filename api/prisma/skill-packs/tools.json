@@ -1,0 +1,14 @@
+{
+  "id": "tools",
+  "label": "Outils & Collaboration",
+  "color": "#0ea5e9",
+  "skills": [
+    { "name": "Git", "description": "Gestion de versions décentralisée." },
+    { "name": "Jira", "description": "Suivi de tickets et gestion de projet agile (Atlassian)." },
+    { "name": "Confluence", "description": "Base de connaissances et documentation collaborative." },
+    { "name": "ServiceNow", "description": "Plateforme ITSM de gestion des services et du support." },
+    { "name": "Figma", "description": "Outil de design d'interface et de prototypage collaboratif." },
+    { "name": "Postman", "description": "Conception, test et documentation d'API." },
+    { "name": "SonarQube", "description": "Analyse de qualité et de sécurité du code." }
+  ]
+}

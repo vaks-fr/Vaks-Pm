@@ -1,0 +1,15 @@
+{
+  "id": "databases",
+  "label": "Bases de données",
+  "color": "#ef4444",
+  "skills": [
+    { "name": "PostgreSQL", "description": "SGBD relationnel open source avancé." },
+    { "name": "MySQL", "description": "SGBD relationnel open source très répandu." },
+    { "name": "MongoDB", "description": "Base de données NoSQL orientée documents." },
+    { "name": "Redis", "description": "Store clé-valeur en mémoire (cache, pub/sub, queues)." },
+    { "name": "Oracle Database", "description": "SGBD relationnel d'entreprise leader du marché." },
+    { "name": "SQL Server", "description": "SGBD relationnel Microsoft." },
+    { "name": "Elasticsearch", "description": "Moteur de recherche et d'analyse distribué." },
+    { "name": "SQL avancé", "description": "Requêtage complexe, optimisation, indexation, fenêtrage." }
+  ]
+}

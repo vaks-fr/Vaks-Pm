@@ -1,0 +1,7 @@
+/* Tailwind 4 : import unique (remplace @tailwind base/components/utilities). */
+@import "tailwindcss";
+
+/* Sources scannées pour les classes (équivaut à l'ancien `content`). Chemins
+   relatifs à ce fichier CSS (web/src/). */
+@source "../index.html";
+@source "./**/*.{ts,tsx}";

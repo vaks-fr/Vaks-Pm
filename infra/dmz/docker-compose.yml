@@ -1,0 +1,82 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Déploiement DMZ « vrai isolement » du serveur MCP Vaks-PM.
+#
+# Ce stack tourne sur un hôte de DMZ qui NE rejoint PAS l'overlay Swarm interne.
+# Il n'expose qu'UNE chose à Internet (Traefik :443) et ne traverse la frontière
+# que par UN flux sortant : DMZ → API interne :443 (sur un set de paths borné).
+#
+# Pièces :
+#   - traefik : terminaison TLS publique + routage par path
+#       · /mcp, /.well-known/oauth-protected-resource   → conteneur mcp (local)
+#       · surface d'auth (oauth, login, consent, assets) → FORWARD API interne
+#   - mcp     : serveur MCP « pauvre » (zéro secret, zéro DB/Redis). Relaie le
+#               bearer du client IA vers l'API interne et applique RIEN lui-même.
+#
+# Posture sécurité : la box DMZ ne détient aucun secret ; l'API interne valide
+# tout (PKCE, consentement, gating licence, RBAC, rate-limit). Le firewall ne
+# doit autoriser QUE : Internet → DMZ:443  et  DMZ → INTERNAL_EDGE:443.
+#
+# Démarrage :  cp .env.example .env  &&  (éditer)  &&  docker compose up -d
+# Pré-requis :  image vaks-pm/mcp:latest disponible sur cet hôte (cf. README).
+# ──────────────────────────────────────────────────────────────────────────────
+
+networks:
+  dmz:
+    driver: bridge
+
+services:
+  traefik:
+    image: traefik:v3.4
+    restart: unless-stopped
+    command:
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      # Tout le HTTP bascule en HTTPS.
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      # Logs JSON, en-têtes droppés (jamais d'Authorization/cookie journalisé).
+      - --log.format=json
+      - --accesslog=true
+      - --accesslog.format=json
+      - --accesslog.fields.headers.defaultmode=drop
+      - --accesslog.fields.headers.names.User-Agent=keep
+      - --accesslog.fields.headers.names.X-Forwarded-For=keep
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro
+      # Cert wildcard public *.mcp.vaks-pm.com (sert l'entrypoint websecure).
+      - ./certs:/certs:ro
+    networks: [dmz]
+    depends_on: [mcp]
+
+  mcp:
+    image: vaks-pm/mcp:latest
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      # Edge interne joignable depuis la DMZ (cf. .env). Le serveur MCP y relaie
+      # les appels de tools (me/mcp-context + lectures/écritures), avec le Host
+      # tenant reconstitué — l'API résout l'org depuis ce Host.
+      VAKS_API_URL: ${INTERNAL_EDGE_URL}
+      VAKS_API_PREFIX: api/v1
+      # Layout host : <slug>.mcp.<base> → label `mcp` en INFIXE (un seul wildcard
+      # *.mcp.<base> couvre tous les tenants). Le label est retiré pour
+      # reconstituer le Host tenant <slug>.<base> passé à l'API.
+      VAKS_MCP_LABEL: mcp
+      # AS annoncé aux clients IA = CE serveur MCP (la box DMZ forwarde l'auth
+      # vers l'API interne). NE PAS mettre `tenant` ici (exposerait le domaine
+      # interne, qui n'est pas joignable d'Internet dans ce scénario).
+      VAKS_AUTH_SERVER_MODE: self
+      # Si l'edge interne présente un cert NON publiquement reconnu (wildcard
+      # self-signed on-prem), monter sa CA et la déclarer ici pour que le client
+      # Node valide la chaîne. Avec un cert LE/public, supprimer ces 2 lignes.
+      NODE_EXTRA_CA_CERTS: /certs/internal-ca.crt
+    volumes:
+      - ./certs:/certs:ro
+    networks: [dmz]
+    # Pas de ports publiés : seul Traefik est exposé. Le conteneur n'est joint
+    # que par Traefik via le DNS du réseau `dmz` (http://mcp:8080).

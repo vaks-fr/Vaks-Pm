@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "baseUrl": ".",
+    "incremental": true,
+    "paths": {
+      "@db": ["src/generated/prisma/client"],
+      "@db/*": ["src/generated/prisma/*"]
+    }
+  },
+  "include": ["src/**/*"],
+  // Les specs vitest ne font pas partie du build (découverte propre à vitest).
+  "exclude": ["src/**/__tests__/**", "src/**/*.spec.ts"]
+}

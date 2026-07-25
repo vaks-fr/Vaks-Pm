@@ -1,0 +1,148 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Conf dynamique Traefik — box DMZ (serveur MCP en vrai isolement).
+#
+# Deux familles de routes :
+#   1. MCP local  → conteneur `mcp` (http://mcp:8080) sur le réseau `dmz`.
+#   2. Surface d'auth → FORWARD vers l'API interne (service `internal`), Host
+#      public PRÉSERVÉ (passHostHeader défaut) pour que l'API :
+#        · résolve le bon tenant depuis le Host (<slug>.mcp.<base> → slug),
+#        · génère ses URLs OAuth sur le host public (issuer cohérent, RFC 8414).
+#      Traefik pose X-Forwarded-Proto=https automatiquement (entrypoint TLS).
+#
+# ⚠️  ALLOW-LIST stricte : seules les routes ci-dessous traversent vers l'interne.
+#     Tout le reste de l'app (SPA hors login, /admin/*, /internal/*, /ops/*) reste
+#     INJOIGNABLE via la DMZ. Si ta build web sert ses assets sous d'autres chemins
+#     que /assets, ajoute-les ici (et seulement eux).
+#
+#     Trois familles traversent :
+#       · MCP (local) — pour l'IA qui consomme les tools.
+#       · Surface d'auth — login/consentement + OAuth + échange de fédération
+#         (/api/v1/auth/oauth/token) + refresh headless (/api/v1/agents/token,
+#         couvert par le préfixe /api/v1/agents ci-dessous).
+#       · Surface REST @PublicApi — pour qu'un AGENT fédéré (Copilot Studio,
+#         Foundry, K8s…) fasse SON TRAVAIL en REST à travers la DMZ, sans jamais
+#         exposer l'API interne. L'allow-list `public-api` = les segments
+#         top-level de la surface @PublicApi (source de vérité : la spec publique
+#         /api/v1/openapi.json). L'enforcement PAR ROUTE reste 100% applicatif
+#         (public-gate + capabilities de l'agent + FinanceApiGate) ; ce relais ne
+#         fait qu'une coupe réseau grossière (jamais admin/internal/ops).
+#     ⚠️  RESYNC : si un nouveau controller `@PublicApi` introduit un segment
+#         top-level absent de `public-api`, l'ajouter. Vérif : comparer les clés
+#         de `/api/v1/openapi.json` à la règle ci-dessous avant tout déploiement DMZ.
+# ──────────────────────────────────────────────────────────────────────────────
+http:
+  middlewares:
+    security-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        frameDeny: true
+        contentTypeNosniff: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+
+  routers:
+    # ── 1. MCP (servi localement) ────────────────────────────────────────────
+    # POST /mcp + les métadonnées RFC 9728 (oauth-protected-resource).
+    mcp:
+      rule: "PathPrefix(`/mcp`) || PathPrefix(`/.well-known/oauth-protected-resource`)"
+      entryPoints: [web, websecure]
+      service: mcp
+      priority: 100
+      middlewares: [security-headers]
+      tls: {}
+
+    # ── 2. Surface d'auth (forward vers l'API interne) ───────────────────────
+    # Discovery de l'Authorization Server (RFC 8414).
+    as-discovery:
+      rule: "PathPrefix(`/.well-known/oauth-authorization-server`)"
+      entryPoints: [web, websecure]
+      service: internal
+      priority: 90
+      middlewares: [security-headers]
+      tls: {}
+    # Endpoints OAuth + auth (authorize / token / register, et login/mfa/refresh).
+    # `/api/v1/auth` couvre les deux familles (cf. oauth.controller : routes sous
+    # /api/v1/auth/oauth/*).
+    auth-api:
+      rule: "PathPrefix(`/api/v1/auth`)"
+      entryPoints: [web, websecure]
+      service: internal
+      priority: 90
+      middlewares: [security-headers]
+      tls: {}
+    # Pages interactives de la SPA (login + écran de consentement) + assets Vite.
+    auth-ui:
+      rule: "PathPrefix(`/login`) || PathPrefix(`/oauth-consent`) || PathPrefix(`/assets`) || Path(`/favicon.ico`)"
+      entryPoints: [web, websecure]
+      service: internal
+      priority: 80
+      middlewares: [security-headers]
+      tls: {}
+
+    # ── 3. Surface REST agent (forward vers l'API interne) ───────────────────
+    # PÉRIMÈTRE AGENT STRICT — le travail d'un agent fédéré en REST, à travers la
+    # DMZ. On ne relaie QUE les contrôleurs top-level dont un agent a besoin.
+    # Couvre au passage /api/v1/agents/token (refresh headless) via /api/v1/agents.
+    #
+    # ⛔ VOLONTAIREMENT NON relayés (surface humaine / sensible) : `finance`,
+    #    `clients`, `users`, `audit-logs`, `reports`, `ticketing`. Un agent ne peut
+    #    de toute façon PAS y toucher (AGENT_FORBIDDEN_PERMISSIONS), donc c'est une
+    #    défense en profondeur : ces contrôleurs ne sont même pas joignables
+    #    d'Internet par ce chemin. NB : ça n'affecte PAS le MCP (chemin 2 : le
+    #    conteneur mcp joint l'API par sa propre sortie vers l'edge interne, pas
+    #    par ce routeur) — un user via tools MCP garde son plein périmètre.
+    #    Le plafond par ROUTE reste applicatif (public-gate + capabilities +
+    #    finance-gate) : quelques sous-routes finance sous /projects/:id/* restent
+    #    joignables réseau mais sont bloquées par ces gardes pour un jeton d'agent.
+    public-api:
+      rule: >-
+        PathPrefix(`/api/v1/tasks`) || PathPrefix(`/api/v1/projects`) ||
+        PathPrefix(`/api/v1/agents`) || PathPrefix(`/api/v1/agent-runs`) ||
+        PathPrefix(`/api/v1/me`) || PathPrefix(`/api/v1/comments`) ||
+        PathPrefix(`/api/v1/attachments`) || PathPrefix(`/api/v1/skills`) ||
+        PathPrefix(`/api/v1/skill-requests`) || PathPrefix(`/api/v1/dependencies`) ||
+        PathPrefix(`/api/v1/allocations`) || PathPrefix(`/api/v1/workload`) ||
+        PathPrefix(`/api/v1/time-entries`) || PathPrefix(`/api/v1/time-offs`) ||
+        PathPrefix(`/api/v1/timesheet`) || PathPrefix(`/api/v1/holidays`) ||
+        PathPrefix(`/api/v1/external-tasks`) || PathPrefix(`/api/v1/teams`)
+      entryPoints: [web, websecure]
+      service: internal
+      priority: 70
+      middlewares: [security-headers]
+      tls: {}
+
+  services:
+    mcp:
+      loadBalancer:
+        servers:
+          - url: "http://mcp:8080"
+    # Edge interne (Traefik on-prem). passHostHeader=true (défaut) → le Host
+    # public <slug>.mcp.<base> est relayé tel quel à l'API interne.
+    internal:
+      loadBalancer:
+        passHostHeader: true
+        serversTransport: internal-tls
+        servers:
+          # ⚠️  À ÉDITER : nom (pas IP, à cause du SNI) de l'edge interne joignable
+          #     depuis la DMZ, résolu en split-horizon vers le Traefik on-prem.
+          - url: "https://internal.vaks-pm.com"
+
+  serversTransports:
+    internal-tls:
+      # Edge interne en cert self-signed on-prem → on saute la vérif sur ce hop
+      # CONTRÔLÉ (la défense est le firewall, pas ce TLS). Avec un cert public
+      # (LE) sur l'edge interne : supprimer `insecureSkipVerify` et fournir
+      # `rootCAs` + `serverName` à la place.
+      insecureSkipVerify: true
+
+# TLS public : wildcard *.mcp.vaks-pm.com (couvre tous les tenants).
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/mcp-wildcard.crt
+        keyFile: /certs/mcp-wildcard.key
+  certificates:
+    - certFile: /certs/mcp-wildcard.crt
+      keyFile: /certs/mcp-wildcard.key

@@ -1,0 +1,42 @@
+# Config statique Traefik (référence). En Swarm, ces options sont aussi
+# passables en flags (voir docker-stack.yml). Provider Swarm + Let's Encrypt
+# possible si les VMs sont joignables publiquement, sinon certs internes.
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+
+providers:
+  swarm:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: vakspm
+
+api:
+  dashboard: true
+
+log:
+  level: INFO
+  format: json
+
+# Access log : une ligne JSON par requête HTTP, émise sur stdout (récupérée par
+# le driver de logs Docker → `docker service logs vaks-pm_traefik`). Les en-têtes
+# sont droppés par défaut pour ne pas journaliser Authorization / cookies ; en
+# Swarm ces options sont passées en flags (voir docker-stack.yml).
+accessLog:
+  format: json
+  fields:
+    headers:
+      defaultMode: drop
+      names:
+        User-Agent: keep
+        X-Forwarded-For: keep
+
+# Pour des certificats internes (on-premise sans Let's Encrypt), fournir
+# les certs via un tls.stores / dynamic config monté en volume.

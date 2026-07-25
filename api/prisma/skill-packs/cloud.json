@@ -1,0 +1,16 @@
+{
+  "id": "cloud",
+  "label": "Cloud",
+  "color": "#f59e0b",
+  "skills": [
+    { "name": "AWS", "description": "Plateforme cloud Amazon : EC2, S3, Lambda, RDS, etc." },
+    { "name": "Microsoft Azure", "description": "Plateforme cloud Microsoft, forte intégration entreprise." },
+    { "name": "Google Cloud Platform", "description": "Plateforme cloud Google : GCE, GKE, BigQuery." },
+    { "name": "Terraform", "description": "Infrastructure as Code multi-cloud (HCL)." },
+    { "name": "Serverless", "description": "Architectures sans serveur (FaaS) : Lambda, Cloud Functions." },
+    { "name": "Azure DevOps", "description": "Suite CI/CD, boards et repos de Microsoft." },
+    { "name": "OpenStack", "description": "Plateforme cloud privé open source (IaaS)." },
+    { "name": "Cloud Migration", "description": "Stratégie et exécution de migration vers le cloud." },
+    { "name": "FinOps", "description": "Optimisation et gouvernance des coûts cloud." }
+  ]
+}

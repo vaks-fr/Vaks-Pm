@@ -1,0 +1,28 @@
+{
+  "_comment": "Copier ce fichier en infra/org-bootstrap.json, remplir les valeurs, puis lancer le bootstrap (voir docs/saas-multitenancy-design.md > Annexe). NE PAS commiter org-bootstrap.json.",
+
+  "organization": {
+    "id": "acme",
+    "name": "Acme Corporation",
+    "slug": "acme",
+    "primaryDomain": null,
+    "timezone": "Europe/Paris"
+  },
+
+  "admin": {
+    "email": "admin@acme.com",
+    "name": "Acme Admin",
+    "password": null
+  },
+
+  "_fields": {
+    "organization.id": "Identifiant stable de l'org (slug-like). Sert de cle. Requis.",
+    "organization.name": "Nom affiche de l'organisation. Requis.",
+    "organization.slug": "Sous-domaine du tenant -> <slug>.vaks-pm.com. [a-z0-9-]. Requis pour le SaaS.",
+    "organization.primaryDomain": "Domaine custom optionnel (ex. pm.acme.com). null si aucun.",
+    "organization.timezone": "Fuseau par defaut de l'org. Defaut: Europe/Paris.",
+    "admin.email": "Email du premier Org Admin. Requis. Ne doit PAS utiliser le domaine de la demo (@vaks-demo.local).",
+    "admin.name": "Nom affiche de l'admin. Defaut: Org Admin.",
+    "admin.password": "Mot de passe initial. null = genere aleatoirement, affiche une seule fois, changement force au 1er login."
+  }
+}

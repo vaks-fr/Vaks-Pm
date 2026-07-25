@@ -1,0 +1,3 @@
+# SPA fallback (Netlify / hôtes statiques) : toute route non-fichier sert index.html.
+# La démo statique est 100% front (aucun backend), le routage vit côté client.
+/*    /index.html   200

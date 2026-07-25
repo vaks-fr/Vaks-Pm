@@ -1,0 +1,57 @@
+# Template Patroni — un fichier par nœud.
+# Les __PLACEHOLDERS__ sont remplis par infra/bootstrap/20-patroni.sh
+# à partir de .env.local et du rôle du nœud (host1/2/3).
+scope: vakspm-cluster
+namespace: /db/
+name: __NODE_NAME__              # ex. host1
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: __NODE_IP__:8008
+
+etcd3:
+__ETCD_TLS__
+  hosts:
+__ETCD_HOSTS__
+
+bootstrap:
+  dcs:
+__STANDBY_CLUSTER__
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+__PG_SSL__
+        max_connections: 200
+        shared_buffers: 1GB
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  pg_hba:
+    - host replication __REPL_USER__ 0.0.0.0/0 scram-sha-256
+    - host all all 0.0.0.0/0 scram-sha-256
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: __NODE_IP__:5432
+  data_dir: /var/lib/postgresql/17/main
+  bin_dir: /usr/lib/postgresql/17/bin
+  authentication:
+    superuser:
+      username: postgres
+      password: __SUPERUSER_PASSWORD__
+    replication:
+      username: __REPL_USER__
+      password: __REPL_PASSWORD__
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false

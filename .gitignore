@@ -1,0 +1,61 @@
+# ============================================================
+# Secrets & credentials — never commit
+# ============================================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+keys/
+infra/certs/
+web/certs/
+# Filled deployment manifests (contain IPs / users / admin creds) — never commit.
+# Only the *.example.* templates are versioned.
+infra/cluster.json
+infra/single.env
+infra/org-bootstrap.json
+out/
+.s3-creds
+.pg-creds
+
+# ============================================================
+# Node / React / Vite / NestJS
+# ============================================================
+node_modules/
+dist/
+dist-ssr/
+build/
+*.tsbuildinfo
+.cache/
+.vite/
+coverage/
+
+# Prisma
+api/prisma/*.db
+# Generated Prisma 7 client (regenerated on every build)
+api/src/generated/
+
+# ============================================================
+# Docker
+# ============================================================
+*.tar
+docker-compose.override.yml
+
+# ============================================================
+# OS / editors / logs
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.log
+logs/
+npm-debug.log*

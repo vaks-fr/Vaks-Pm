@@ -1,0 +1,108 @@
+{{- if eq .Values.tenancy.mode "pooled" }}
+{{- /*
+  Control-plane: same image as api, SERVICE_ROLE=control-plane. Only this
+  service mints tokens (login/refresh/logout/MFA). Pooled mode only — in
+  dedicated (single-tenant) mode the api handles auth itself.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vakspm.fullname" . }}-controlplane
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controlplane
+spec:
+  replicas: {{ .Values.controlplane.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vakspm.selectorLabels" (dict "root" . "component" "controlplane") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "vakspm.selectorLabels" (dict "root" . "component" "controlplane") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "vakspm.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: controlplane
+          image: {{ include "vakspm.image" (dict "root" . "repo" .Values.image.api.repository) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "vakspm.fullname" . }}-config
+            - secretRef:
+                name: {{ include "vakspm.secretName" . }}
+          env:
+            - name: SERVICE_ROLE
+              value: control-plane
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- include "vakspm.cryptoProviderEnv" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.port }}
+          livenessProbe:
+            httpGet: { path: /api/v1/health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /api/v1/health/ready, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.controlplane.resources | nindent 12 }}
+          {{- $cryptoOn := eq (include "vakspm.cryptoKeyringEnabled" .) "true" }}
+          {{- $pgCaOn := eq (include "vakspm.pgCaEnabled" .) "true" }}
+          {{- if or $cryptoOn $pgCaOn }}
+          volumeMounts:
+            {{- if $cryptoOn }}
+            - name: crypto-keyring
+              mountPath: {{ .Values.crypto.keysDir }}
+              readOnly: true
+            {{- end }}
+            {{- if $pgCaOn }}
+            - name: pg-ca
+              mountPath: /etc/vaks/pg-ca
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or $cryptoOn $pgCaOn }}
+      volumes:
+        {{- if $cryptoOn }}
+        - name: crypto-keyring
+          secret:
+            secretName: {{ include "vakspm.cryptoSecretName" . }}
+        {{- end }}
+        {{- if $pgCaOn }}
+        - name: pg-ca
+          secret:
+            secretName: {{ .Values.tls.postgresCaSecret }}
+        {{- end }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vakspm.fullname" . }}-controlplane
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controlplane
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "vakspm.selectorLabels" (dict "root" . "component" "controlplane") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.api.port }}
+      targetPort: http
+{{- end }}

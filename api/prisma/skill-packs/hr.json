@@ -1,0 +1,24 @@
+{
+  "id": "hr",
+  "label": "RH & Recrutement",
+  "color": "#65a30d",
+  "skills": [
+    { "name": "Sourcing candidats", "description": "Recherche et approche directe de profils (chasse)." },
+    { "name": "Recrutement full-cycle", "description": "Pilotage du processus de bout en bout, du brief à l'embauche." },
+    { "name": "Conduite d'entretiens", "description": "Entretiens structurés et évaluation des compétences." },
+    { "name": "Marque employeur", "description": "Attractivité, EVP et stratégie de communication RH." },
+    { "name": "Paie", "description": "Gestion de la paie, bulletins et déclarations sociales." },
+    { "name": "Rémunération & avantages", "description": "Politique de rémunération, grilles et avantages (C&B)." },
+    { "name": "SIRH", "description": "Administration des systèmes d'information RH." },
+    { "name": "Droit du travail", "description": "Cadre légal, contrats et conformité sociale." },
+    { "name": "Onboarding", "description": "Intégration et parcours des nouveaux arrivants." },
+    { "name": "Gestion des talents", "description": "Identification, développement et fidélisation des talents." },
+    { "name": "Formation & développement", "description": "Plan de formation et montée en compétences." },
+    { "name": "GPEC", "description": "Gestion prévisionnelle des emplois et des compétences." },
+    { "name": "Relations sociales", "description": "Dialogue social, CSE et négociations collectives." },
+    { "name": "Diversité & inclusion", "description": "Politiques D&I et égalité des chances." },
+    { "name": "Évaluation de la performance", "description": "Campagnes d'évaluation et entretiens annuels." },
+    { "name": "Gestion de carrière", "description": "Mobilité interne et accompagnement des parcours." },
+    { "name": "Offboarding", "description": "Gestion des départs et des sorties d'effectif." }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "id": "marketing",
+  "label": "Marketing & Communication",
+  "color": "#c026d3",
+  "skills": [
+    { "name": "Stratégie marketing", "description": "Positionnement, segmentation, mix marketing et plan d'action." },
+    { "name": "SEO", "description": "Référencement naturel : technique, sémantique, netlinking." },
+    { "name": "SEA / Google Ads", "description": "Publicité payante sur les moteurs de recherche." },
+    { "name": "Social Media", "description": "Stratégie et gestion des réseaux sociaux." },
+    { "name": "Content marketing", "description": "Stratégie de contenu et ligne éditoriale." },
+    { "name": "Copywriting", "description": "Rédaction persuasive orientée conversion." },
+    { "name": "Email marketing", "description": "Campagnes email, segmentation et délivrabilité." },
+    { "name": "Marketing automation", "description": "Scénarios automatisés et lead nurturing (HubSpot, etc.)." },
+    { "name": "Branding", "description": "Identité de marque, charte et cohérence de l'image." },
+    { "name": "Relations presse", "description": "Communication média, communiqués et relations journalistes." },
+    { "name": "Community management", "description": "Animation de communauté et modération." },
+    { "name": "Google Analytics", "description": "Mesure d'audience, tracking et analyse de la performance web." },
+    { "name": "Publicité display", "description": "Campagnes bannières, retargeting et programmatique." },
+    { "name": "Influence marketing", "description": "Stratégie d'influenceurs et partenariats créateurs." },
+    { "name": "Growth marketing", "description": "Acquisition data-driven et optimisation du funnel." },
+    { "name": "Graphisme / PAO", "description": "Création visuelle et mise en page (suite Adobe)." },
+    { "name": "Event management", "description": "Organisation d'événements et activations de marque." },
+    { "name": "CRM marketing", "description": "Gestion de la relation client et campagnes ciblées." }
+  ]
+}

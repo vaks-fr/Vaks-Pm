@@ -1,0 +1,48 @@
+{
+  "blurb": "Aggiungi i tuoi campi ad attività e progetti. Un campo può essere limitato a determinati progetti.",
+  "newField": "Nuovo campo",
+  "empty": "Nessun campo personalizzato per ora.",
+  "emptyTab": "Nessun campo su questa entità per ora.",
+  "noMatch": "Nessun campo corrisponde alla ricerca.",
+  "searchPlaceholder": "Cerca un campo…",
+  "prev": "Precedente",
+  "next": "Successivo",
+  "pageOf": "Pagina {{page}} / {{pageCount}}",
+  "scopeNProjects": "{{count}} progetto",
+  "scopeNProjects_other": "{{count}} progetti",
+  "scopeSelected": "{{count}} selezionati",
+  "scopeSearchPlaceholder": "Cerca un progetto…",
+  "noProjectMatch": "Nessun progetto corrisponde alla ricerca.",
+  "editTitle": "Modifica campo",
+  "nameRequired": "Il nome è obbligatorio.",
+  "optionsRequired": "Un elenco a discesa richiede almeno un'opzione.",
+  "created": "Campo creato.",
+  "saved": "Campo salvato.",
+  "deleted": "Campo eliminato.",
+  "deleteTitle": "Eliminare questo campo?",
+  "deleteMsg": "Eliminando « {{name}} » lo rimuovi insieme a tutti i suoi valori su ogni attività o progetto.",
+  "typeLocked": "Il tipo non può essere modificato dopo la creazione.",
+  "optionsLabel": "Opzioni (una per riga)",
+  "optionsPlaceholder": "Prod\nStaging\nDev",
+  "scopeLabel": "Limita ai progetti",
+  "scopeHint": "Non selezionare nulla per applicare il campo a tutti i progetti.",
+  "scopeAll": "Tutti i progetti",
+  "col": {
+    "name": "Nome",
+    "type": "Tipo",
+    "entity": "Si applica a",
+    "scope": "Ambito"
+  },
+  "entity": {
+    "task": "Attività",
+    "project": "Progetti"
+  },
+  "type": {
+    "text": "Testo",
+    "number": "Numero",
+    "date": "Data",
+    "select": "Elenco a discesa",
+    "checkbox": "Casella"
+  },
+  "sectionTitle": "Campi personalizzati"
+}

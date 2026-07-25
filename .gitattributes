@@ -1,0 +1,11 @@
+# Shell scripts MUST keep LF line endings, even when cloned/checked out on
+# Windows. Otherwise, when run on Linux, the shebang and `set -o` break
+# ("set: pipefail: invalid option name").
+*.sh   text eol=lf
+*.bash text eol=lf
+# Infra configs consumed as-is on Linux.
+*.toml text eol=lf
+*.cfg  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf

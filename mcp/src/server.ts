@@ -1,0 +1,21 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ApiClient } from './api-client.js';
+import { registerTools } from './tools.js';
+import { registerPrompts } from './prompts.js';
+
+/**
+ * Construit un `McpServer` **frais par requête** (mode stateless). Ses tools
+ * sont liés à un `ApiClient` qui porte le jeton et le tenant de CETTE requête —
+ * donc aucune fuite d'identité d'un utilisateur à l'autre. `allowWrite` (dérivé
+ * du contexte `/me/mcp-context` : scopes d'écriture présents) pilote l'exposition
+ * des tools d'écriture.
+ */
+export function buildServer(api: ApiClient, allowWrite: boolean): McpServer {
+  const server = new McpServer({
+    name: 'vaks-pm',
+    version: '0.1.0',
+  });
+  registerTools(server, api, allowWrite);
+  registerPrompts(server);
+  return server;
+}

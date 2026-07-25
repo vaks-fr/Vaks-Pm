@@ -1,0 +1,235 @@
+/* ============================================================
+   Vaks — Project Management · Design Tokens
+   Clean professional SaaS. Light + Dark. oklch-based.
+   ============================================================ */
+
+:root {
+  /* Type */
+  --font-ui: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+
+  /* Radii */
+  --r-xs: 5px;
+  --r-sm: 7px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-pill: 999px;
+
+  /* Spacing scale (4px base) */
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px;
+  --s5: 20px; --s6: 24px; --s7: 32px; --s8: 40px; --s9: 56px;
+
+  /* Accent — overridable by Tweaks. Default = brand coral (dérivé du logo). */
+  --accent-h: 31;
+  --accent-c: 0.165;
+
+  /* Motion */
+  --ease: cubic-bezier(.22, .9, .28, 1);
+  --dur-1: 110ms;
+  --dur-2: 200ms;
+  --dur-3: 340ms;
+
+  /* Semantic capacity scale (shared, tuned per theme below) */
+
+  /* Legacy token aliases — some components (KanbanView, TaskDetail, AdminPanel,
+     TimelineView, CreateDraftModal…) were authored against an older naming
+     convention. Without these, `var(--surface-1)` / `--bg-1` / `--bg-2` /
+     `--text-1` resolve to nothing → floating popups/menus render with a
+     TRANSPARENT background. Aliased to the real tokens; resolved at use-time on
+     <html> where data-theme lives, so they stay theme-correct. */
+  --surface-1: var(--surface);
+  --bg-1: var(--bg);
+  --bg-2: var(--surface-2);
+  --bg-3: var(--surface-3);
+  --text-1: var(--text);
+
+  /* Semantic role aliases — vocabulaire de la palette de marque (handoff).
+     Coral = marque/actions ; teal = données/info ; amber = at-limit ;
+     danger = retard/surcharge ; good = succès. Résolus au use-time sur
+     <html> (data-theme) donc restent theme-corrects. --info est défini par
+     thème (nouvelle teinte, pas d'alias possible). */
+  --primary:       var(--accent);
+  --primary-hover: var(--accent-hover);
+  --primary-fg:    var(--accent-fg);
+  --primary-soft:  var(--accent-soft);
+  --good:          var(--c-ok);
+  --good-bg:       var(--c-ok-bg);
+  --amber:         var(--c-warn);
+  --amber-bg:      var(--c-warn-bg);
+  --danger:        var(--c-over);
+  --danger-bg:     var(--c-over-bg);
+}
+
+/* ---------------- LIGHT ---------------- */
+:root, [data-theme="light"] {
+  --bg:          oklch(0.984 0.003 265);
+  --bg-subtle:   oklch(0.945 0.005 265);
+  --surface:     oklch(1 0 0);
+  --surface-2:   oklch(0.975 0.004 265);
+  --surface-3:   oklch(0.955 0.005 265);
+  /* Fond des cartes Kanban sans couleur de groupe (gris neutre clair). */
+  --card-neutral-bg: oklch(0.928 0.006 265);
+  --border:      oklch(0.912 0.006 265);
+  --border-2:    oklch(0.86 0.008 265);
+  --shadow-color: 265 30% 20%;
+
+  --text:        oklch(0.24 0.012 265);
+  --text-2:      oklch(0.46 0.012 265);
+  --text-3:      oklch(0.62 0.012 265);
+  --text-faint:  oklch(0.74 0.01 265);
+
+  /* Corail vif en thème clair (0.66, aligné sur le sombre) — choix produit
+     validé. Rend tout le corail vif. Revenir à 0.52 / 0.47 pour l'ancien rendu.
+     ⚠️ contraste texte/blanc sur corail ~3.35 (< seuil AA 4.5), assumé. */
+  --accent:      oklch(0.66 var(--accent-c) var(--accent-h));
+  --accent-hover: oklch(0.72 var(--accent-c) var(--accent-h));
+  --accent-fg:   oklch(0.99 0.005 var(--accent-h));
+  --accent-soft: oklch(0.95 0.045 var(--accent-h));
+  --accent-soft-2: oklch(0.9 0.06 var(--accent-h));
+  --accent-line: oklch(0.8 0.08 var(--accent-h));
+
+  /* Teal = données / info, assombri pour contraste sur fond clair. */
+  --info:      oklch(0.52 0.09 187);
+  --info-soft: color-mix(in oklch, var(--info) 12%, var(--surface));
+
+  /* capacity / status — fonds un peu plus saturés/sombres qu'avant pour ne pas
+     « fondre » sur le blanc en heatmap */
+  --c-free:  oklch(0.62 0.11 235);   /* under-allocated */
+  --c-free-bg: oklch(0.93 0.05 235);
+  --c-ok:    oklch(0.6 0.13 155);    /* balanced */
+  --c-ok-bg: oklch(0.925 0.075 155);
+  --c-warn:  oklch(0.74 0.13 75);    /* near full */
+  --c-warn-bg: oklch(0.93 0.095 80);
+  --c-over:  oklch(0.57 0.19 25);    /* overloaded */
+  --c-over-bg: oklch(0.92 0.085 25);
+
+  /* Jours non ouvrés / fériés — tokens partagés (Gantt, Timesheet, Workload).
+     En clair on tinte franchement (sinon invisible sur le blanc) ; la variante
+     « strong » sert aux en-têtes/pieds posés sur --bg-subtle. */
+  --weekend-bg:        oklch(0.928 0.006 265);
+  --weekend-bg-strong: oklch(0.9 0.008 265);
+  --weekend-stripe:    oklch(0.88 0.008 265);
+  --holiday-bg:        color-mix(in oklch, var(--c-warn) 26%, var(--surface));
+  --holiday-bg-strong: color-mix(in oklch, var(--c-warn) 40%, var(--surface));
+
+  --p-low:   oklch(0.62 0.012 265);
+  --p-normal: oklch(0.6 0.12 235);
+  --p-high:  oklch(0.7 0.15 60);
+  --p-urgent: oklch(0.57 0.2 25);
+
+  --ghost-shadow: 0 12px 30px -8px hsl(var(--shadow-color) / .35), 0 2px 8px hsl(var(--shadow-color) / .2);
+}
+
+/* ---------------- DARK ---------------- */
+[data-theme="dark"] {
+  /* Canvas navy ancré sur le logo #032339 = oklch(0.247 0.056 243).
+     Toute la rampe partage la MÊME teinte (h243) et une chroma soutenue, pour
+     que sidebar (--bg-subtle) et canvas (--bg) lisent comme le même navy et non
+     comme un gris-noir. Luminosité croissante bg→surface pour l'élévation. */
+  --bg:          oklch(0.247 0.055 243);
+  --bg-subtle:   oklch(0.223 0.05 243);
+  --surface:     oklch(0.29 0.052 243);
+  --surface-2:   oklch(0.34 0.05 243);
+  --surface-3:   oklch(0.39 0.048 243);
+  /* Fond des cartes Kanban sans couleur de groupe (surface légèrement élevée). */
+  --card-neutral-bg: oklch(0.32 0.05 243);
+  --border:      oklch(0.44 0.035 243);
+  --border-2:    oklch(0.52 0.035 243);
+  --shadow-color: 243 65% 2%;
+
+  --text:        oklch(0.955 0.004 265);
+  --text-2:      oklch(0.74 0.012 265);
+  --text-3:      oklch(0.6 0.013 265);
+  --text-faint:  oklch(0.5 0.013 265);
+
+  /* Corail plus intense en dark : L abaissé 0.72→0.66 + chroma pleine (plus le
+     *0.9), pour matcher le corail vif du logo (~#e0553c) au lieu d'un pastel. */
+  --accent:      oklch(0.66 var(--accent-c) var(--accent-h));
+  --accent-hover: oklch(0.72 var(--accent-c) var(--accent-h));
+  --accent-fg:   oklch(0.16 0.02 var(--accent-h));
+  /* Voiles corail TRANSLUCIDES (calqués sur la maquette --primary-soft
+     rgba(coral,.15)) : un glaze corail léger sur le navy au lieu d'un maroon
+     opaque terne. Utilisés par le surlignage nav actif ET la carte Budget
+     (--accent-soft), le segment « Committed » de la barre + la sélection
+     (--accent-soft-2). Cohérents et plus clairs. */
+  --accent-soft: color-mix(in oklch, var(--accent) 16%, transparent);
+  /* Corail PROFOND hue-locké (segment « Committed » + sélection). PAS un
+     color-mix coral↔navy : en oklch l'arc de teinte le plus court passe par le
+     magenta → le mélange virait VIOLET. `from var(--accent)` fige la teinte
+     corail et n'ajuste que L/C. */
+  --accent-soft-2: oklch(from var(--accent) 0.52 0.16 h);
+  --accent-line: oklch(0.5 0.1 var(--accent-h));
+
+  /* Teal = données / info (complément froid du corail). Distinct du bleu
+     « libre » de l'échelle capacité, réservé aux accents info/charts/badges. */
+  --info:      oklch(0.72 0.09 183);
+  --info-soft: color-mix(in oklch, var(--info) 18%, transparent);
+
+  --c-free:  oklch(0.7 0.11 235);
+  --c-free-bg: oklch(0.32 0.06 235);
+  --c-ok:    oklch(0.72 0.14 155);
+  --c-ok-bg: oklch(0.32 0.07 155);
+  --c-warn:  oklch(0.8 0.13 80);
+  --c-warn-bg: oklch(0.36 0.08 75);
+  --c-over:  oklch(0.68 0.19 25);
+  --c-over-bg: oklch(0.36 0.1 25);
+
+  /* Jours non ouvrés / fériés — variante sombre, plus discrète (le contraste
+     est déjà naturel sur fond foncé). */
+  --weekend-bg:        color-mix(in oklch, var(--border) 32%, transparent);
+  --weekend-bg-strong: color-mix(in oklch, var(--border) 50%, var(--bg-subtle));
+  --weekend-stripe:    color-mix(in oklch, var(--border) 60%, transparent);
+  --holiday-bg:        color-mix(in oklch, var(--c-warn) 16%, transparent);
+  --holiday-bg-strong: color-mix(in oklch, var(--c-warn) 24%, var(--bg-subtle));
+
+  --p-low:   oklch(0.6 0.013 265);
+  --p-normal: oklch(0.7 0.12 235);
+  --p-high:  oklch(0.78 0.14 65);
+  --p-urgent: oklch(0.68 0.19 25);
+
+  --ghost-shadow: 0 18px 40px -10px hsl(var(--shadow-color) / .7), 0 4px 12px hsl(var(--shadow-color) / .6);
+}
+
+/* ---------------- base ---------------- */
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-size: 14px;
+  line-height: 1.45;
+}
+#root { height: 100%; }
+
+button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+input, textarea { font-family: inherit; }
+::selection { background: var(--accent-soft-2); }
+
+/* scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--border-2) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 999px; border: 3px solid transparent; background-clip: content-box; }
+*::-webkit-scrollbar-thumb:hover { background: var(--text-faint); background-clip: content-box; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* theme transition */
+body, .app, .surface, .col, .card, .sidebar, .topbar {
+  transition: background-color var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease), color var(--dur-2) var(--ease);
+}
+
+.mono { font-family: var(--font-mono); font-feature-settings: "tnum" 1; }
+
+/* focus ring */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-xs); }
+
+/* utility */
+.row { display: flex; align-items: center; }
+.col-flex { display: flex; flex-direction: column; }
+.gap1 { gap: var(--s1); } .gap2 { gap: var(--s2); } .gap3 { gap: var(--s3); } .gap4 { gap: var(--s4); }
+.grow { flex: 1; min-width: 0; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nowrap { white-space: nowrap; }

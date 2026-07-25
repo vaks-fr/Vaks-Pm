@@ -1,0 +1,16 @@
+{
+  "id": "languages",
+  "label": "Langages",
+  "color": "#3b82f6",
+  "skills": [
+    { "name": "JavaScript", "description": "Langage de programmation du web, côté client et serveur." },
+    { "name": "TypeScript", "description": "Sur-ensemble typé de JavaScript pour des bases de code robustes." },
+    { "name": "Python", "description": "Langage polyvalent : scripting, web, data science, automatisation." },
+    { "name": "Java", "description": "Langage objet de référence pour applications d'entreprise et Android." },
+    { "name": "C#", "description": "Langage de l'écosystème .NET pour applications web, desktop et jeux." },
+    { "name": "Go", "description": "Langage compilé de Google, taillé pour les services concurrents et le cloud." },
+    { "name": "PHP", "description": "Langage serveur très répandu pour le web (CMS, frameworks modernes)." },
+    { "name": "Rust", "description": "Langage système sûr en mémoire, sans garbage collector." },
+    { "name": "Kotlin", "description": "Langage JVM moderne, premier choix pour le développement Android." }
+  ]
+}

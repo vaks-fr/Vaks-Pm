@@ -1,0 +1,12 @@
+[Unit]
+Description=Vaks PM — Tier 2 base backup quotidien
+
+[Timer]
+# Tous les jours à 02:30 (après le dump logique éventuel). Cf. doc pour passer
+# en hebdo-full + quotidien-incrémental (Tier 2b).
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

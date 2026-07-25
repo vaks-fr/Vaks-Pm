@@ -1,0 +1,361 @@
+# ============================================================================
+# Vaks-PM Helm chart — values
+# ============================================================================
+# Two deployment shapes are supported:
+#   * tenancy.mode = "dedicated"  -> single-tenant (DEFAULT). One organization
+#     per cluster, one domain, NO control-plane/data-plane split. Simplest to
+#     run; what a customer self-hosting for their own company wants.
+#   * tenancy.mode = "pooled"     -> multi-tenant SaaS. Org resolved from the
+#     request Host (<slug>.<baseDomain>), separate control-plane that mints
+#     tokens. Only enable if YOU are reselling as SaaS.
+# ============================================================================
+
+# Container images. Point `registry`/`repository` at wherever you mirrored the
+# vaks-pm images. The three app images share a tag (the chart appVersion by
+# default; override per-image if needed).
+image:
+  registry: ""            # e.g. "registry.example.com/vaks-pm" ; "" = docker.io style bare repo
+  pullPolicy: IfNotPresent
+  tag: ""                 # "" -> defaults to .Chart.AppVersion
+  api:
+    repository: vaks-pm/api
+  web:
+    repository: vaks-pm/web
+  worker:
+    repository: vaks-pm/worker
+# Names of imagePullSecrets already created in the namespace (for private registries).
+imagePullSecrets: []
+#  - name: regcred
+
+# ---------------------------------------------------------------------------
+# Tenancy
+# ---------------------------------------------------------------------------
+tenancy:
+  mode: dedicated         # dedicated | pooled
+  # Pooled only: root domain used to extract the tenant slug from the Host.
+  baseDomain: ""          # e.g. "vaks-pm.com" -> acme.vaks-pm.com resolves slug "acme"
+
+# Public URL the app is reached at (used for email links / CTAs and CORS).
+# Required. e.g. https://pm.acme-corp.com
+publicBaseUrl: ""
+# CORS allowed origin. Defaults to publicBaseUrl when empty.
+corsOrigin: ""
+
+# ---------------------------------------------------------------------------
+# Application services
+# ---------------------------------------------------------------------------
+api:
+  replicaCount: 2
+  port: 3000
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+  # Schema sync: a Helm hook Job runs `prisma db push` before install/upgrade.
+  # See `migrations` below.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+web:
+  replicaCount: 2
+  port: 80
+  # The web image's nginx upstream host is now configurable via the API_UPSTREAM
+  # env var (set on the web Deployment to the in-cluster api Service). The legacy
+  # workaround below — an alias Service literally named `api` so the old baked-in
+  # `http://api:3000` upstream resolves — is kept as a fallback but disabled by
+  # default. Only re-enable it if you run an older web image without API_UPSTREAM.
+  apiUpstreamAlias:
+    enabled: false
+    name: api
+    port: 3000
+  resources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+worker:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+# Control-plane — ONLY deployed when tenancy.mode == "pooled".
+controlplane:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+# Schema migration (Prisma db push) run as a pre-install/pre-upgrade Helm hook.
+migrations:
+  enabled: true
+  # `prisma db push` may require this when a change would drop data. Safe on a
+  # fresh single-tenant install; review before enabling on a populated DB.
+  acceptDataLoss: true
+  # Run the demo seed after the first schema push (creates the demo org/admin).
+  # Leave false for real customer installs.
+  seedDemo: false
+  backoffLimit: 1
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+# By default the chart creates a Secret from the values below. For production,
+# prefer `existingSecret` (a Secret you manage out-of-band / via a SecretsStore
+# / sealed-secrets) so plaintext never lands in values or Helm release storage.
+secrets:
+  # If set, the chart uses this existing Secret instead of creating one. It must
+  # contain the keys listed in templates/secret.yaml (DATABASE_URL,
+  # JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, MFA_ENCRYPTION_KEY, WORKER_API_TOKEN,
+  # S3_SECRET_KEY, and optionally SMTP_PASSWORD, SSO_OIDC_CLIENT_SECRET).
+  existingSecret: ""
+  # --- values used only when existingSecret is empty ---
+  jwtAccessSecret: ""     # `openssl rand -hex 32`
+  jwtRefreshSecret: ""    # `openssl rand -hex 32`
+  mfaEncryptionKey: ""    # `openssl rand -base64 32`
+  workerApiToken: ""      # `openssl rand -hex 32`
+  smtpPassword: ""        # optional (only for smtp.authMode=password)
+  ssoOidcClientSecret: "" # optional (SSO/OIDC)
+  # Optional PEM private key for audit-log syslog forwarding over mTLS. When set,
+  # it is mounted into the worker at /run/secrets/syslog_client_key.
+  syslogClientKey: ""
+
+# JWT token TTLs (seconds).
+jwt:
+  accessTtl: 900
+  refreshTtl: 2592000
+
+# ---------------------------------------------------------------------------
+# Crypto keyring (DORA envelope encryption — KEK rotation)
+# ---------------------------------------------------------------------------
+# The app wraps per-tenant Data Encryption Keys (DEK) with a Key Encryption Key
+# (KEK). By default the KEK is `MFA_ENCRYPTION_KEY` (registered under the ref
+# `env`) — nothing to do here, that path always works for both encrypt and
+# decrypt. To enable KEK ROTATION you mount a versioned keyring of files named
+# `kek_v<N>` (base64, 32 bytes) and point `activeKek` at the one new writes
+# should use; the master `env` key stays usable to decrypt legacy blobs.
+#
+# Same contract as the Swarm path (`CRYPTO_KEYS_DIR` + `kek_v*` files): the app
+# doesn't care who mounted the files, so this is portable across Swarm/K8s/HSM.
+crypto:
+  keysDir: /etc/vaks/keys     # where the keyring is mounted (CRYPTO_KEYS_DIR)
+  # Ref of the KEK new writes wrap with. "" = auto (highest kek_vN present, else
+  # the `env`/MFA_ENCRYPTION_KEY key). Set e.g. "v2" after staging a kek_v2.
+  activeKek: ""
+  # Inline keyring entries — chart creates a Secret from these. Keys MUST be
+  # named kek_v<N>; values are base64 32-byte keys (`openssl rand -base64 32`).
+  # For production prefer `existingSecret` so key material never lands in values
+  # or Helm release history. Leave empty to use only MFA_ENCRYPTION_KEY (`env`).
+  keks: {}
+  #  kek_v1: "<base64-32-bytes>"
+  #  kek_v2: "<base64-32-bytes>"   # then set activeKek: v2 to rotate
+  # An existing Secret already holding kek_v<N> keys. Takes precedence over
+  # `keks`; recommended prod path (manage/rotate it out-of-band, like a sealed
+  # Secret / ESO / CSI). Mounted read-only into api/worker/controlplane.
+  existingSecret: ""
+
+  # --- External KEK provider (DORA Workstream G — optional) -----------------
+  # Default "local" = the file keyring above (or MFA_ENCRYPTION_KEY). Set to
+  # "kms" or "hsm" to move KEK custody to a cloud KMS or an on-prem HSM. Only the
+  # KEK wrap/unwrap moves off-box; the per-tenant DEK stays local. Migration is
+  # online: deploy with the provider set, then re-wrap via Admin -> Encryption
+  # keys (POST /admin/crypto/rewrap-keks). Mirrors the Swarm CRYPTO_KEY_PROVIDER
+  # / CRYPTO_KMS_* / CRYPTO_HSM_* env. See docs key-custody / local-keyring.
+  # To MIGRATE between providers (e.g. kms -> hsm), fill in BOTH the kms.* and
+  # hsm.* blocks below and set `provider` to the target. Every configured provider
+  # is wired, so the source one stays available to unwrap existing DEKs during the
+  # re-wrap; once every DEK is on the target you can clear the old block.
+  provider: local              # local | kms | hsm  (active provider for new wraps)
+
+  # Cloud KMS (AWS KMS or a compatible endpoint). Used when provider=kms.
+  kms:
+    keyId: ""                  # CRYPTO_KMS_KEY_ID (id/alias/arn) — required for KMS
+    region: ""                 # CRYPTO_KMS_REGION ("" = AWS_REGION / SDK default)
+    endpoint: ""               # CRYPTO_KMS_ENDPOINT ("" = AWS native; e.g. LocalStack)
+    # Static credentials are OPTIONAL — prefer IRSA / workload identity (leave
+    # empty). If you must use static keys, put them in a Secret with keys
+    # `accessKey` and `secretKey`; the chart injects CRYPTO_KMS_ACCESS_KEY /
+    # CRYPTO_KMS_SECRET_KEY via secretKeyRef on api/worker/controlplane.
+    existingSecret: ""         # Secret holding accessKey + secretKey
+
+  # On-prem HSM via the key-broker sidecar (PKCS#11). Used when provider=hsm.
+  # Deploy the sidecar separately (see infra/hsm-broker/k8s.hsm.example.yaml).
+  hsm:
+    brokerUrl: ""              # CRYPTO_HSM_BROKER_URL (e.g. http://hsm-broker:8081)
+    keyLabel: ""               # CRYPTO_HSM_KEY_LABEL (CKA_LABEL of the KEK)
+    # Shared token — MUST equal the sidecar's BROKER_TOKEN. Provide it in a Secret
+    # under key `brokerToken`; the chart injects CRYPTO_HSM_BROKER_TOKEN via
+    # secretKeyRef on api/worker/controlplane.
+    existingSecret: ""         # Secret holding brokerToken
+
+# ---------------------------------------------------------------------------
+# In-transit TLS to backing services (DORA — encryption in transit)
+# ---------------------------------------------------------------------------
+# External edge TLS is handled by the Ingress (see `ingress.tls`). These toggles
+# cover the app's connections to its dependencies.
+tls:
+  # app <-> Postgres over TLS (sets PG_TLS=1). The server cert chain is NOT
+  # verified (self-signed friendly, mirrors the Swarm path; verify-full/PKI is a
+  # later hardening). Enable for a managed/external Postgres that requires SSL.
+  # NOTE: the migration Job (`prisma db push`) does NOT read PG_TLS — if your DB
+  # *mandates* TLS, also append `?sslmode=require` to the DATABASE_URL.
+  postgres: false
+  # Anti-MITM hardening (optional): verify the Postgres server certificate against
+  # a CA instead of trusting it blindly. Provide a Secret holding the CA in PEM
+  # under key `ca.crt`; it is mounted read-only into api/worker/controlplane at
+  # /etc/vaks/pg-ca and pointed to by PG_TLS_CA. Leave empty for encrypt-only.
+  postgresCaSecret: ""              # name of a Secret with a `ca.crt` PEM key
+  postgresVerifyMode: verify-full   # verify-full (chain+hostname) | verify-ca (chain only)
+  # Redis & S3 TLS are expressed in their connection settings, not here:
+  #   * Redis: use a `rediss://` URL in externalRedis.url
+  #   * S3:    set s3.external.useSSL: true (default) and an https endpoint
+
+# ---------------------------------------------------------------------------
+# PostgreSQL
+# ---------------------------------------------------------------------------
+# Customer-supplied DB is the recommended production path. Set
+# postgresql.enabled=false and provide externalDatabase.* (or a DATABASE_URL in
+# your existingSecret).
+postgresql:
+  enabled: true           # deploy a single-node in-cluster Postgres (eval/quickstart)
+  image: postgres:17-alpine
+  auth:
+    username: vakspm
+    password: ""          # generated if empty
+    database: vakspm
+  persistence:
+    enabled: true
+    size: 10Gi
+    # DORA data-at-rest: set this to an ENCRYPTED StorageClass (cloud-KMS or a
+    # CSI driver with encryption) so the DB PVC is encrypted at rest — only this
+    # PVC, never the node. "" = cluster default (encrypt the default SC, or name
+    # an encrypted one here, e.g. gp3-encrypted / csi-encrypted).
+    storageClass: ""      # "" = cluster default
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+externalDatabase:
+  # Used when postgresql.enabled=false AND you don't pass a full DATABASE_URL via
+  # the secret. Either set `url` directly, or the discrete fields below.
+  url: ""                 # postgresql://user:pass@host:5432/db?schema=public
+  host: ""
+  port: 5432
+  username: ""
+  password: ""            # prefer putting this in an existingSecret
+  database: ""
+
+# ---------------------------------------------------------------------------
+# Redis
+# ---------------------------------------------------------------------------
+redis:
+  enabled: true           # deploy a single-node in-cluster Redis
+  image: redis:7-alpine
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+
+externalRedis:
+  # Used when redis.enabled=false.
+  url: ""                 # redis://[:password@]host:6379
+
+# ---------------------------------------------------------------------------
+# Object storage (S3-compatible)
+# ---------------------------------------------------------------------------
+# THREE ways to provide storage:
+#   1. Customer's existing S3 (AWS S3, Ceph RGW, NetApp StorageGRID, Wasabi…):
+#        s3.enabled (bundled MinIO) = false, fill s3.external.*
+#   2. Bundled in-cluster MinIO (eval/quickstart): minio.enabled = true
+#   3. External MinIO/Garage you already run: same as (1)
+s3:
+  # External S3 connection (used when minio.enabled=false).
+  external:
+    # Leave endpoint EMPTY for AWS S3 native (endpoint derived from region).
+    # For MinIO/Ceph/Garage: full URL "https://s3.internal:9000" or host.
+    endpoint: ""
+    port: 443
+    useSSL: true
+    region: us-east-1
+    accessKey: ""
+    secretKey: ""         # prefer an existingSecret
+    # path-style: leave null to auto-pick (true for custom endpoint, false for
+    # AWS native). Force true for MinIO/Ceph if needed.
+    forcePathStyle: null
+    # Global-namespace safety on AWS: prefix every bucket (e.g. "acme-").
+    bucketPrefix: ""
+    # Set false if buckets are pre-created and s3:CreateBucket is NOT granted.
+    createBuckets: true
+
+# Bundled in-cluster MinIO (S3-compatible) for evaluation / air-gapped quickstart.
+minio:
+  enabled: false
+  image: minio/minio:latest
+  rootUser: vakspm
+  rootPassword: ""        # generated if empty
+  bucketPrefix: ""
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# ---------------------------------------------------------------------------
+# Ingress
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: ""           # e.g. "nginx", "traefik"
+  # Single host for dedicated mode. For pooled mode, prefer hosts: with a
+  # wildcard (e.g. "*.vaks-pm.com") plus the apex.
+  host: ""                # e.g. pm.acme-corp.com  (falls back to publicBaseUrl host)
+  annotations: {}
+  #  nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+  tls:
+    enabled: true
+    secretName: ""        # existing TLS secret; or use cert-manager via annotations
+  # Override the generated rules entirely (advanced / pooled wildcard).
+  extraHosts: []
+  #  - host: "*.vaks-pm.com"
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Per-token / per-IP rate limits (see ApiThrottlerGuard). Empty = app defaults.
+rateLimits:
+  ipLimit: ""             # default 600
+  patLimit: ""            # default 300
+  orgLimit: ""            # default 1200
+  windowMs: ""            # default 60000
+
+# Extra env vars injected into api / worker / controlplane.
+extraEnv: []
+#  - name: SOME_FLAG
+#    value: "1"
+
+# Security contexts are intentionally minimal: the app images currently run as
+# root (no USER directive) and the web image's nginx binds :80, so forcing
+# runAsNonRoot / dropping all capabilities would crash pods out of the box.
+# Harden these once the images ship a non-root user.
+podSecurityContext: {}
+#  fsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false

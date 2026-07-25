@@ -1,0 +1,278 @@
+/* ============================================================
+   Vaks — Finances / Cost view styles  (ported from Claude Design)
+   ============================================================ */
+
+.fin-wrap {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--s5) var(--s6) var(--s8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+  max-width: 1220px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* ---- generic card ---- */
+.fin-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+/* Même affordance « carte » que les rapports (.card) — surbrillance au survol. */
+.fin-card:hover, .fin-kpi:hover {
+  border-color: var(--border-2);
+  box-shadow: 0 2px 8px hsl(var(--shadow-color) / .08);
+}
+.fin-kpi { transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease); }
+.fin-card-head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s3);
+  padding: var(--s4) var(--s5);
+  border-bottom: 1px solid var(--border);
+}
+.fin-card-title { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+.fin-card-sub { font-size: 12.5px; color: var(--text-3); margin-top: 2px; }
+.fin-card-sub2 { font-size: 12.5px; color: var(--text-3); }
+.fin-dim { color: var(--text-3); }
+.fin-bill { color: var(--c-ok); }
+.ar { text-align: right; justify-self: end; }
+.ac { text-align: center; justify-self: center; }
+
+/* ============================================================ KPI band */
+.fin-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--s4);
+}
+.fin-kpis.k3 { grid-template-columns: repeat(3, 1fr); }
+.fin-kpis.k5 { grid-template-columns: repeat(5, 1fr); }
+.fin-kpi {
+  container-type: inline-size; /* pour la bascule montant exact ↔ compact (fin-kpi-val) */
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--s4) var(--s5) var(--s5);
+  display: flex; flex-direction: column; gap: 7px;
+  min-width: 0;
+}
+.fin-kpi-budget { background: var(--accent-soft); border-color: var(--accent-line); }
+.fin-kpi-cap {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  font-size: 11.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+  color: var(--text-3);
+}
+.fin-kpi-budget .fin-kpi-cap { color: var(--accent); }
+.fin-kpi-val { font-family: var(--font-mono); font-size: clamp(17px, 13cqi, 27px); font-weight: 700; letter-spacing: -.02em; color: var(--text); line-height: 1.1; white-space: nowrap; }
+/* Montant KPI : exact (euros entiers) par défaut ; bascule en compact « k/M »
+   quand la carte devient trop étroite pour l'afficher en entier (le nombre est
+   un jeton insécable — espaces Intl U+202F/U+00A0 — donc il ne peut pas wrapper). */
+.fin-kpi-val .fin-val-compact { display: none; }
+@container (max-width: 160px) {
+  .fin-kpi-val .fin-val-full { display: none; }
+  .fin-kpi-val .fin-val-compact { display: inline; }
+}
+.fin-kpi-sub { font-size: 12px; color: var(--text-3); line-height: 1.4; }
+.fin-kpi-dim { color: var(--text-faint); }
+.fin-kpi-sub.is-under { color: var(--c-ok); }
+.fin-kpi-sub.is-over { color: var(--c-over); }
+.fin-pill {
+  display: inline-block; padding: 1px 7px; border-radius: var(--r-pill); white-space: nowrap;
+  font-weight: 700; font-size: 11px;
+  background: color-mix(in oklch, currentColor 16%, transparent);
+}
+
+/* budget inline editor */
+.fin-kpi-edit { display: inline-flex; align-items: baseline; gap: 2px; }
+.fin-kpi-cur { font-family: var(--font-mono); font-size: 20px; font-weight: 600; color: var(--accent); }
+.fin-kpi-input {
+  font-family: var(--font-mono); font-size: 27px; font-weight: 700; letter-spacing: -.02em;
+  color: var(--text); background: transparent; border: none; outline: none;
+  width: 100%; padding: 0; border-bottom: 1.5px dashed transparent;
+  transition: border-color var(--dur-1) var(--ease);
+  -moz-appearance: textfield; appearance: textfield;
+}
+.fin-kpi-input:hover { border-bottom-color: var(--accent-line); }
+.fin-kpi-input:focus { border-bottom-color: var(--accent); }
+
+.fin-kpi-bar { height: 5px; border-radius: var(--r-pill); background: var(--surface-3); overflow: hidden; }
+.fin-kpi-bar-fill { height: 100%; background: var(--accent); border-radius: var(--r-pill); transition: width var(--dur-3) var(--ease); }
+
+/* ============================================================ Burn bar */
+.fin-burn-legend { display: flex; gap: var(--s4); flex-wrap: wrap; font-size: 12px; color: var(--text-2); }
+.fin-burn-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.fin-burn-legend .sw { width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; }
+.sw-spent { background: var(--accent); }
+.sw-comm { background: var(--accent-soft-2); }
+.sw-free { background: var(--surface-3); border: 1px solid var(--border-2); }
+
+.fin-burn { padding: var(--s5); }
+.fin-burn-track {
+  position: relative; height: 26px; border-radius: var(--r-sm);
+  background: repeating-linear-gradient(45deg, var(--surface-2), var(--surface-2) 7px, var(--surface-3) 7px, var(--surface-3) 14px);
+  display: flex; overflow: visible;
+}
+.fin-burn-seg { height: 100%; }
+.fin-burn-seg:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+.fin-burn-seg.spent { background: var(--accent); }
+.fin-burn-seg.comm { background: var(--accent-soft-2); }
+.fin-burn-seg.comm.over { background: var(--c-over); }
+.fin-burn-mark { position: absolute; top: -6px; bottom: -6px; width: 2px; background: var(--text); border-radius: 2px; }
+.fin-burn-mark-lbl {
+  position: absolute; top: -19px; left: 50%; transform: translateX(-50%);
+  font-size: 10.5px; font-weight: 700; color: var(--text-2); white-space: nowrap;
+}
+.fin-burn-foot { display: flex; justify-content: space-between; margin-top: 22px; font-size: 12px; color: var(--text-3); }
+.fin-burn-eac b { color: var(--text); }
+
+/* ============================================================ Tables */
+.fin-scroll { overflow-x: auto; }
+.fin-table { min-width: 720px; }
+.fin-tr {
+  display: grid;
+  align-items: center;
+  gap: var(--s3);
+  padding: 9px var(--s5);
+  border-top: 1px solid var(--border);
+}
+.fin-rates .fin-tr { grid-template-columns: 1.7fr 96px 96px 78px 116px 128px; }
+/* Taux agents IA : Agent | € / 1K tokens | kTokens | runs | coût | facturé */
+.fin-agent-rates .fin-tr { grid-template-columns: 1.7fr 118px 90px 70px 112px 128px; }
+.fin-th {
+  border-top: none;
+  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-faint); padding-top: 11px; padding-bottom: 7px;
+}
+.fin-tr .mono { font-size: 13px; }
+.fin-tfoot { background: var(--surface-2); font-weight: 700; font-size: 12.5px; border-radius: 0 0 var(--r-lg) var(--r-lg); white-space: nowrap; }
+.fin-tfoot .mono { font-weight: 700; }
+
+/* member cell */
+.fin-member { display: flex; align-items: center; gap: var(--s3); min-width: 0; }
+.fin-member-name { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 7px; }
+.fin-member-role { font-size: 11.5px; color: var(--text-3); }
+.fin-lead {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--accent); background: var(--accent-soft); padding: 1px 5px; border-radius: var(--r-pill);
+}
+
+/* ---- inline number editor ---- */
+.fin-num {
+  display: inline-flex; align-items: center; gap: 1px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 4px 7px; transition: border-color var(--dur-1) var(--ease);
+}
+.fin-num:focus-within { border-color: var(--accent); background: var(--surface); }
+.fin-num input {
+  border: none; background: none; outline: none; color: var(--text);
+  font-family: var(--font-mono); font-size: 13px; text-align: right; padding: 0;
+  -moz-appearance: textfield; appearance: textfield;
+}
+.fin-num input::-webkit-outer-spin-button, .fin-num input::-webkit-inner-spin-button,
+.fin-kpi-input::-webkit-outer-spin-button, .fin-kpi-input::-webkit-inner-spin-button { -webkit-appearance: none; appearance: none; margin: 0; }
+.fin-num-pre { font-family: var(--font-mono); font-size: 12px; color: var(--text-3); }
+.fin-num-suf { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+
+/* ============================================================ Breakdown */
+.fin-bd { padding: var(--s5); display: flex; flex-direction: column; gap: var(--s4); }
+.fin-bd-bar { height: 16px; border-radius: var(--r-pill); overflow: hidden; display: flex; background: var(--surface-3); }
+.fin-bd-seg { height: 100%; }
+.fin-bd-seg + .fin-bd-seg { box-shadow: -1px 0 0 var(--surface); }
+.fin-bd-legend { display: flex; flex-direction: column; gap: 2px; }
+.fin-bd-row { display: grid; grid-template-columns: 14px 1fr auto auto; align-items: center; gap: var(--s3); padding: 5px 2px; }
+.fin-bd-row + .fin-bd-row { border-top: 1px solid var(--border); }
+.fin-bd-dot { width: 10px; height: 10px; border-radius: 3px; }
+.fin-bd-key { font-size: 13px; font-weight: 600; }
+.fin-bd-pct { font-size: 12px; }
+.fin-bd-amt { font-size: 13px; font-weight: 600; min-width: 64px; text-align: right; }
+
+/* ============================================================ Portfolio finance panel (org-level, by client) */
+.finp-table { display: flex; flex-direction: column; }
+.finp-row {
+  display: grid;
+  grid-template-columns: 1.6fr 64px 120px 120px 120px 130px 72px;
+  align-items: center; gap: var(--s3); padding: 9px var(--s5);
+  border-top: 1px solid var(--border);
+}
+.finp-row.finp-head {
+  border-top: none; font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--text-faint); padding-top: 11px; padding-bottom: 7px;
+}
+.finp-row.finp-tfoot { background: var(--surface-2); font-weight: 700; border-radius: 0 0 var(--r-lg) var(--r-lg); }
+.finp-client { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; background: none; border: none; text-align: left; color: var(--text); width: 100%; }
+.finp-client-name { font-weight: 600; font-size: 13.5px; min-width: 0; }
+.finp-client-co { font-size: 11.5px; color: var(--text-3); }
+.finp-chev { color: var(--text-faint); transition: transform var(--dur-1) var(--ease); flex-shrink: 0; }
+.finp-chev.open { transform: rotate(90deg); }
+.finp-mpct { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: var(--r-pill); }
+.finp-proj-row {
+  display: grid; grid-template-columns: 1.6fr 64px 120px 120px 120px 130px 72px;
+  align-items: center; gap: var(--s3); padding: 6px var(--s5) 6px calc(var(--s5) + 22px);
+  border-top: 1px solid var(--border); background: var(--surface-2); font-size: 12.5px;
+}
+.finp-proj-name { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text-2); cursor: pointer; }
+.finp-proj-key { font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; color: var(--text-faint); background: var(--surface-3); padding: 1px 5px; border-radius: var(--r-sm); }
+
+/* ============================================================ responsive */
+@media (max-width: 1000px) {
+  .fin-kpis, .fin-kpis.k3, .fin-kpis.k5 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 720px) {
+  .fin-wrap { padding: var(--s4) var(--s4) var(--s7); gap: var(--s4); }
+}
+@media (max-width: 560px) {
+  .fin-kpis, .fin-kpis.k3, .fin-kpis.k5 { grid-template-columns: 1fr; }
+}
+
+/* ============================================================ Finance charts */
+.fin-chart-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--s4); }
+@media (max-width: 900px) { .fin-chart-grid { grid-template-columns: 1fr; } }
+.fin-chart-wide { grid-column: 1 / -1; }
+.fin-chart-body { padding: var(--s4) var(--s5) var(--s5); }
+
+.finc-pie { display: flex; align-items: center; gap: var(--s4); }
+.finc-legend { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.finc-legend-row { display: grid; grid-template-columns: 12px 1fr auto auto; align-items: center; gap: 8px; padding: 3px 0; font-size: 12.5px; }
+.finc-legend-row + .finc-legend-row { border-top: 1px solid var(--border); }
+.finc-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; display: inline-block; }
+.finc-legend-key { font-weight: 600; min-width: 0; }
+.finc-legend-pct { font-size: 11.5px; color: var(--text-3); }
+.finc-legend-val { font-size: 12px; font-weight: 600; min-width: 60px; text-align: right; }
+
+.finc-hbars { display: flex; flex-direction: column; gap: 7px; }
+.finc-hbar-row { display: grid; grid-template-columns: 140px 1fr auto; align-items: center; gap: 10px; font-size: 12.5px; }
+.finc-hbar-key { font-weight: 600; min-width: 0; }
+.finc-hbar-track { height: 12px; border-radius: var(--r-pill); background: var(--surface-3); overflow: hidden; }
+.finc-hbar-fill { display: block; height: 100%; border-radius: var(--r-pill); position: relative; min-width: 2px; }
+.finc-hbar-val { font-size: 12px; font-weight: 600; min-width: 64px; text-align: right; }
+
+.finc-dual-legend { display: flex; gap: var(--s4); font-size: 11.5px; color: var(--text-2); margin-bottom: 4px; }
+.finc-dual-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.finc-dual-row { display: grid; grid-template-columns: 140px 1fr; align-items: center; gap: 10px; }
+.finc-dual-bars { display: flex; flex-direction: column; gap: 3px; }
+.finc-dual-track { height: 11px; border-radius: var(--r-pill); background: var(--surface-3); overflow: hidden; }
+.finc-dual-tip { display: none; }
+.finc-select {
+  border: 1px solid var(--border); background: var(--surface-2); border-radius: var(--r-sm);
+  padding: 6px 10px; font-size: 13px; font-weight: 600; color: var(--text); outline: none; cursor: pointer;
+}
+.finc-select:focus { border-color: var(--accent); }
+
+/* Search field inside report cards — a deliberately distinct (lighter) fill so
+   it stands out from the card surface. */
+.fin-search {
+  border: 1px solid var(--border-2); background: var(--surface-3); border-radius: var(--r-sm);
+  padding: 6px 10px; font-size: 13px; color: var(--text); outline: none;
+}
+.fin-search::placeholder { color: var(--text-3); }
+.fin-search:focus { border-color: var(--accent); background: var(--surface-2); }
+/* Empty filler row keeping a paginated list's height stable on the last page. */
+.finp-row.finp-filler { color: transparent; pointer-events: none; }
+/* Empty-state message inside finance tables/lists. */
+.fin-empty {
+  padding: 18px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-3);
+}

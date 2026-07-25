@@ -1,0 +1,79 @@
+# Example: customer Kubernetes + AWS S3 + managed Postgres/Redis.
+# Single-tenant. Copy, fill the *** values, then:
+#   helm install vaks-pm ./deploy/helm/vaks-pm -n vaks --create-namespace -f this-file.yaml
+
+image:
+  registry: registry.acme-corp.com/vaks-pm
+  tag: "1.0.0"
+imagePullSecrets:
+  - name: regcred
+
+publicBaseUrl: https://pm.acme-corp.com
+tenancy:
+  mode: dedicated
+
+# --- Postgres: bring your own (managed / HA) ---
+postgresql:
+  enabled: false
+externalDatabase:
+  # If the DB mandates TLS, also append ?sslmode=require here (the migration Job
+  # does not read tls.postgres). e.g. ...?schema=public&sslmode=require
+  url: "postgresql://vakspm:***@pg.internal.acme-corp.com:5432/vakspm?schema=public"
+
+# --- In-transit TLS (DORA). Turn on app<->Postgres TLS for a managed DB. ---
+tls:
+  postgres: false            # set true if the managed Postgres requires SSL
+
+# --- Redis: bring your own ---
+redis:
+  enabled: false
+externalRedis:
+  url: "redis://redis.internal.acme-corp.com:6379"
+
+# --- Object storage: AWS S3 native ---
+minio:
+  enabled: false
+s3:
+  external:
+    endpoint: ""            # EMPTY = AWS S3 native (endpoint from region)
+    region: eu-west-1
+    accessKey: "AKIA***"
+    secretKey: "***"
+    forcePathStyle: false   # AWS uses virtual-hosted style
+    bucketPrefix: "acme-"   # AWS bucket names are global; prefix to avoid clashes
+    createBuckets: true     # set false if buckets pre-created without s3:CreateBucket
+
+ingress:
+  enabled: true
+  className: nginx
+  host: pm.acme-corp.com
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+  tls:
+    enabled: true
+    secretName: pm-acme-tls   # or use cert-manager via annotations
+
+# Prefer secrets.existingSecret in production (see README §3). Inline shown here:
+secrets:
+  jwtAccessSecret: "***"     # openssl rand -hex 32
+  jwtRefreshSecret: "***"    # openssl rand -hex 32
+  mfaEncryptionKey: "***"    # openssl rand -base64 32
+  workerApiToken: "***"      # openssl rand -hex 32
+  # smtpPassword: "***"
+  # ssoOidcClientSecret: "***"
+
+# --- Crypto keyring (DORA KEK rotation). Optional. ---
+# Leave empty to use MFA_ENCRYPTION_KEY as the sole KEK (ref `env`). To enable
+# rotation, stage a versioned keyring and point activeKek at the active version.
+# Prefer crypto.existingSecret in production (manage/rotate out-of-band).
+crypto:
+  existingSecret: ""         # Secret holding kek_v<N> keys (base64, 32 bytes)
+  activeKek: ""              # e.g. "v2" once kek_v2 is staged
+  # Or inline (lands in release history — fine for eval, not prod):
+  # keks:
+  #   kek_v1: "<base64-32-bytes>"
+
+migrations:
+  enabled: true
+  acceptDataLoss: true       # safe on a fresh install; review for populated DBs
+  seedDemo: false

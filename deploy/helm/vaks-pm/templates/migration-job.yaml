@@ -1,0 +1,69 @@
+{{- if .Values.migrations.enabled }}
+{{- /*
+  Schema sync via `prisma db push`, run once per install/upgrade as a Helm hook
+  (post-install/post-upgrade, so the in-cluster Postgres — if enabled — already
+  exists). Retries until the DB is reachable. Replaces the per-pod `db push` the
+  Swarm stack ran at api start, avoiding a race between api replicas.
+
+  Pooled mode: this syncs the BASE database only. Per-tenant databases are
+  provisioned/migrated separately (see provision-tenant tooling).
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vakspm.fullname" . }}-dbpush
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "vakspm.selectorLabels" (dict "root" . "component" "migration") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: dbpush
+          image: {{ include "vakspm.image" (dict "root" . "repo" .Values.image.api.repository) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "vakspm.fullname" . }}-config
+            - secretRef:
+                name: {{ include "vakspm.secretName" . }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cd /app/api
+              ok=0
+              for i in $(seq 1 60); do
+                if npx prisma db push {{ if .Values.migrations.acceptDataLoss }}--accept-data-loss{{ end }}; then
+                  ok=1; break
+                fi
+                echo "prisma db push attempt $i failed — DB not ready? retrying in 5s"
+                sleep 5
+              done
+              if [ "$ok" != "1" ]; then
+                echo "prisma db push failed after retries"; exit 1
+              fi
+              {{- if .Values.migrations.seedDemo }}
+              echo "seeding demo data..."
+              node prisma/seed-runtime.js
+              {{- end }}
+              echo "schema sync complete"
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+{{- end }}

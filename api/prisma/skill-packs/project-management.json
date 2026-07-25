@@ -1,0 +1,27 @@
+{
+  "id": "project-management",
+  "label": "Gestion de projet",
+  "color": "#d97706",
+  "skills": [
+    { "name": "PMP (PMI)", "description": "Certification Project Management Professional du PMI." },
+    { "name": "Microsoft Project", "description": "Planification, ordonnancement et suivi de projet sous MS Project." },
+    { "name": "Primavera P6", "description": "Planification de projets complexes (Oracle Primavera)." },
+    { "name": "Gestion des risques", "description": "Identification, analyse et mitigation des risques projet." },
+    { "name": "Gestion des parties prenantes", "description": "Cartographie et engagement des parties prenantes." },
+    { "name": "Planification & ordonnancement", "description": "Construction du planning, chemin critique, jalons." },
+    { "name": "Gestion budgétaire", "description": "Estimation, suivi des coûts et contrôle budgétaire." },
+    { "name": "Earned Value Management", "description": "Pilotage par la valeur acquise (CPI/SPI)." },
+    { "name": "Gestion du changement", "description": "Conduite du changement et adoption (change management)." },
+    { "name": "Gouvernance PMO", "description": "Mise en place et pilotage d'un bureau de projet (PMO)." },
+    { "name": "Gestion de portefeuille", "description": "Priorisation et arbitrage d'un portefeuille de projets." },
+    { "name": "Gestion de programme", "description": "Coordination de projets liés au sein d'un programme." },
+    { "name": "Gestion des achats", "description": "Approvisionnements, appels d'offres et sélection fournisseurs." },
+    { "name": "Management de la qualité", "description": "Assurance et contrôle qualité des livrables." },
+    { "name": "Analyse d'affaires", "description": "Recueil et formalisation du besoin (business analysis)." },
+    { "name": "Gestion des contrats", "description": "Rédaction, négociation et suivi contractuel." },
+    { "name": "Six Sigma", "description": "Amélioration des processus et réduction de la variabilité." },
+    { "name": "Roadmapping", "description": "Construction et communication de feuilles de route." },
+    { "name": "Reporting & KPIs projet", "description": "Tableaux de bord, indicateurs et reporting d'avancement." },
+    { "name": "Gestion des ressources", "description": "Affectation et nivellement de la charge des équipes." }
+  ]
+}

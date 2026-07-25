@@ -1,0 +1,23 @@
+{
+  "id": "consulting",
+  "label": "Conseil en management",
+  "color": "#0d9488",
+  "skills": [
+    { "name": "Stratégie d'entreprise", "description": "Diagnostic stratégique, vision et plan de croissance." },
+    { "name": "Conduite du changement", "description": "Accompagnement des transformations et adoption." },
+    { "name": "Optimisation des processus", "description": "Analyse et refonte des processus métier (BPM)." },
+    { "name": "Modélisation financière", "description": "Business plan, modèles et projections financières." },
+    { "name": "Étude de marché", "description": "Analyse concurrentielle, demande et opportunités." },
+    { "name": "Fusions-acquisitions", "description": "Opérations M&A, valorisation et intégration." },
+    { "name": "Design organisationnel", "description": "Structuration des organisations et des rôles." },
+    { "name": "Transformation digitale", "description": "Stratégie et pilotage de la digitalisation." },
+    { "name": "Facilitation d'ateliers", "description": "Animation de workshops et intelligence collective." },
+    { "name": "Business case", "description": "Construction et défense d'un dossier de décision." },
+    { "name": "Benchmarking", "description": "Comparaison aux meilleures pratiques du secteur." },
+    { "name": "Gouvernance", "description": "Cadres de gouvernance, instances et prise de décision." },
+    { "name": "Restructuration", "description": "Réorganisation, redressement et plans de performance." },
+    { "name": "Due diligence", "description": "Audit d'acquisition et évaluation des risques." },
+    { "name": "Pilotage de la performance", "description": "Définition de KPI et tableaux de bord stratégiques." },
+    { "name": "Cadrage de projet", "description": "Définition du périmètre, des objectifs et des livrables." }
+  ]
+}

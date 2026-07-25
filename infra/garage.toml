@@ -1,0 +1,24 @@
+## Garage v1 — config single-node (étape 1 de la migration MinIO → Garage).
+## Le scale à 3 nœuds (un par host, réplication 3) se fera dans une étape
+## ultérieure : bumper `replication_factor`, ajouter `bootstrap_peers`, et
+## refaire un `garage layout assign` sur les 3 nœuds.
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir     = "/var/lib/garage/data"
+db_engine    = "lmdb"
+
+replication_factor = 1
+
+rpc_bind_addr   = "[::]:3901"
+rpc_public_addr = "garage:3901"
+rpc_secret_file = "/run/secrets/garage_rpc_secret"
+
+[s3_api]
+s3_region     = "garage"
+api_bind_addr = "[::]:3900"
+root_domain   = ".s3.garage.local"
+
+[admin]
+api_bind_addr     = "[::]:3903"
+admin_token_file  = "/run/secrets/garage_admin_token"
+metrics_token_file = "/run/secrets/garage_admin_token"

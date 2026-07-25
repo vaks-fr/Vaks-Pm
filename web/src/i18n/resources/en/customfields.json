@@ -1,0 +1,48 @@
+{
+  "blurb": "Add your own fields to tasks and projects. A field can be restricted to specific projects.",
+  "newField": "New field",
+  "empty": "No custom fields yet.",
+  "emptyTab": "No field on this entity yet.",
+  "noMatch": "No field matches your search.",
+  "searchPlaceholder": "Search a field…",
+  "prev": "Previous",
+  "next": "Next",
+  "pageOf": "Page {{page}} / {{pageCount}}",
+  "scopeNProjects": "{{count}} project",
+  "scopeNProjects_other": "{{count}} projects",
+  "scopeSelected": "{{count}} selected",
+  "scopeSearchPlaceholder": "Search a project…",
+  "noProjectMatch": "No project matches your search.",
+  "editTitle": "Edit field",
+  "nameRequired": "A name is required.",
+  "optionsRequired": "A dropdown needs at least one option.",
+  "created": "Field created.",
+  "saved": "Field saved.",
+  "deleted": "Field deleted.",
+  "deleteTitle": "Delete this field?",
+  "deleteMsg": "Deleting « {{name}} » removes it and all its values on every task or project.",
+  "typeLocked": "The type cannot be changed after creation.",
+  "optionsLabel": "Options (one per line)",
+  "optionsPlaceholder": "Prod\nStaging\nDev",
+  "scopeLabel": "Restrict to projects",
+  "scopeHint": "Leave all unchecked to apply the field to every project.",
+  "scopeAll": "All projects",
+  "col": {
+    "name": "Name",
+    "type": "Type",
+    "entity": "Applies to",
+    "scope": "Scope"
+  },
+  "entity": {
+    "task": "Tasks",
+    "project": "Projects"
+  },
+  "type": {
+    "text": "Text",
+    "number": "Number",
+    "date": "Date",
+    "select": "Dropdown",
+    "checkbox": "Checkbox"
+  },
+  "sectionTitle": "Custom fields"
+}

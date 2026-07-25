@@ -1,0 +1,41 @@
+
+✅ {{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Tenancy mode : {{ .Values.tenancy.mode }}{{ if eq .Values.tenancy.mode "dedicated" }} (single-tenant){{ else }} (multi-tenant SaaS){{ end }}
+Database     : {{ if .Values.postgresql.enabled }}in-cluster Postgres (eval){{ else }}external{{ end }}
+Redis        : {{ if .Values.redis.enabled }}in-cluster (eval){{ else }}external{{ end }}
+Object store : {{ if .Values.minio.enabled }}in-cluster MinIO (eval){{ else }}external S3 ({{ default "AWS native" .Values.s3.external.endpoint }}){{ end }}
+
+1) Watch the rollout:
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "vakspm.fullname" . }}-api
+   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+2) Schema sync runs as a Helm hook Job ({{ include "vakspm.fullname" . }}-dbpush). Check it:
+   kubectl -n {{ .Release.Namespace }} logs job/{{ include "vakspm.fullname" . }}-dbpush
+
+3) Reach the app:
+{{- $host := include "vakspm.ingressHost" . }}
+{{- if and .Values.ingress.enabled $host }}
+   {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ $host }}
+{{- else }}
+   Ingress disabled — port-forward to try it:
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vakspm.fullname" . }}-web 8080:{{ .Values.web.port }}
+   # then open http://localhost:8080
+{{- end }}
+
+{{- if .Values.migrations.seedDemo }}
+
+   Demo seed enabled — login: admin@vaks-pm.local / ChangeMe123!  (CHANGE IT)
+{{- end }}
+
+{{- if not .Values.publicBaseUrl }}
+
+⚠️  publicBaseUrl is empty — email links and CORS will be wrong. Set it.
+{{- end }}
+{{- if and (not .Values.secrets.existingSecret) (or .Values.minio.enabled .Values.postgresql.enabled) (not .Values.postgresql.auth.password) }}
+
+ℹ️  In-cluster Postgres/MinIO passwords were auto-generated and stored in Secret
+   "{{ include "vakspm.fullname" . }}-secret" (kept across upgrades).
+{{- end }}
+
+📖 Full install / configuration guide: deploy/helm/vaks-pm/README.md

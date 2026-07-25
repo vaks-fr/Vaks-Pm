@@ -1,0 +1,2778 @@
+// Schéma Prisma — Phase 1 (socle). S'étend au fil des phases (Gantt, temps, charge…).
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  // Prisma 7 : `url` n'est plus supporté dans le schéma. L'URL de connexion
+  // vit dans prisma.config.ts (pour `db push`/Migrate) et dans l'`adapter`
+  // passé au PrismaClient (pour le client runtime).
+  provider = "postgresql"
+}
+
+// ============================================================
+// Enums
+// ============================================================
+enum RoleScope {
+  ORG
+  PROJECT
+}
+
+enum ProjectStatus {
+  DRAFT           // initiation : offre en cours de préparation
+  OFFER_SENT      // offre commerciale envoyée au client, en attente d'accept/refus
+  CHARTER_REVIEW  // offre acceptée → charter envoyé au client pour signature
+  ACTIVE          // signé → projet officiellement lancé
+  COMPLETED
+  ARCHIVED
+}
+
+/// STANDARD = projet ordinaire géré dans l'app.
+/// EXTERNAL = conteneur auto-provisionné pour les tickets d'un outil de
+/// ticketing externe (un par couple outil × client). Invisible dans tous les
+/// listings/menus (filtré dans `ProjectsService.findAll`), il ne vit que dans
+/// la timesheet : pas de board, pas de Gantt, pas d'allocation, exclu des
+/// reports et du scope d'autoplan. Lecture + time:log ouverts à toute l'org
+/// (by-pass membership dans `ProjectAccessService`).
+enum ProjectKind {
+  STANDARD
+  EXTERNAL
+}
+
+/// Cycle de vie de l'équipe Microsoft Teams provisionnée pour un projet
+/// (feature premium `teams-provisioning`). NONE = jamais provisionné ;
+/// PENDING = opération Graph async en cours ; ACTIVE = équipe créée et vivante ;
+/// ARCHIVED = équipe archivée (projet sorti de ACTIVE) ; FAILED = échec terminal.
+enum MsTeamStatus {
+  NONE
+  PENDING
+  ACTIVE
+  ARCHIVED
+  FAILED
+}
+
+/// État du droit de lecture du SharePoint de la team provisionnée, pour le
+/// contexte documentaire des agents IA (source `sharepoint`). NONE = pas encore
+/// résolu ; PENDING = site résolu mais grant pas (encore) posé (mode
+/// `selected_granter` : le grant n'a pas abouti, à re-tenter) ; GRANTED = lisible
+/// (mode `read_all` : d'office ; mode `selected_granter` : grant `read` posé sur
+/// le seul site) ; FAILED = échec terminal de résolution.
+enum MsSpGrantStatus {
+  NONE
+  PENDING
+  GRANTED
+  FAILED
+}
+
+/// Cycle de vie d'une tâche. Étendu pour les agents IA (AGENTS_ARCHITECTURE.md
+/// chantier 2) : `CLAIMED` (revendiquée, pas encore démarrée), `CHANGES_REQUESTED`
+/// (revue → à retravailler), `APPROVED` (livrable validé, avant clôture). Ajouts
+/// **additifs** — `IN_REVIEW` conservé (= « pending review », rename destructif
+/// interdit en db push pooled). Les transitions sont arbitrées côté serveur par
+/// `TaskTransitionService` (matrice `task-transitions.ts`).
+enum TaskStatus {
+  TODO
+  CLAIMED
+  IN_PROGRESS
+  IN_REVIEW
+  CHANGES_REQUESTED
+  APPROVED
+  ON_HOLD
+  DONE
+}
+
+/// Statut de revue d'un livrable (chantier 2c). La revue porte sur le
+/// livrable, jamais sur une simple déclaration « c'est fait ».
+enum DeliverableReviewStatus {
+  PENDING
+  APPROVED
+  CHANGES_REQUESTED
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum DependencyType {
+  FS // finish-to-start
+  SS // start-to-start
+  FF // finish-to-finish
+  SF // start-to-finish
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+/// Nature d'un compte : humain, ou agent IA (acteur de première classe —
+/// cf. AGENTS_ARCHITECTURE.md). Un agent est un `User` complet (les FK
+/// TaskAssignee/Comment/Attachment marchent sans nouvelle entité) mais suit
+/// des règles propres : owner humain OBLIGATOIRE, jamais de login interactif,
+/// capabilities → permissions, `licensed=false`.
+enum ActorKind {
+  HUMAN
+  AGENT
+}
+
+/// Niveau de confiance d'un agent — pilote les policies (chantier 3) et les
+/// exigences de vérification des livrables (AGENTS_VERIFICATION.md).
+enum AgentTrustLevel {
+  DRAFT_ONLY
+  SUPERVISED
+  AUTONOMOUS
+}
+
+/// Source d'identité de l'utilisateur. LOCAL = compte créé dans l'app
+/// (mot de passe Argon2). OIDC/SAML = compte provisionné par un IdP ;
+/// la connexion par mot de passe local est refusée sauf si
+/// `User.allowLocalLogin = true` (break-glass admin).
+enum AuthProvider {
+  LOCAL
+  OIDC
+  SAML
+}
+
+/// Type d'un fournisseur d'identité fédéré (module SSO, phase 10).
+enum IdpType {
+  OIDC
+  SAML
+}
+
+enum DocumentTemplateKind {
+  CHARTER // template Word pour le project charter
+}
+
+// ============================================================
+// Organisation (tenant) — racine
+// ============================================================
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  /// **Identifiant de licence** : UUID unique et immuable par installation,
+  /// DISTINCT de `id` (qui peut être un slug de routage réutilisable ou le
+  /// `seed-org` partagé par toutes les installs seedées). C'est CETTE valeur
+  /// que le client copie pour demander/importer une licence, et sur laquelle le
+  /// produit épingle la licence — garantit « une licence = une installation »,
+  /// impossible à deviner ou à faire collisionner. Généré applicativement
+  /// (`uuid()`, comme `id`) — les orgs existantes ont été backfillées une fois
+  /// via un défaut base temporaire, retiré depuis pour éviter toute divergence
+  /// de normalisation avec le `db push` de démarrage (app-user sans droit DDL).
+  licenseId String   @unique @default(uuid())
+  /// Identifiant de tenant pour le routing SaaS par sous-domaine
+  /// (`<slug>.vaks-pm.com`). [a-z0-9-]. Nullable tant qu'on est en mono-tenant
+  /// on-premise ; requis dès qu'on active `tenancy.mode = multi`. Immuable.
+  slug          String?  @unique
+  /// Domaine custom optionnel d'un client (ex. "pm.acme.com") qui route vers
+  /// cette org au lieu du sous-domaine. Null = pas de domaine custom.
+  primaryDomain String?  @unique
+  timezone  String   @default("UTC")
+  /// « Token epoch » de révocation : tout access token JWT émis AVANT cette date
+  /// est rejeté (force-logout-all instantané, sans attendre l'expiration du JWT).
+  /// Posé par `force-logout-all` ; vérifié dans `JwtStrategy.validate` (cache 30 s).
+  sessionsRevokedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users       User[]
+  roles       Role[]
+  memberships Membership[]
+  projects    Project[]
+  teams       Team[]
+  settings    OrgSetting[]
+  clients     Client[]
+  documentTemplates OrganizationDocumentTemplate[]
+  emailDeliveries   EmailDelivery[]
+  webhooks          Webhook[]
+  webhookDeliveries WebhookDelivery[]
+  skills            Skill[]
+  identityProviders IdentityProvider[]
+  ticketingConnectors TicketingConnector[]
+  agentConnectors     AgentConnector[]
+  agentTrustIssuers   AgentTrustIssuer[]
+  agentRefreshTokens  AgentRefreshToken[]
+  fileSourceConnectors FileSourceConnector[]
+}
+
+/// Paramètre administratif de l'organisation (key/value JSON).
+/// Sert de stockage générique pour les options du panneau d'admin :
+/// `hoursPerDay`, `defaultWorkDays`, `smtpHost`, `mfa`, etc.
+model OrgSetting {
+  id             String   @id @default(uuid())
+  organizationId String
+  key            String
+  value          Json
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+}
+
+enum DataEncryptionKeyStatus {
+  ACTIVE
+  RETIRED
+}
+
+/// Data Encryption Key par tenant (envelope encryption, DORA / HSM-ready). La
+/// DEK n'est stockée que **wrappée** (chiffrée par une KEK nommée `kekRef`) ; la
+/// DEK en clair ne vit que transitoirement en mémoire au (dé)chiffrement.
+/// `dekRef` est embarqué dans l'en-tête des blobs v2 → re-wrap d'une DEK sous une
+/// nouvelle KEK sans invalider les blobs existants. Une seule ligne ACTIVE par
+/// org en slice 1 (contrainte unique anti-course ; assouplie à la rotation).
+model DataEncryptionKey {
+  id             String                  @id @default(uuid())
+  organizationId String
+  dekRef         String                  @default(uuid())
+  wrappedKey     String
+  kekRef         String
+  status         DataEncryptionKeyStatus @default(ACTIVE)
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@unique([organizationId, dekRef])
+  @@unique([organizationId, status])
+  @@index([organizationId])
+}
+
+/// Licence d'entreprise (open-core — SPEC §16). Un token PASETO v4.public signé
+/// Ed25519 par l'éditeur, uploadé par l'admin de l'org. Append-only : chaque
+/// upload crée une ligne (historique), `active=true` désigne la courante (les
+/// précédentes passent `active=false`). Le `token` est la source de vérité
+/// (re-vérifié au chargement) ; les colonnes snapshot servent l'affichage et
+/// survivent à une rotation de clé publique. Aucune valeur sensible ici : la
+/// clé privée de signature ne quitte jamais l'éditeur.
+model License {
+  id               String    @id @default(uuid())
+  organizationId   String
+  /// Token brut `v4.public.…` — re-vérifié à chaque chargement (jamais de
+  /// confiance aveugle dans le snapshot).
+  token            String
+  /// `sub` de la licence (`license:<uuid>`) — snapshot.
+  licenseUuid      String?
+  customer         String?
+  features         String[]  @default([])
+  maxUsers         Int?
+  issuedAt         DateTime?
+  expiresAt        DateTime?
+  notes            String?
+  /// Signature vérifiée au moment de l'upload (audit/affichage).
+  signatureValid   Boolean   @default(false)
+  /// Licence courante du déploiement (une seule à true par org).
+  active           Boolean   @default(true)
+  uploadedById     String?
+  uploadedByEmail  String?
+  createdAt        DateTime  @default(now())
+
+  @@index([organizationId, active])
+  @@index([organizationId, createdAt])
+}
+
+/// État de connectivité au serveur de licences (hybride en ligne —
+/// `LicenseRemoteService`). **Une seule ligne par base tenant** (`id = 1`).
+/// `lastSuccessAt` est rafraîchi à chaque poll réussi ; la **suspension** est
+/// dérivée à la lecture par `LicenseService` (si la licence active porte
+/// `online.required` et que `now - lastSuccessAt > maxOfflineDays`), donc
+/// l'enforcement marche même sans poller (déploiement non provisionné). Les
+/// autres champs servent uniquement à la déduplication des emails admin.
+model LicenseConnectivity {
+  /// Toujours 1 — singleton par base.
+  id            Int       @id @default(1)
+  /// Dernier poll réussi du serveur de licences (référence du compteur de grâce).
+  lastSuccessAt DateTime?
+  /// Dernier email de connectivité envoyé (cadence quotidienne + multi-réplica).
+  lastEmailAt   DateTime?
+  /// Dernier palier d'email envoyé : `entry` | `daily` | `cutoff` (null = aucun).
+  emailStage    String?
+  updatedAt     DateTime  @updatedAt
+}
+
+/// Fournisseur d'identité fédéré (SSO — phase 10). Config NON sensible d'un
+/// IdP OIDC (cible Entra ID) ou SAML, par organisation. Les secrets (client
+/// secret OIDC, clé privée SP SAML) ne vivent JAMAIS ici : ils sont montés en
+/// Swarm secret et lus via l'env (cf. SSO.md §5). Plusieurs providers par org
+/// possibles ; identifiés par un `slug` stable figé dans le redirect_uri.
+model IdentityProvider {
+  id             String   @id @default(uuid())
+  organizationId String
+  type           IdpType
+  /// Slug stable dans les URLs de callback (`/auth/oidc/<slug>/callback`).
+  /// Unique par org, immuable après création.
+  slug         String
+  /// Libellé affiché sur le bouton de login (ex. "Microsoft Entra ID").
+  displayName  String
+  enabled      Boolean  @default(false)
+
+  // ---- OIDC ----
+  /// URL de découverte (.well-known/openid-configuration). On en dérive issuer,
+  /// authorization/token endpoints et JWKS — pas de saisie manuelle.
+  oidcDiscoveryUrl    String?
+  oidcClientId        String?
+  /// Nom logique du Swarm secret de FALLBACK (back-compat mono-secret). Le
+  /// secret par tenant vit dans `oidcClientSecretEnc` ; ce ref n'est utilisé
+  /// que si l'enc est absent (ex. tenant demo historique).
+  oidcClientSecretRef String?  @default("sso_oidc_secret")
+  /// Client secret OIDC **chiffré au repos** (AES-256-GCM, clé MFA_ENCRYPTION_KEY),
+  /// par tenant. Format Base64(nonce||ciphertext||tag). Jamais renvoyé à l'UI
+  /// (write-only). Null = pas de secret propre → fallback sur le Swarm secret.
+  oidcClientSecretEnc String?
+  /// Auth **certificat** (private_key_jwt, secretless) — alternative au client
+  /// secret. Clé privée PKCS#8 (PEM) chiffrée au repos, write-only. Si présente,
+  /// le mode certificat prime sur `oidcClientSecretEnc`. Requiert `oidcCertThumbprint`.
+  oidcPrivateKeyEnc   String?
+  /// Empreinte (x5t, hex) du certificat uploadé dans Entra > Certificates.
+  /// Non-secret. Utilisée dans l'en-tête de l'assertion pour qu'Entra matche le certif.
+  oidcCertThumbprint  String?
+  oidcScopes          String[] @default([])
+
+  // ---- SAML (lot 3) ----
+  samlEntryPoint String?
+  samlIssuer     String?
+  /// Certificat X.509 public de signature de l'IdP (PEM). Public, pas un secret.
+  samlIdpCert    String?
+  samlSpKeyRef   String?
+
+  // ---- Provisioning & mapping (commun OIDC/SAML/SCIM) ----
+  /// Auto-création du compte au 1er login fédéré (JIT).
+  jitProvisioning Boolean @default(true)
+  /// IdP fait autorité sur les rôles : à CHAQUE login, si l'utilisateur ne
+  /// matche plus aucun groupe mappé, son rôle est ré-assigné au rôle par défaut
+  /// (downgrade). false (défaut) = on ne rétrograde jamais un compte existant.
+  syncRolesOnLogin Boolean @default(false)
+  /// Rôle org (clé Role, ex. ORG_MEMBER) attribué par défaut à un compte JIT
+  /// sans correspondance de groupe. Null = ORG_MEMBER.
+  defaultRoleKey  String?
+  /// Politique de liaison à un compte LOCAL existant trouvé par email :
+  /// 'link' (rattache + bascule authProvider) | 'reject'.
+  linkStrategy    String  @default("link")
+  /// Clé de rapprochement d'un compte LOCAL préexistant au 1er login fédéré :
+  /// 'upn' (défaut, sûr — un guest Entra a un UPN mangé `…#EXT#@<tenant>.onmicrosoft.com`
+  /// qui ne peut structurellement pas valoir un email du domaine interne)
+  /// | 'email' (souple mais à risque si des guests portent un mail = compte local).
+  /// `linkStrategy` gouverne SI on lie ; `linkMatchKey` gouverne SUR QUEL claim.
+  linkMatchKey    String  @default("upn")
+  /// Mapping groupe/claim IdP → rôle org. JSON: [{ match, roleKey }]. Premier
+  /// match gagne ; sinon defaultRoleKey.
+  roleMappings    Json    @default("[]")
+  /// Mapping des claims vers les champs User. JSON: { email?, name?, externalId?, groups? }.
+  claimMappings   Json    @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+}
+
+// ============================================================
+// Connecteurs externes (systèmes de ticketing : ServiceNow, Jira, …)
+// ============================================================
+/// Connecteur vers un système de ticketing externe. Un connecteur par type de
+/// fournisseur (`source`) et par org. `source` == `Task.externalSource` : un
+/// ticket importé via ce connecteur porte le même slug. La config non-secrète
+/// (URL d'instance, tables, requête de base) vit dans `config` (JSON) ; les
+/// secrets (mot de passe / token) sont chiffrés at-rest dans `secretEnc`
+/// (AES-256-GCM, clé MFA_ENCRYPTION_KEY, par tenant) et jamais renvoyés à l'UI.
+model TicketingConnector {
+  id             String   @id @default(uuid())
+  organizationId String
+  /// Type de fournisseur (`servicenow`, `jira`, …). == externalSource des tickets.
+  source         String
+  /// Libellé affiché (ex. "ServiceNow — Production").
+  label          String
+  enabled        Boolean  @default(false)
+  /// Champs de config NON secrets, propres au fournisseur (instanceUrl, tables…).
+  config         Json     @default("{}")
+  /// Secrets chiffrés at-rest (Base64(nonce||ciphertext||tag) d'un JSON de paires).
+  secretEnc      String?
+  /// Dernier test de connexion (horodatage + résultat) pour l'UI.
+  lastTestAt     DateTime?
+  lastTestOk     Boolean?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, source])
+  @@index([organizationId])
+}
+
+/// Connecteur d'annuaire d'agents IA (seam `AgentDirectoryProvider`,
+/// AGENTS_ARCHITECTURE.md chantier 1). Même pattern que TicketingConnector :
+/// config non-secrète en JSON + secrets chiffrés at-rest par tenant. Plusieurs
+/// connecteurs par org possibles (pas d'unicité sur provider). La sync upserte
+/// les agents par `(idpSource, externalId)` ; désactivation plateforme →
+/// suspension vaks ; jamais de suppression.
+model AgentConnector {
+  id             String   @id @default(uuid())
+  organizationId String
+  /// Type de plateforme : 'entra-agent' (Entra Agent ID) ; 'bedrock-agent' /
+  /// 'vertex-agent' à la demande. == idpSource des agents provisionnés.
+  provider       String
+  label          String
+  enabled        Boolean  @default(false)
+  config         Json     @default("{}")
+  secretEnc      String?
+  /// Owner vaks par défaut des agents importés quand la plateforme ne fournit
+  /// pas d'owner/sponsor natif — un owner est TOUJOURS requis.
+  defaultOwnerId String?
+  lastSyncAt     DateTime?
+  lastSyncOk     Boolean?
+  lastSyncError  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+}
+
+/// Émetteur de confiance pour la **fédération d'identité des agents** (RFC 8693
+/// token exchange). Un agent ne détient plus de secret : il présente le JWT que
+/// sa plateforme d'exécution lui délivre (ServiceAccount Kubernetes, workload
+/// identity Entra, OIDC GitHub Actions…), on le vérifie et on l'échange contre
+/// un `vaks_pat_` de courte durée.
+///
+/// **Distinct d'`AgentConnector` à dessein** : le connecteur dit *où l'agent est
+/// listé* (annuaire, appel sortant, secret client) ; cette ligne dit *qui atteste
+/// que l'agent parle maintenant* (attestation entrante, crypto à clé publique,
+/// aucun secret). La relation est plusieurs-à-plusieurs — un annuaire Entra peut
+/// couvrir des agents exécutés sur AKS, et les agents `idpSource='api'`
+/// (LangGraph, n8n, CI) n'ont aucun connecteur. `connectorId` n'est donc que de
+/// la **provenance d'affichage** : le vérificateur résout UNIQUEMENT par
+/// `(organizationId, issuer, audience)` et ne lit jamais ce champ.
+model AgentTrustIssuer {
+  id             String   @id @default(uuid())
+  organizationId String
+  label          String
+  enabled        Boolean  @default(false)
+
+  /// Doit égaler le claim `iss` au caractère près.
+  issuer         String
+  /// Audience EXIGÉE dans `aud`. Jamais optionnelle, jamais wildcard : c'est le
+  /// seul rempart contre le rejeu inter-service. Sans elle, un jeton que l'agent
+  /// obtient légitimement pour une AUTRE application du même émetteur (typiquement
+  /// Microsoft Graph) deviendrait un credential vaks-pm valide.
+  audience       String
+
+  /// Découverte OIDC (`.well-known/openid-configuration`) — renseigne `jwksUri`.
+  discoveryUrl   String?
+  /// Point JWKS distant. Exclusif avec `jwksJson`.
+  jwksUri        String?
+  /// JWKS **collé en dur** (JSON Web Key Set). Permet la fédération en
+  /// environnement air-gap : aucun appel sortant, donc aucune surface SSRF. La
+  /// rotation des clés devient manuelle — acceptable sur un émetteur interne que
+  /// le client contrôle lui-même.
+  jwksJson       Json?
+
+  /// Allowlist stricte. Jamais `none`, jamais HS* (une clé publique JWKS
+  /// deviendrait un secret HMAC connu de tous).
+  algorithms     String[] @default(["RS256", "ES256"])
+
+  /// Claim portant l'identité de l'agent. Configurable car le `sub` d'un jeton
+  /// workload identity Entra n'est pas nécessairement l'`id` d'`agentIdentities`
+  /// stocké en `externalId` par le connecteur.
+  subjectClaim   String   @default("sub")
+  /// `idpSource` des agents résolus par cet émetteur → clé `(idpSource, externalId)`.
+  /// Sert AUSSI de garde en profondeur : un agent ne peut être authentifié que
+  /// par un émetteur dont l'`idpSource` correspond à sa provenance, ce qui
+  /// confine un émetteur mal déclaré à son propre périmètre.
+  idpSource      String
+  /// Contraintes additionnelles exigées sur les claims, en égalité stricte.
+  /// Ex. `{"repository":"org/repo"}` pour GitHub Actions.
+  claimConstraints Json   @default("{}")
+  /// Exiger un `jti` (anti-rejeu). Désactivable pour les émetteurs qui n'en
+  /// posent pas — au prix de la protection contre le rejeu.
+  requireJti     Boolean  @default(true)
+
+  /// Durée de vie du PAT émis, en secondes. Clamp applicatif 300–3600.
+  tokenTtlSec    Int      @default(3600)
+  /// Déclarer l'agent inconnu en DRAFT_ONLY **sans jeton** au lieu de refuser
+  /// sèchement, pour qu'il apparaisse dans l'admin en attente d'activation.
+  /// N'accorde JAMAIS de credential : l'activation reste un acte humain.
+  autoDeclare    Boolean  @default(false)
+  defaultOwnerId String?
+
+  /// Provenance d'affichage uniquement (cf. commentaire du modèle). Scalaire nu,
+  /// sans relation Prisma, comme `defaultOwnerId`.
+  connectorId    String?
+
+  lastUsedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, issuer, audience])
+  @@index([organizationId])
+}
+
+/// Credential durable **rotatif** d'un agent *headless* (sans plateforme
+/// d'identité). L'agent le détient, l'échange contre un `vaks_pat_` court sur
+/// `POST /agents/token`, et reçoit à chaque échange un **nouveau** refresh (le
+/// précédent meurt après une courte grâce). C'est le pendant « machine » du
+/// refresh OAuth navigateur — SANS navigateur, SANS `OAuthConnection`, et il
+/// n'émet QUE des jetons d'agent (jamais un jeton utilisateur : la frontière
+/// délégation-humaine ↔ auto-service-agent est enforced dans le code).
+///
+/// **Rotatif à dessein** (choix validé) : présenter un refresh déjà consommé et
+/// hors grâce est un signal de **vol** → toute la chaîne est révoquée + alerte.
+/// Le jeton réellement utilisé sur les appels métier reste court (le refresh ne
+/// transite QUE vers `/agents/token`), donc une fuite du jeton de travail meurt
+/// vite. Durable en base (pas Redis) : un flush cache ne doit pas verrouiller
+/// l'agent.
+model AgentRefreshToken {
+  id             String   @id @default(uuid())
+  organizationId String
+  /// User `kind=AGENT` porteur. Le jeton hérite de l'owner + capabilities de l'agent.
+  agentId        String
+  /// Identité stable de la chaîne à travers les rotations (révocation groupée,
+  /// corrélation d'audit). Ne change jamais tant que la chaîne vit.
+  chainId        String
+  /// SHA-256 hex du secret COURANT. Lookup à l'échange.
+  tokenHash      String   @unique
+  /// SHA-256 du secret précédent, accepté jusqu'à `prevValidUntil` (grâce : un
+  /// refresh interrompu par une panne réseau ne brique pas l'agent). Passé la
+  /// grâce, sa présentation = rejeu/vol.
+  prevTokenHash  String?  @unique
+  prevValidUntil DateTime?
+  /// Expiration roulante du refresh courant (repoussée à chaque rotation). Un
+  /// agent qui refresh régulièrement reste vivant ; un refresh dormant expire.
+  expiresAt      DateTime
+  /// Compteur de rotations — signal de monitoring (une chaîne qui tourne
+  /// anormalement vite, ou un agent mort qui se maintient seul).
+  rotationCount  Int      @default(0)
+  /// Posé quand un rejeu hors-grâce a déclenché la révocation défensive.
+  reuseDetectedAt DateTime?
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  label          String?
+  createdById    String
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, agentId])
+  @@index([chainId])
+}
+
+/// Connecteur vers une source de fichiers externe (SharePoint, Google Drive,
+/// S3 générique, WebDAV…) exposée en LECTURE aux agents IA comme contexte de
+/// travail (proxy live, aucune copie). Même pattern que TicketingConnector :
+/// config non-secrète en JSON + secrets chiffrés at-rest par tenant. Le provider
+/// `sharepoint` ne stocke PAS de secret ici (il réutilise l'identité Graph du
+/// provisioning Teams) — la ligne sert de toggle/label. Les futurs providers
+/// (google-drive, s3, webdav) portent leurs secrets dans `secretEnc`.
+model FileSourceConnector {
+  id             String   @id @default(uuid())
+  organizationId String
+  /// Type de source (`sharepoint`, `google-drive`, `s3`, `webdav`).
+  source         String
+  label          String
+  enabled        Boolean  @default(false)
+  /// Champs de config NON secrets, propres à la source.
+  config         Json     @default("{}")
+  /// Secrets chiffrés at-rest (Base64(nonce||ciphertext||tag) d'un JSON de paires).
+  secretEnc      String?
+  lastTestAt     DateTime?
+  lastTestOk     Boolean?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, source])
+  @@index([organizationId])
+}
+
+// ============================================================
+// Utilisateur
+// ============================================================
+model User {
+  id             String     @id @default(uuid())
+  organizationId String
+  email          String
+  passwordHash   String? // null si SSO-only (module ultérieur)
+  name           String
+  status         UserStatus @default(ACTIVE)
+  isAdmin        Boolean    @default(false)
+  /// Siège de licence (open-core, SPEC §16). `true` = l'utilisateur consomme un
+  /// siège payant et peut accéder au tableau de bord (dashboard). `false` =
+  /// **sans siège** : ne compte pas dans le plafond `maxUsers` et n'a PAS accès
+  /// au dashboard (seulement /me, /auth, et — si `isAdmin` — le portail admin).
+  /// Deux usages : (1) sysadmins « admin-only » (isAdmin + licensed=false), accès
+  /// portail admin sans siège ; (2) comptes provisionnés au-delà du plafond
+  /// (SCIM en débordement) → créés licensed=false, l'admin attribue le siège
+  /// ensuite. Source de vérité unique du comptage de sièges. Défaut `false`
+  /// (fail-safe : un compte créé par un chemin inconnu n'occupe pas de siège
+  /// et n'a pas accès tant qu'on ne le lui accorde pas explicitement).
+  licensed       Boolean    @default(false)
+  timezone       String     @default("UTC")
+  // Provisioning externe (SCIM/OIDC) — préparé pour le module SSO
+  externalId     String?
+  idpSource      String?
+  createdVia     String     @default("local")
+  /// Source d'identité. LOCAL = login mot de passe seul autorisé.
+  /// OIDC/SAML = login uniquement via l'IdP, sauf si allowLocalLogin = true.
+  authProvider   AuthProvider @default(LOCAL)
+  /// "Break-glass" : autorise la connexion par mot de passe local même quand
+  /// authProvider != LOCAL. Réservé aux 2-3 comptes admin de secours en cas
+  /// de panne SSO. Force le MFA (MFA obligatoire sur tout chemin de login
+  /// mot de passe).
+  allowLocalLogin Boolean    @default(false)
+  // ---------- MFA (TOTP) ----------
+  /// L'user a complété l'enrôlement TOTP.
+  mfaEnabled     Boolean    @default(false)
+  /// Secret TOTP chiffré au repos (AES-256-GCM, clé = MFA_ENCRYPTION_KEY).
+  /// Format stocké : Base64(nonce || ciphertext || tag).
+  mfaSecret      String?
+  /// Quand la policy org a rendu MFA obligatoire pour cet user (info, pas une
+  /// contrainte — la policy effective est recalculée à chaque login).
+  mfaEnforcedAt  DateTime?
+  // ---------- Password lifecycle ----------
+  /// Force le user à changer son mot de passe au prochain login.
+  mustChangePassword Boolean @default(false)
+  /// Compteur de tentatives de mot de passe échouées (reset à 0 après succès).
+  failedLoginAttempts Int    @default(0)
+  /// Compte verrouillé jusqu'à cette date (anti-bruteforce). null = pas verrouillé.
+  lockedUntil    DateTime?
+  /// Date du dernier set/changement de mot de passe. Sert au calcul d'expiration
+  /// (`security.passwordExpiryDays`). Null = mot de passe jamais changé après
+  /// création (legacy users) ; le check d'expiration tombe alors sur `createdAt`.
+  passwordChangedAt DateTime?
+  /// Identifiant RH/employé interne à l'entreprise. Distinct de `externalId`
+  /// (qui est le GUID de l'IdP SSO). Utilisé pour matcher les imports CSV
+  /// et les sync depuis un SIRH. Unique par organisation quand présent.
+  employeeId     String?
+  /// Override par-utilisateur du droit de créer un projet non-facturable.
+  /// null = hérite des équipes (Team.canCreateNonBillableProject) ;
+  /// true/false = écrase l'héritage. Modifiable par le Team Manager des
+  /// équipes de l'utilisateur, ou par un Org Admin.
+  canCreateNonBillableProject Boolean?
+  /// Pays d'où l'utilisateur travaille (ISO 3166-1 alpha-2, ex. "FR", "LU").
+  /// Détermine la liste des jours fériés appliquée dans Workload/Timeline.
+  /// null = fallback sur `holidays.defaultCountry` au niveau de l'organisation.
+  countryCode    String?
+  /// Langue d'interface préférée de l'utilisateur ('en'|'fr'|'it'|'de').
+  /// Axe distinct de la locale de formatage (org-wide). null = hérite du défaut
+  /// org (`i18n.defaultLanguage`) puis du navigateur. Pilote aussi la langue
+  /// des emails de notification adressés à cet utilisateur.
+  preferredLanguage String?
+  /// Coût interne / h par défaut de l'utilisateur (devise org). Édité par le
+  /// Team Manager de ses équipes (visible uniquement par eux + admins).
+  /// Résolution finance : ProjectRate explicite > défaut user > défaut projet.
+  defaultCostRate Decimal? @db.Decimal(12, 2)
+  /// Taux facturé client / h par défaut. Même gouvernance que defaultCostRate.
+  defaultBillRate Decimal? @db.Decimal(12, 2)
+
+  // ---------- Agents IA (kind = AGENT ; cf. AGENTS_ARCHITECTURE.md) ----------
+  /// HUMAN (défaut) ou AGENT. Un agent : email synthétique `@agents.invalid`,
+  /// passwordHash=null, allowLocalLogin=false, licensed=false, owner requis.
+  kind           ActorKind  @default(HUMAN)
+  /// Niveau de confiance (agents uniquement).
+  trustLevel     AgentTrustLevel?
+  /// Humain responsable de l'agent — OBLIGATOIRE si kind=AGENT (enforcé côté
+  /// service, pas de CHECK SQL en pooled). L'agent meurt avec son owner :
+  /// owner suspendu/supprimé ⇒ jetons de l'agent inopérants (api-tokens verify).
+  ownerId        String?
+  owner          User?      @relation("AgentOwner", fields: [ownerId], references: [id])
+  ownedAgents    User[]     @relation("AgentOwner")
+  /// Capabilities accordées (vocabulaire AGENT_CAPABILITIES de shared) —
+  /// traduites en Permission[] à l'auth. Jamais de permission hardcodée par nom.
+  capabilities   String[]   @default([])
+  /// Capacité agent = concurrence + budget de runs/jour (PAS des heures).
+  maxConcurrentTasks Int?
+  dailyRunBudget     Int?
+  // Profil modèle & coût (agents uniquement ; sert l'allowlist client + finance 2b)
+  modelProvider  String? // 'anthropic' | 'azure-openai' | 'openai' | 'local' | …
+  model          String? // ex. 'claude-sonnet-5'
+  hostingRegion  String? // 'eu' | 'us' | 'on-prem' | …
+  /// Coût interne par 1000 tokens, DISTINCT entrée / sortie (décision
+  /// 2026-07-08 : les fournisseurs LLM facturent l'output 3–5× l'input, on
+  /// stocke déjà tokensIn/tokensOut). Sert à DÉRIVER le coût d'un run déclaré
+  /// avec tokens mais sans `cost` explicite (`AgentRunsService.report`) :
+  /// cost = tokensIn/1000×in + tokensOut/1000×out. Le coût réel déclaré par
+  /// l'agent reste prioritaire (il capture le cache/tiers, qu'un taux n'a pas).
+  costRateInPerKTokens  Decimal? @db.Decimal(12, 4)
+  costRateOutPerKTokens Decimal? @db.Decimal(12, 4)
+  dailyCostBudget   Decimal? @db.Decimal(12, 2)
+  monthlyCostBudget Decimal? @db.Decimal(12, 2)
+  // `maxCostPerTask` supprimé (2026-07-07) : jamais enforce, doublonnait
+  // `Task.agentCostBudget` (le plafond par tâche appartient à la tâche/PM,
+  // pas au profil agent).
+  /// Taux facturé client par 1000 tokens (in+out) par défaut (agents uniquement).
+  /// Résolution : `AgentProjectRate` explicite > ce défaut > non facturable.
+  /// Même logique que `defaultBillRate` (humains, €/h) — se configure dans
+  /// Admin > Agents et alimente automatiquement les taux projet.
+  defaultBillRatePerKTokens Decimal? @db.Decimal(12, 4)
+
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  deletedAt      DateTime?
+
+  organization   Organization    @relation(fields: [organizationId], references: [id])
+  memberships    Membership[]
+  projectMembers ProjectMember[]
+  refreshTokens  RefreshToken[]
+  createdTasks   Task[]          @relation("TaskCreator")
+  assignments    TaskAssignee[]
+  timeEntries    TimeEntry[]
+  comments       Comment[]
+  attachments    Attachment[]
+  workSchedules  WorkSchedule[]
+  timeOffs       TimeOff[]
+  allocations    Allocation[]
+  teamMembers    TeamMember[]
+  charterSignedUploads ProjectCharter[] @relation("CharterSignedUploader")
+  docTemplateUploads   OrganizationDocumentTemplate[] @relation("DocTemplateUploader")
+  passwordHistory PasswordHistory[]
+  skills         UserSkill[]
+  projectRates   ProjectRate[]
+  agentProjectRates AgentProjectRate[] @relation("AgentRateAgent")
+  projectDocUploads ProjectDocument[] @relation("ProjectDocUploader")
+  projectExpenses ProjectExpense[] @relation("ProjectExpenseCreator")
+
+  @@unique([organizationId, email])
+  @@unique([organizationId, employeeId])
+  /// Identité externe unique par source. Postgres traite les NULL comme
+  /// distincts (NULLS DISTINCT par défaut) → la contrainte ne mord QUE sur les
+  /// lignes où `idpSource` ET `externalId` sont renseignés, c.-à-d. les agents
+  /// provisionnés (connecteur / `POST /agents`) et les users SSO. Indispensable
+  /// à la fédération : un JWT résout une identité par `(idpSource, sub)`, et
+  /// deux lignes homonymes rendraient cette résolution non déterministe
+  /// (jusqu'ici la déduplication n'était qu'applicative via `findFirst`).
+  @@unique([organizationId, idpSource, externalId])
+  @@index([organizationId])
+  @@index([organizationId, kind])
+}
+
+// ============================================================
+// Rôles & appartenances (RBAC)
+// ============================================================
+model Role {
+  id             String    @id @default(uuid())
+  organizationId String
+  key            String // ORG_ADMIN, CONTRIBUTOR, ...
+  name           String
+  scope          RoleScope
+  permissions    String[] // liste de `ressource:action`
+  isSystem       Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id])
+  memberships    Membership[]
+  projectMembers ProjectMember[]
+  projectTeams   ProjectTeam[]
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+}
+
+// Appartenance à l'organisation (échelle ORG)
+model Membership {
+  id             String   @id @default(uuid())
+  organizationId String
+  userId         String
+  roleId         String
+  // Grant orthogonal empilable par-dessus le rôle org : accorde `agent:manage`
+  // (gestion des agents IA au niveau org) sans consommer le slot de rôle unique.
+  // Dérivé en permission dans RbacService, calqué sur le grant lead d'équipe.
+  isAgentAdmin   Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+  role         Role         @relation(fields: [roleId], references: [id])
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+}
+
+// ============================================================
+// Projets
+// ============================================================
+model Project {
+  id             String        @id @default(uuid())
+  organizationId String
+  key            String // ex. "MKT"
+  name           String
+  description    String?
+  status         ProjectStatus @default(DRAFT)
+  startDate      DateTime?
+  dueDate        DateTime?
+  /// true = projet facturable (cycle complet avec charter signé requis pour
+  /// passer en ACTIVE) ; false = projet non-facturable (interne / organisationnel,
+  /// passe directement DRAFT → ACTIVE sans charter gate). Mutable uniquement
+  /// tant que `status = DRAFT`. Les rates sont toujours calculés pour le
+  /// reporting ; ce flag contrôle qui peut voir les montants et le workflow.
+  billable       Boolean       @default(true)
+  /// Cf. doc de l'enum : EXTERNAL = conteneur de tickets externes, timesheet only.
+  kind           ProjectKind   @default(STANDARD)
+  /// Slug de l'outil source (`jira`, `servicenow`, …) quand `kind = EXTERNAL`.
+  /// Couple discriminant du conteneur : (organizationId, kind, externalSource, clientId).
+  externalSource String?
+
+  // ---------- Agents IA (chantier 2 ; AGENTS_ARCHITECTURE.md § Contexte) ----------
+  /// Case « Agents autorisés ». Off par défaut (opt-in). Si false : aucun agent
+  /// n'est assignable / ne peut revendiquer une tâche de ce projet (gating au
+  /// claim + au picker de candidats). Passer à true EXIGE un `agentContext`.
+  agentsEnabled  Boolean       @default(false)
+  /// Brief permanent lu par les agents avant de travailler (markdown) : objet du
+  /// projet, où vont les livrables, conventions/style, liens. Propriété HUMAINE
+  /// (le PM l'édite). Requis quand `agentsEnabled`.
+  agentContext   String?
+  /// Contexte négatif : ce que les agents ne doivent PAS faire sur ce projet
+  /// (garde-fous, hors-périmètre). Optionnel.
+  agentGuardrails String?
+  /// Override projet de l'auto-clôture APPROVED→DONE (chantier 2c). `null` =
+  /// hériter du réglage org `agents.autoCloseOnApproval` ; `true`/`false` =
+  /// forcer pour ce projet.
+  agentAutoCloseOnApproval Boolean?
+  /// Enveloppe TOTALE de coût agent (€) pour ce projet (finance agents). `null` =
+  /// pas de plafond projet. Au claim d'une tâche du projet : refus si la somme des
+  /// `AgentRun.cost` du projet atteint ce plafond → un petit projet ne peut pas
+  /// consommer le budget des autres.
+  agentCostBudget Decimal? @db.Decimal(12, 2)
+  /// Capacités de vérification disponibles sur le projet (chantier 3, phase B) —
+  /// AGENTS_VERIFICATION.md §2. Tableau JSON de méthodes mécaniques réellement
+  /// atteignables ici (`tool_output`/`agent_validator`/`ci_signed`). `self_attest`
+  /// et `human` sont toujours implicitement disponibles. `null`/[] = seulement
+  /// self_attest + human → un plancher mécanique remonte à `human` (anti-deadlock).
+  verificationCapabilities Json?
+  /// Enjeu du projet (chantier 3, phase B) : `low`/`medium`/`high`/`critical`.
+  /// Réglé UNE fois par projet (onglet IA) et hérité par toutes ses tâches —
+  /// dérive le plancher de vérification (enjeu × trust de l'agent) et sert de
+  /// dimension `scopeIn` des policies. `null` = `low`. Remplace `Task.stakes`.
+  stakes         String?
+  /// Mode de vérification des livrables (phase D) — override PROJET du défaut org
+  /// `agents.verification.mode`. `'enforce'` = le gate BLOQUE sous le plancher et
+  /// un verdict `agent_validator approve` auto-transitionne (échantillonné) ;
+  /// `'report_only'` = journalise seulement (calibration). `null` = hérite de l'org.
+  verificationMode String?
+  /// Matrice d'événements notifiés aux SPONSORS du projet (membres `isSponsor`).
+  /// JSON `{ milestoneReached?, projectStatus?, milestoneAtRisk?, budgetThresholds? }`.
+  /// `null` = défauts appliqués côté code : jalon atteint + statut projet ON,
+  /// jalon à risque + paliers budget OFF (opt-in). Les paliers budget sponsor
+  /// sont toujours QUALITATIFS (palier franchi, jamais de montants — le budget
+  /// chiffré reste derrière `finance:view`).
+  sponsorNotify  Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  deletedAt      DateTime?
+
+  /// Enveloppe budgétaire structurée (devise = réglage org `finance.currency`).
+  /// Distincte de `ProjectCharter.budgetEstimate` (texte narratif libre) ; c'est
+  /// ce montant qui pilote le reporting budgétaire. Visible/éditable sous
+  /// `finance:view` / `finance:manage`.
+  budgetAmount    Decimal? @db.Decimal(14, 2)
+  /// Taux horaires par défaut du projet, fallback quand un membre n'a pas de
+  /// `ProjectRate` explicite. `costRate` = coût interne, `billRate` = facturé client.
+  defaultCostRate Decimal? @db.Decimal(12, 2)
+  defaultBillRate Decimal? @db.Decimal(12, 2)
+
+  /// Client (portefeuille) auquel le projet est rattaché. Nullable car un
+  /// projet peut exister sans client (interne) et la fonctionnalité
+  /// portefeuille est ajoutée après coup.
+  clientId       String?
+
+  /// Étape commerciale « offre » (projets facturables). `offerRefusalCount`
+  /// compte combien de fois l'offre a été refusée par le client (boucle
+  /// refus → révision → renvoi). `offerSentAt` / `offerDecidedAt` = horodatage
+  /// du dernier envoi et de la dernière décision (accept/refus).
+  offerRefusalCount Int       @default(0)
+  offerSentAt       DateTime?
+  offerDecidedAt    DateTime?
+
+  /// Provisioning Microsoft Teams (feature premium `teams-provisioning`). `msTeamId`
+  /// = id du group/team Graph une fois créé (sentinelle d'idempotence : tant qu'il
+  /// est posé, on ne recrée pas). `msTeamStatus` suit le cycle de vie (PENDING le
+  /// temps de l'opération async Graph, ACTIVE, ARCHIVED à la clôture, FAILED).
+  msTeamId            String?
+  msTeamProvisionedAt DateTime?
+  msTeamStatus        MsTeamStatus @default(NONE)
+
+  /// Contexte documentaire SharePoint pour les agents IA (source `sharepoint`).
+  /// `msTeamSiteId`/`msTeamDriveId` = site et drive Graph de la team, résolus
+  /// une fois la team provisionnée (proxy live, aucune copie). `msSpGrantStatus`
+  /// = état du droit de lecture (cf. enum). `spContextEnabled` = kill-switch par
+  /// projet (effectif seulement si toggle org + `agentsEnabled` + statut team).
+  msTeamSiteId     String?
+  msTeamDriveId    String?
+  msSpGrantStatus  MsSpGrantStatus @default(NONE)
+  spContextEnabled Boolean         @default(true)
+
+  organization Organization    @relation(fields: [organizationId], references: [id])
+  client       Client?         @relation(fields: [clientId], references: [id])
+  members      ProjectMember[]
+  teams        ProjectTeam[]
+  boards       Board[]
+  tasks        Task[]
+  labels       Label[]
+  allocations  Allocation[]
+  charter      ProjectCharter?
+  skills       ProjectSkill[]
+  rates        ProjectRate[]
+  agentRates   AgentProjectRate[]
+  documents    ProjectDocument[]
+  documentFolders ProjectDocumentFolder[]
+  offerEvents  ProjectOfferEvent[]
+  expenses     ProjectExpense[]
+  customFieldValues   ProjectCustomFieldValue[]
+  customFieldProjects CustomFieldProject[]
+  customStatusProjects CustomStatusProject[]
+
+  /// Le `key` (trigramme) n'est qu'une pastille visuelle (badge + préfixe
+  /// de fichier export). Les tâches référencent le projet par UUID, jamais
+  /// par key. On laisse donc les créateurs réutiliser le même trigramme
+  /// si ça les arrange — pas de contrainte d'unicité dessus.
+  ///
+  /// En revanche, le NOM doit être unique par client (org × client × name).
+  /// Pour clientId = NULL, Postgres traite chaque NULL comme distinct, donc
+  /// plusieurs projets internes (sans client) peuvent partager un nom — c'est
+  /// acceptable car ils ne sont pas dans un même portefeuille.
+  @@unique([organizationId, clientId, name])
+  @@index([organizationId])
+  @@index([organizationId, key])
+  @@index([clientId])
+}
+
+/// Journal des opérations de provisioning Microsoft Teams (debuggabilité, comme
+/// `EmailDelivery` / `WebhookDelivery`). Append-only, sans FK (survit à la
+/// suppression du projet). `membersSkipped` = comptes locaux sans `externalId`
+/// Entra, donc non invitables.
+model MsTeamProvisionLog {
+  id             String   @id @default(uuid())
+  organizationId String
+  projectId      String
+  action         String // provision | reconcile | archive | unarchive
+  status         String // SUCCESS | FAILED | PARTIAL
+  teamId         String?
+  membersAdded   Int      @default(0)
+  membersSkipped Int      @default(0)
+  error          String?
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, projectId])
+}
+
+/// Espace de collaboration rattaché à un projet (équipe Teams, canal Slack,
+/// espace Google…). Deux origines, portées par `source` :
+///  - `provisioned` : créé par Vaks lui-même (provisioning Teams). NB : le
+///    provisioning Teams continue d'écrire son état sur `Project.msTeam*` — il
+///    n'alimente PAS encore cette table (différé volontairement).
+///  - `external`   : créé DEHORS par un provisioner tiers qui vient déclarer le
+///    lien via `PUT /projects/:id/collab-spaces/:provider` (scope `collab:link`).
+/// Scalaires sans relation Prisma (style maison : Watcher, SkillRequest) pour
+/// limiter le couplage ; l'isolation org est vérifiée en service.
+model ProjectCollabSpace {
+  id             String   @id @default(uuid())
+  organizationId String
+  projectId      String
+  /// Slug du fournisseur : `msteams` | `slack` | `gchat` | libre `[a-z0-9-]{2,32}`.
+  provider       String
+  /// Identifiant côté fournisseur (group id Teams, channel id Slack…).
+  externalId     String?
+  /// URL de l'espace (https) — affichée comme lien sortant sur le projet.
+  url            String
+  name           String?
+  /// `provisioned` (créé par Vaks) | `external` (déclaré par un outil tiers).
+  source         String   @default("external")
+  linkedAt       DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, projectId, provider])
+  @@index([organizationId, projectId])
+}
+
+/// Project charter (PMBOK-style). 1-1 avec Project. Rempli pendant DRAFT,
+/// soumis pour signature pendant CHARTER_REVIEW, gelé après ACTIVE.
+/// Champs structurés exposés explicitement ; `extraSections` libre (JSON)
+/// pour absorber les rubriques non standard sans refonte.
+model ProjectCharter {
+  projectId       String   @id
+  projectPurpose  String?  // problème / opportunité que le projet adresse
+  objectives      String?  // objectifs SMART
+  scopeIn         String?  // ce qui est dans le périmètre
+  scopeOut        String?  // ce qui en est explicitement exclu
+  deliverables    String?  // livrables clés
+  milestones      String?  // jalons majeurs avec dates cibles
+  stakeholders    String?  // parties prenantes
+  sponsor         String?  // sponsor exécutif (nom résolu — imprimé sur le .docx)
+  /// Sponsor exécutif LIÉ À L'IDENTITÉ : userId d'un membre du projet. Choisir un
+  /// sponsor ici synchronise `sponsor` (nom) ET pose `ProjectMember.isSponsor=true`
+  /// (audience de communication). Référence scalaire (pattern maison, pas de FK).
+  sponsorUserId   String?
+  assumptions     String?  // hypothèses retenues
+  constraints     String?  // contraintes (budget, délais, ressources)
+  risks           String?  // risques initiaux identifiés
+  budgetEstimate  String?  // budget estimé (texte libre — devise + montant)
+  successCriteria String?  // critères de succès / KPI
+  extraSections   Json?    // rubriques additionnelles (key/value libre)
+
+  // Document signé uploadé par le portfolio manager (v1 minimal : nom +
+  // métadonnées ; le blob va en MinIO en v1.2).
+  signedDocumentFilename   String?
+  signedDocumentMimeType   String?
+  signedDocumentSizeBytes  Int?
+  signedDocumentUploadedAt DateTime?
+  signedDocumentUploadedBy String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project          Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  signedUploadedBy User?   @relation("CharterSignedUploader", fields: [signedDocumentUploadedBy], references: [id])
+}
+
+/// Catégorie d'un document projet. OFFER = offre commerciale / proposition.
+/// Extensible (OTHER) sans refonte.
+enum ProjectDocumentKind {
+  OFFER
+  OTHER
+}
+
+/// Documents rattachés à un projet (offres commerciales, propositions, etc.).
+/// Multi-documents (contrairement au charter signé unique). Blob en S3
+/// (bucket `charter-blobs`, clé `<projectId>/offers/<uuid>-<filename>`).
+model ProjectDocument {
+  id             String              @id @default(uuid())
+  organizationId String
+  projectId      String
+  kind           ProjectDocumentKind @default(OFFER)
+  /// Dossier (ProjectDocumentFolder.id). Scalaire SANS FK (pattern maison) :
+  /// null = racine ; si le dossier disparaît, le service remonte le contenu au
+  /// parent, et le rendu retombe défensivement à la racine.
+  folderId       String?
+  /// Document marqué « Contexte IA » : listé dans le work-context des tâches du
+  /// projet et lisible (texte) par les agents via l'endpoint task-scoped.
+  aiContext      Boolean             @default(false)
+  filename       String
+  mimeType       String
+  sizeBytes      Int
+  /// Clé S3 complète du blob.
+  storageKey     String
+  uploadedAt     DateTime            @default(now())
+  uploadedById   String?
+
+  project    Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  uploadedBy User?   @relation("ProjectDocUploader", fields: [uploadedById], references: [id])
+
+  @@index([projectId])
+  @@index([organizationId])
+  @@index([folderId])
+}
+
+/// Dossier de l'espace documents d'un projet (arborescence libre). `parentId`
+/// est une self-référence SCALAIRE (anti-cycle vérifié service). Suppression =
+/// le contenu (documents + sous-dossiers) REMONTE au parent — jamais de perte.
+model ProjectDocumentFolder {
+  id             String   @id @default(uuid())
+  organizationId String
+  projectId      String
+  parentId       String?
+  name           String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, parentId])
+}
+
+/// Type d'événement dans l'historique de l'étape « offre » d'un projet.
+enum ProjectOfferEventKind {
+  SENT      // offre envoyée au client (manuel ou par email)
+  ACCEPTED  // client a accepté l'offre → passage en CHARTER_REVIEW
+  REFUSED   // client a refusé l'offre → retour en DRAFT (révision), compteur++
+}
+
+/// Journal de l'étape commerciale « offre » d'un projet. Un enregistrement par
+/// envoi / décision. Sert d'audit léger (qui, quand, raison du refus) au-delà
+/// du simple compteur `Project.offerRefusalCount`. Références scalaires
+/// (FK-light, cf. conventions du projet) sauf le rattachement projet.
+model ProjectOfferEvent {
+  id             String                @id @default(uuid())
+  organizationId String
+  projectId      String
+  kind           ProjectOfferEventKind
+  /// Raison saisie lors d'un refus (optionnel). Pour SENT : email destinataire.
+  reason         String?
+  actorId        String?
+  createdAt      DateTime              @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([organizationId])
+}
+
+/// Template Word personnalisable par organisation. Quand absent, l'app utilise
+/// le template programmatique par défaut. Le blob vit en MinIO ; ici on stocke
+/// la métadonnée + la clé.
+model OrganizationDocumentTemplate {
+  organizationId String
+  kind           DocumentTemplateKind
+  storageKey     String   // clé S3 dans le bucket "document-templates"
+  filename       String
+  mimeType       String
+  sizeBytes      Int
+  uploadedById   String?
+  uploadedAt     DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  uploadedBy   User?        @relation("DocTemplateUploader", fields: [uploadedById], references: [id])
+
+  @@id([organizationId, kind])
+}
+
+// ============================================================
+// Portefeuille — Clients & Contacts
+// ============================================================
+
+/// Cycle de vie d'un client dans le portefeuille.
+enum ClientStatus {
+  PROSPECT
+  ACTIVE
+  ARCHIVED
+}
+
+/// Client (entité externe pour laquelle un ou plusieurs projets sont
+/// menés). Géré par les rôles ORG_ADMIN / PORTFOLIO_MANAGER.
+model Client {
+  id             String       @id @default(uuid())
+  organizationId String
+  name           String
+  company        String?
+  email          String?
+  phone          String?
+  address        String?
+  notes          String?
+  status         ClientStatus @default(ACTIVE)
+  /// Allowlist de modèles d'agent IA autorisés sur les projets de ce client
+  /// (chantier agents 3). Entrées `provider/model` ou `provider/*` ; vide = tout
+  /// autorisé. Enforcement dur au claim (`MODEL_NOT_ALLOWED`).
+  allowedAgentModels String[] @default([])
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  contacts     Contact[]
+  projects     Project[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+/// Contact rattaché à un client (interlocuteur principal, sponsor, etc.).
+model Contact {
+  id             String    @id @default(uuid())
+  organizationId String
+  clientId       String
+  name           String
+  title          String?
+  email          String?
+  phone          String?
+  notes          String?
+  isPrimary      Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([clientId])
+}
+
+// Appartenance à un projet (échelle PROJECT) — peut surcharger le rôle org
+model ProjectMember {
+  id        String   @id @default(uuid())
+  projectId String
+  userId    String
+  roleId    String
+  /// Tag « sponsor » empilable sur n'importe quel rôle (pattern TeamMember.isLead /
+  /// Membership.isAgentAdmin). Un sponsor est une AUDIENCE de communication
+  /// (annonces, jalons atteints, statut projet — cf. Project.sponsorNotify), pas
+  /// un niveau de droits : il ne confère aucune permission.
+  isSponsor Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+  role    Role    @relation(fields: [roleId], references: [id])
+
+  @@unique([projectId, userId])
+  @@index([projectId])
+}
+
+// ============================================================
+// Boards Kanban (phase 2 — structure posée dès le socle)
+// ============================================================
+model Board {
+  id        String   @id @default(uuid())
+  projectId String
+  name      String   @default("Board")
+  createdAt DateTime @default(now())
+
+  project Project       @relation(fields: [projectId], references: [id])
+  columns BoardColumn[]
+
+  @@index([projectId])
+}
+
+model BoardColumn {
+  id       String     @id @default(uuid())
+  boardId  String
+  name     String
+  order    Int
+  wipLimit Int?
+  status   TaskStatus
+
+  board Board  @relation(fields: [boardId], references: [id])
+  tasks Task[]
+
+  @@index([boardId])
+}
+
+// ============================================================
+// Tâches (base au socle ; champs Gantt/temps/charge ajoutés ensuite)
+// ============================================================
+model Task {
+  id             String       @id @default(uuid())
+  organizationId String
+  projectId      String
+  /// Numéro séquentiel par projet (1, 2, 3, ...). Combiné au `key` du
+  /// projet, fournit un identifiant humain stable (ex. `LIFE-12`). Attribué
+  /// à la création via verrou Postgres advisory pour éviter les doublons.
+  /// `0` = pas encore numéroté (rows historiques avant backfill).
+  number         Int          @default(0)
+  parentTaskId   String?
+  boardColumnId  String?
+  title          String
+  description    String?
+  status         TaskStatus   @default(TODO)
+  /// Sous-statut configurable (CustomStatus.id). Scalaire SANS FK (pattern
+  /// maison) : résolu client-side via la liste org ; toujours cohérent avec
+  /// `status` (= parentStatus du sous-statut), synchronisé par TasksService.
+  /// Nettoyé (fallback statut parent) à la suppression du sous-statut.
+  subStatusId    String?
+  /// Raison courante de la mise en pause (renseignée au passage en ON_HOLD,
+  /// éditable depuis le détail de tâche, remise à null en sortie de pause).
+  /// Facultative. La trace par transition vit dans TaskStatusHistory.reason.
+  holdReason     String?
+  priority       TaskPriority @default(NORMAL)
+  position       Float        @default(1000)
+  /// Acteur (humain ou agent) ayant revendiqué la tâche (chantier 2, claim
+  /// atomique). Renseigné au passage TODO→CLAIMED, effacé au release/takeover.
+  /// Scalaire (pas de relation Prisma) pour limiter le couplage — libellé résolu
+  /// au service si besoin.
+  claimedById    String?
+  claimedAt      DateTime?
+  estimateHours  Float?
+  dueDate        DateTime?
+  startDate      DateTime?
+  endDate        DateTime?
+  progressPct    Int          @default(0)
+  isMilestone    Boolean      @default(false)
+  /// true = la tâche est un bug / défaut (qualité). Alimente la densité de
+  /// défauts dans le rapport qualité projet.
+  isBug          Boolean      @default(false)
+  /// true = "groupe" (conteneur de sous-tâches). Une tâche normale (isGroup=false)
+  /// ne peut PAS contenir d'enfants ; seul un groupe peut être parent d'autres tâches/groupes.
+  isGroup        Boolean      @default(false)
+  /// Couleur (hex `#rrggbb`) appliquée à un groupe et héritée par ses descendants.
+  /// Significative uniquement quand `isGroup = true` ; ignorée sinon.
+  color          String?
+  /// Skill principal requis pour réaliser la tâche (référentiel org global).
+  /// Sert au tri du dropdown d'assignees (le plus skillé en premier) et au
+  /// scoring de l'autoplan. Nullable = pas d'exigence de compétence.
+  requiredSkillId String?
+  /// Niveau souhaité (1..maxLevel org) sur `requiredSkillId`. Ignoré si null
+  /// ou si `requiredSkillId` est null. Sert de cible pour le scoring : un
+  /// user dont le niveau dépasse cette cible obtient le bonus maximum.
+  requiredSkillLevel Int?
+  /// Référence vers un ticket d'outil externe (tâche d'un projet `kind=EXTERNAL`,
+  /// loggable en timesheet uniquement). `externalSource` = slug de l'outil
+  /// (`jira`, …), `externalKey` = identifiant humain du ticket (`PROJ-123`),
+  /// `externalUrl` = lien cliquable optionnel. Upsert idempotent garanti par
+  /// l'unique (organizationId, externalSource, externalKey).
+  externalSource String?
+  externalKey    String?
+  externalUrl    String?
+  /// Note libre décrivant une dépendance vis-à-vis d'un prestataire externe
+  /// (ex. « En attente livraison du module par l'ESN Foo »). Purement
+  /// informatif — sert à tracer un blocage causé par un tiers hors organisation.
+  /// null/vide = pas de dépendance externe déclarée.
+  externalDependency String?
+  /// true = la tâche est actuellement BLOQUÉE par sa dépendance externe
+  /// (`externalDependency`). Alimente le badge rouge sur la carte et le filtre
+  /// « bloqué par un externe ». Indépendant du statut ON_HOLD interne.
+  externalBlocked Boolean     @default(false)
+  /// Horodatage du passage false→true de `externalBlocked` (effacé au retour à
+  /// false). Mesure l'ancienneté du blocage pour l'automatisation
+  /// `external_blocked_stale` (« bloqué par un externe depuis > N jours »).
+  externalBlockedAt DateTime?
+  /// Contexte négatif spécifique à la tâche (garde-fous / hors-périmètre) lu par
+  /// un agent en complément du `Project.agentGuardrails`. Optionnel (chantier 2).
+  agentGuardrails String?
+  /// Nombre de cycles de revue rejetés (CHANGES_REQUESTED). Alimente
+  /// l'échantillonnage / le downgrade de confiance (AGENTS_VERIFICATION.md).
+  retryCount     Int          @default(0)
+  /// Enjeu de la tâche (chantier 3, phase B) : `low`/`medium`/`high`/`critical`.
+  /// Dérive le plancher de vérification requis (enjeu × trust de l'agent) et sert
+  /// de dimension `scopeIn` des policies. `null` = `low`.
+  stakes         String?
+  /// Critères d'acceptation structurés (chantier 2c.2) : `[{ text, done }]`.
+  /// Double emploi — cadrent l'agent en entrée ET servent de checklist de
+  /// décision au reviewer en sortie (gate IN_REVIEW→APPROVED). Édités par le PM.
+  acceptanceCriteria Json?
+  /// Snapshot du contexte lu par l'agent au moment du claim (traçabilité DORA) :
+  /// `{ hash, capturedAt, brief, guardrails, criteria }`. Fige QUELLE version du
+  /// contexte a produit le livrable, même si le brief change ensuite.
+  contextSnapshot    Json?
+  /// Enveloppe TOTALE de coût agent (€) pour CETTE tâche (finance agents). `null` =
+  /// pas de plafond tâche. Au claim : refus si la somme des `AgentRun.cost` de la
+  /// tâche atteint ce plafond (attrape surtout le re-travail CHANGES_REQUESTED).
+  agentCostBudget    Decimal?     @db.Decimal(12, 2)
+  createdById    String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  deletedAt      DateTime?
+
+  project     Project        @relation(fields: [projectId], references: [id])
+  boardColumn BoardColumn?   @relation(fields: [boardColumnId], references: [id])
+  createdBy   User           @relation("TaskCreator", fields: [createdById], references: [id])
+  parent      Task?          @relation("Subtasks", fields: [parentTaskId], references: [id])
+  subtasks    Task[]         @relation("Subtasks")
+  assignees       TaskAssignee[]
+  labels          TaskLabel[]
+  timeEntries     TimeEntry[]
+  comments        Comment[]
+  attachments     Attachment[]
+  predecessorLinks TaskDependency[] @relation("DependencySuccessor")
+  successorLinks   TaskDependency[] @relation("DependencyPredecessor")
+  allocations     Allocation[]
+  requiredSkill   Skill?         @relation(fields: [requiredSkillId], references: [id])
+  requiredSkills  TaskRequiredSkill[]
+  statusHistory   TaskStatusHistory[]
+  deliverables    Deliverable[]
+  customFieldValues TaskCustomFieldValue[]
+
+  @@unique([organizationId, externalSource, externalKey])
+  @@index([projectId, status])
+  @@index([boardColumnId, position])
+  @@index([organizationId])
+  @@index([subStatusId])
+}
+
+/// Historique des changements de statut d'une tâche (append-only). Source du
+/// Cumulative Flow Diagram et du taux de re-travail (transitions arrière).
+/// Les données s'accumulent à partir de l'activation (pas de backfill).
+model TaskStatusHistory {
+  id             String      @id @default(uuid())
+  organizationId String
+  projectId      String
+  taskId         String
+  /// null sur la 1re entrée (création de la tâche).
+  fromStatus     TaskStatus?
+  toStatus       TaskStatus
+  /// Motif facultatif saisi lors de la transition (surtout ON_HOLD).
+  reason         String?
+  changedById    String?
+  changedAt      DateTime    @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, changedAt])
+  @@index([taskId])
+  @@index([organizationId])
+}
+
+/// Livrable soumis pour une tâche (chantier 2c ; AGENTS_ARCHITECTURE.md). Un
+/// livrable = surtout une URL (artefact Git/SharePoint/doc) OU une pièce jointe
+/// S3, PLUS une justification en langage naturel et un workflow de revue propre.
+/// La revue porte sur le livrable, jamais sur une déclaration « c'est fait ».
+/// Les références d'acteur (auteur/reviewer) sont des scalaires (pas de relations
+/// Prisma) pour limiter le couplage — libellés résolus au service, comme
+/// `Task.claimedById`.
+model Deliverable {
+  id             String                  @id @default(uuid())
+  organizationId String
+  taskId         String
+  /// Auteur du livrable = l'acteur (humain ou agent) qui l'a produit (AI Act Art. 50).
+  authorId       String
+  title          String
+  /// Artefact principal : URL cliquable (dépôt, doc, PR…). Optionnel si `attachmentId`.
+  url            String?
+  /// …ou pièce jointe S3 existante (réutilise le pipeline Attachment). Scalaire
+  /// unique — un attachment ne peut adosser qu'un seul livrable.
+  attachmentId   String?                 @unique
+  /// Justification en langage naturel produite par l'auteur (ce qui a été fait,
+  /// comment, choix). Le cœur de ce que le reviewer lit.
+  justification  String?
+  reviewStatus   DeliverableReviewStatus @default(PENDING)
+  /// Reviewer (humain `task:review`) ; jamais l'auteur (anti auto-approbation).
+  reviewedById   String?
+  reviewedAt     DateTime?
+  reviewNote     String?
+  /// Chaîne de resoumissions : ce livrable remplace `supersedesId`, `version`+1.
+  supersedesId   String?                 @unique
+  version        Int                     @default(1)
+  /// Vérification (AGENTS_VERIFICATION.md) : { method, status, evidence? }. Phase A
+  /// (pilote) = `self_attest` / `human` seulement. Null = aucune preuve fournie.
+  verification   Json?
+  /// SHA du commit associé (preuve CI signée, chantier vérif phase B). Optionnel.
+  commitSha      String?
+  /// Bail de validation par un AGENT VALIDATEUR (phase D `agent_validator`). La
+  /// revue devient une **tâche tirée** (symétrie next_task) : un agent ≠ l'auteur
+  /// revendique le livrable (lease TTL), envoie des heartbeats, rend un verdict.
+  /// Un cron rebascule les baux expirés (validateur zombie). JAMAIS l'auteur.
+  validatorClaimedById    String?
+  validatorClaimedAt      DateTime?
+  validatorLeaseExpiresAt DateTime?
+  /// Verdict rendu par l'agent validateur : 'approve' | 'changes_requested'.
+  validatorVerdict        String?
+  validatorNote           String?
+  createdAt      DateTime                @default(now())
+  deletedAt      DateTime?
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt])
+  @@index([organizationId, reviewStatus])
+  @@index([authorId])
+  /// File de validation agent : livrables PENDING baillables/baillés (§8.7 sweep).
+  @@index([organizationId, reviewStatus, validatorLeaseExpiresAt])
+}
+
+/// Journal vivant du projet (chantier 2c.2) — continuité inter-agents. Alimenté
+/// **UNIQUEMENT** par les livrables APPROUVÉS (garde-fou anti-poisoning : le
+/// contexte partagé qui pilote les agents n'est jamais réécrit librement par un
+/// agent, il n'évolue qu'à travers la porte de revue humaine). Borné à la lecture
+/// (N derniers). Scalaires seuls (pas de relations) pour limiter le couplage.
+model AgentJournalEntry {
+  id             String   @id @default(uuid())
+  organizationId String
+  projectId      String
+  taskId         String
+  deliverableId  String?
+  /// Titre de la tâche/livrable (snapshoté, survit à la suppression).
+  title          String
+  /// Résumé (justification du livrable approuvé) — l'entrée du prochain agent.
+  summary        String?
+  createdAt      DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([organizationId])
+}
+
+/// Run d'exécution d'un agent (chantier finance agents). Coût **réel déclaratif**
+/// par l'agent lui-même (`POST /agent-runs`) : tokens + € consommés. Alimente les
+/// budgets (jour/mois/tâche) et le recalage `avgCostPerTask`. Un agent ne déclare
+/// QUE ses propres runs. Scalaires seuls (agentId/taskId/deliverableId).
+model AgentRun {
+  id             String   @id @default(uuid())
+  organizationId String
+  agentId        String
+  taskId         String?
+  /// Projet du run (dénormalisé depuis la tâche au report) — sert l'agrégation
+  /// et les budgets de coût **par projet**.
+  projectId      String?
+  deliverableId  String?
+  /// Modèle utilisé pour ce run (snapshot ; peut différer du profil agent).
+  model          String?
+  tokensIn       Int?
+  tokensOut      Int?
+  /// Coût réel en € (devise org) déclaré par l'agent.
+  cost           Decimal? @db.Decimal(12, 4)
+  /// Note libre (ce que le run a fait).
+  note           String?
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, agentId, createdAt])
+  @@index([taskId])
+  @@index([projectId, createdAt])
+}
+
+/// Connecteur CI signataire (vérification des livrables — phase C,
+/// AGENTS_VERIFICATION.md §9.2). Détient le **secret partagé HMAC** (chiffré
+/// at-rest, pattern connecteurs) qui authentifie les webhooks CI ENTRANTS
+/// `POST /webhooks/ci/:provider`. vaks-pm ne se connecte à AUCUN CI : c'est la
+/// CI qui pousse un résultat signé, vaks-pm vérifie la signature. Un secret par
+/// (org, provider) — un webhook GitHub org-wide = un secret.
+model CiConnector {
+  id             String   @id @default(uuid())
+  organizationId String
+  /// Type de signataire : 'github' (X-Hub-Signature-256) | 'generic'
+  /// (X-Vaks-CI-Signature = sha256=HMAC(secret, rawBody)).
+  provider       String
+  label          String
+  enabled        Boolean  @default(true)
+  /// Secret partagé HMAC, chiffré at-rest par tenant. Jamais renvoyé à l'UI
+  /// (remplacé par un booléen `secretConfigured`).
+  secretEnc      String?
+  /// Diagnostic du dernier webhook reçu (débogage config), non sensible.
+  lastEventAt    DateTime?
+  lastEventOk    Boolean?
+  lastEventError String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([organizationId, provider])
+  @@index([organizationId])
+}
+
+/// Résultat CI signé reçu en attente d'appariement à un livrable (phase C,
+/// AGENTS_VERIFICATION.md §8.1). La CI peut signer un commit AVANT que l'agent
+/// n'ait soumis son livrable → on bufferise par `commitSha`, TTL 24 h (purgé
+/// par cron). Au gate, le livrable `ci_signed` corrobore son statut ici plutôt
+/// que de faire confiance au `status` déclaré par l'agent.
+model CiResultPending {
+  id             String   @id @default(uuid())
+  organizationId String
+  provider       String
+  /// SHA du commit signé par la CI (matché à `Deliverable.commitSha`).
+  commitSha      String
+  /// Verdict CI normalisé : 'success' | 'failure'.
+  conclusion     String
+  /// Identifiant du run CI (traçabilité, non vérifié).
+  runId          String?
+  /// URL du run CI (affichée au reviewer, non vérifiée).
+  runUrl         String?
+  /// SHA-256 du payload brut reçu (intégrité de la preuve, informatif).
+  payloadSha256  String?
+  receivedAt     DateTime @default(now())
+  /// Expiration (receivedAt + TTL). Les résultats expirés sont ignorés au
+  /// match et purgés par le cron.
+  expiresAt      DateTime
+
+  @@index([organizationId, commitSha])
+  @@index([expiresAt])
+}
+
+// ============================================================
+// Pièces jointes (Phase 6 — MinIO S3)
+// Upload/download proxifiés via l'API (pas de presign : pas besoin
+// d'exposer MinIO publiquement, et l'API applique RBAC sur chaque GET).
+// ============================================================
+model Attachment {
+  id             String   @id @default(uuid())
+  organizationId String
+  taskId         String
+  uploaderId     String
+  /// Clé objet dans le bucket MinIO (ex: "org/<orgId>/task/<taskId>/<uuid>-<filename>")
+  storageKey     String   @unique
+  filename       String
+  mimeType       String
+  sizeBytes      Int
+  createdAt      DateTime @default(now())
+  deletedAt      DateTime?
+
+  task     Task @relation(fields: [taskId], references: [id])
+  uploader User @relation(fields: [uploaderId], references: [id])
+
+  @@index([organizationId])
+  @@index([taskId])
+}
+
+// ============================================================
+// Dépendances entre tâches (Phase 4 — Gantt)
+// ============================================================
+model TaskDependency {
+  id              String         @id @default(uuid())
+  organizationId  String
+  projectId       String
+  predecessorId   String
+  successorId     String
+  type            DependencyType @default(FS)
+  /// Décalage en jours (peut être négatif pour avance).
+  lagDays         Int            @default(0)
+  createdAt       DateTime       @default(now())
+
+  predecessor Task @relation("DependencyPredecessor", fields: [predecessorId], references: [id], onDelete: Cascade)
+  successor   Task @relation("DependencySuccessor", fields: [successorId], references: [id], onDelete: Cascade)
+
+  @@unique([predecessorId, successorId, type])
+  @@index([projectId])
+  @@index([successorId])
+}
+
+model TaskAssignee {
+  taskId String
+  userId String
+
+  task Task @relation(fields: [taskId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@id([taskId, userId])
+  @@index([userId])
+}
+
+// ============================================================
+// Labels (étiquettes par projet)
+// ============================================================
+model Label {
+  id        String   @id @default(uuid())
+  projectId String
+  name      String
+  color     String   @default("#6b7280") // hex (#rrggbb)
+  createdAt DateTime @default(now())
+
+  project Project     @relation(fields: [projectId], references: [id])
+  tasks   TaskLabel[]
+
+  @@unique([projectId, name])
+  @@index([projectId])
+}
+
+model TaskLabel {
+  taskId  String
+  labelId String
+
+  task  Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  label Label @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, labelId])
+  @@index([labelId])
+}
+
+// ============================================================
+// Suivi du temps (Phase 3)
+// ============================================================
+model TimeEntry {
+  id             String   @id @default(uuid())
+  organizationId String
+  taskId         String
+  userId         String
+  /// Date "métier" de l'entrée (jour ouvré) — distincte de createdAt.
+  date           DateTime @db.Date
+  /// Durée en minutes (entier, plus précis qu'un Float d'heures).
+  durationMinutes Int
+  /// Sous-portion de `durationMinutes` considérée comme heures
+  /// supplémentaires (au-delà de la capacité du jour). 0 par défaut.
+  /// Toujours <= durationMinutes (contrainte vérifiée applicativement).
+  overtimeMinutes Int     @default(0)
+  description    String?
+  /// Taux horaires FIGÉS à la création (coût historique immuable) : on copie le
+  /// taux résolu (ProjectRate explicite sinon défaut projet) au moment où l'heure
+  /// est loggée, pour qu'un changement de taux ultérieur ne réécrive pas le passé.
+  /// null = saisie antérieure au snapshotting → le reporting retombe sur le taux
+  /// courant (live). Le prévisionnel (allocations) reste toujours live.
+  costRateSnapshot Decimal? @db.Decimal(12, 2)
+  billRateSnapshot Decimal? @db.Decimal(12, 2)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([organizationId])
+  @@index([userId, date])
+  @@index([taskId])
+}
+
+// ============================================================
+// Commentaires (Phase 6 — scaffold posé tôt)
+// ============================================================
+model Comment {
+  id             String    @id @default(uuid())
+  organizationId String
+  taskId         String
+  authorId       String
+  body           String
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id])
+
+  @@index([taskId, createdAt])
+  @@index([organizationId])
+}
+
+// ============================================================
+// Refresh tokens (révocables) pour l'auth locale
+// ============================================================
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  /// Dernière activité (refresh / appel authentifié) observée pour cette session.
+  /// Sert au calcul de l'idle timeout (`security.sessionTimeoutMinutes`).
+  /// Mis à jour côté backend dans le flow refresh.
+  lastActivityAt DateTime @default(now())
+  /// User-Agent capturé au login (tronqué à 500 chars côté API). Affiché dans
+  /// la liste "Active sessions" pour aider l'admin à reconnaître ses sessions
+  /// (ex. "Chrome 124 on macOS"). Null pour les sessions créées avant l'ajout.
+  userAgent      String?
+  /// Adresse IP du client au login (X-Forwarded-For derrière Traefik, fallback
+  /// sur req.ip). Tronquée. Null pour les sessions historiques.
+  ipAddress      String?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+/// Historique des derniers mots de passe d'un user (hashes Argon2 uniquement —
+/// jamais le clair). Sert au check "prevent reuse" : à chaque changement de
+/// mot de passe, on vérifie que le nouveau n'a pas déjà été utilisé dans les
+/// N dernières entrées (N = `security.passwordHistoryCount`, 0 = désactivé).
+/// La table est trimmée à N entrées par user après chaque insertion.
+model PasswordHistory {
+  id           String   @id @default(uuid())
+  userId       String
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// ============================================================
+// Équipes (groupes d'utilisateurs transverses aux projets)
+// ============================================================
+model Team {
+  id             String    @id @default(uuid())
+  organizationId String
+  name           String
+  /// Nom d'affichage personnalisé (override LOCAL). Si présent, l'UI l'utilise
+  /// à la place de `name`. Pour une équipe SCIM/OIDC, `name` suit le groupe de
+  /// l'IdP (réécrit à chaque sync) ; `displayName` n'est JAMAIS touché par la
+  /// synchro et reste éditable, même sur une équipe synchronisée.
+  displayName    String?
+  description    String?
+  color          String?
+  /// Identifiant externe pour la synchro SCIM/OIDC (groupe AAD, etc.). Null
+  /// pour les équipes créées à la main. Unique par organisation quand présent.
+  externalId     String?
+  /// LOCAL = créée à la main dans l'admin ; SCIM/OIDC = provisionnée depuis
+  /// un IdP (édition manuelle des membres restreinte côté UI).
+  source         String    @default("LOCAL")
+  /// Si true, les membres de l'équipe (sauf override `User.canCreateNonBillableProject`)
+  /// peuvent créer des projets non-facturables — sous réserve que la policy
+  /// org `projectCreation.nonBillable.mode = 'teams'` autorise cette équipe.
+  canCreateNonBillableProject Boolean @default(false)
+  /// Si true, **tout membre actif de l'équipe se voit attribuer un siège de
+  /// licence** (`User.licensed=true`, dans la limite du plafond `maxUsers`).
+  /// Pensé pour pointer le groupe SCIM/Entra des utilisateurs « licenciés » :
+  /// l'ajout au groupe (sync SCIM ou ajout manuel) attribue un siège, le retrait
+  /// le libère (si le user n'est plus dans AUCUNE équipe auto-licence). Source
+  /// de vérité du siège pour ces users → gouverne grant ET revoke. Cf.
+  /// `SeatService.reconcileAutoLicense`. Réservé aux Org Admins (enjeu licence).
+  autoLicense    Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization  @relation(fields: [organizationId], references: [id])
+  members      TeamMember[]
+  projects     ProjectTeam[]
+  skills       TeamSkill[]
+  packScopes   SkillPackTeamScope[]
+
+  @@unique([organizationId, name])
+  @@unique([organizationId, externalId])
+  @@index([organizationId])
+}
+
+/// Assignement d'une équipe à un projet. Tout user membre d'une de ces équipes
+/// gagne la visibilité sur le projet (en plus des ProjectMember directs) ET, si
+/// `roleId` est posé, le niveau d'accès project-scopé de ce rôle (CONTRIBUTOR
+/// par défaut) — additif avec un éventuel ProjectMember direct (le plus
+/// permissif l'emporte). `roleId` null = visibilité seule (legacy).
+model ProjectTeam {
+  projectId String
+  teamId    String
+  roleId    String?
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  team    Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  role    Role?   @relation(fields: [roleId], references: [id])
+
+  @@id([projectId, teamId])
+  @@index([teamId])
+  @@index([roleId])
+}
+
+model TeamMember {
+  teamId    String
+  userId    String
+  isLead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@id([teamId, userId])
+  @@index([userId])
+}
+
+// ============================================================
+// Phase 5 — Workload / capacité
+// ============================================================
+enum TimeOffType {
+  VACATION
+  SICK
+  PERSONAL
+  PARENTAL
+  OTHER
+}
+
+/// Capacité de travail d'un utilisateur : heures contractuelles par jour
+/// de semaine + taux d'occupation. Historisable via `effectiveFrom`.
+/// Au calcul on retient le `WorkSchedule` actif le plus récent (max
+/// `effectiveFrom` <= date considérée).
+model WorkSchedule {
+  id             String   @id @default(uuid())
+  userId         String
+  organizationId String
+  effectiveFrom  DateTime @db.Date
+  hoursMon       Float    @default(8)
+  hoursTue       Float    @default(8)
+  hoursWed       Float    @default(8)
+  hoursThu       Float    @default(8)
+  hoursFri       Float    @default(8)
+  hoursSat       Float    @default(0)
+  hoursSun       Float    @default(0)
+  /// Taux d'occupation cible (0..100, en %)
+  occupancyPct   Int      @default(100)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, effectiveFrom])
+  @@index([organizationId])
+  @@index([userId])
+}
+
+/// Absence (congé, maladie, etc.) d'un utilisateur sur une plage de
+/// dates incluses (inclusif-inclusif). Déduit la capacité disponible.
+model TimeOff {
+  id             String      @id @default(uuid())
+  userId         String
+  organizationId String
+  startDate      DateTime    @db.Date
+  endDate        DateTime    @db.Date
+  type           TimeOffType @default(VACATION)
+  notes          String?
+  /// Origine de l'entrée : MANUAL (créé dans l'UI), IMPORT (CSV), API
+  /// (sync depuis un SIRH via bulk-upsert). Sert au filtrage et au scoping
+  /// des droits d'édition.
+  source         String      @default("MANUAL")
+  /// Clé fournie par le système amont (SIRH, CSV) pour upsert idempotent.
+  /// Null pour les entrées manuelles.
+  externalId     String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([organizationId, source, externalId])
+  @@index([organizationId])
+  @@index([userId, startDate])
+}
+
+/// Allocation : effort planifié d'un utilisateur sur une tâche, étalé
+/// sur une plage de dates ouvrées avec un nombre d'heures/jour fixe.
+/// La charge sur un jour donné = somme des `hoursPerDay` des allocations
+/// actives ce jour-là.
+model Allocation {
+  id             String   @id @default(uuid())
+  userId         String
+  taskId         String
+  organizationId String
+  projectId      String
+  startDate      DateTime @db.Date
+  endDate        DateTime @db.Date
+  hoursPerDay    Float    @default(4)
+  notes          String?
+  /// true = saisie/édition manuelle par le PM, ne sera jamais écrasée par l'autoplan.
+  isManual       Boolean  @default(false)
+  /// true = posée par l'algo d'auto-planification (POST /workload/autoplan).
+  isAutoPlan     Boolean  @default(false)
+  /// Incrément à chaque exécution persistée de l'autoplan (utile pour debug).
+  planVersion    Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id])
+  task    Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@index([organizationId])
+  @@index([userId, startDate])
+  @@index([projectId])
+  @@index([taskId])
+}
+
+/// Taux horaire d'une personne SUR UN PROJET donné — une même personne peut
+/// donc coûter / être facturée différemment selon le projet. Override des
+/// défauts portés par `Project.defaultCostRate` / `defaultBillRate`.
+/// Données sensibles : exposées uniquement sous `finance:view`, éditées sous
+/// `finance:manage`. Devise = réglage org `finance.currency` (pas stockée ici
+/// pour rester cohérent à l'échelle org).
+model ProjectRate {
+  id             String   @id @default(uuid())
+  organizationId String
+  projectId      String
+  userId         String
+  /// Coût interne / heure (ce que la personne coûte à l'entreprise).
+  costRate       Decimal  @db.Decimal(12, 2)
+  /// Taux facturé au client / heure (optionnel ; null = non facturable nominativement).
+  billRate       Decimal? @db.Decimal(12, 2)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([projectId, userId])
+  @@index([organizationId])
+  @@index([projectId])
+  @@index([userId])
+}
+
+/// Taux de facturation **agent IA** par projet (miroir de `ProjectRate` humain,
+/// mais l'unité est le **kToken** — 1000 tokens in+out déclarés via `AgentRun` —
+/// jamais l'heure : un agent n'a pas de timesheet). Résolution 3 niveaux :
+/// ce taux explicite > `User.defaultBillRatePerKTokens` > non facturable.
+/// N'existe que pour des users `kind = AGENT` (enforcé côté service).
+model AgentProjectRate {
+  id             String   @id @default(uuid())
+  organizationId String
+  projectId      String
+  agentId        String
+  /// € facturés au client par 1000 tokens (in+out) consommés sur ce projet.
+  billRatePerKTokens Decimal @db.Decimal(12, 4)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  agent   User    @relation("AgentRateAgent", fields: [agentId], references: [id])
+
+  @@unique([projectId, agentId])
+  @@index([organizationId])
+  @@index([projectId])
+}
+
+/// Catégorie d'un coût hors main-d'œuvre rattaché à un projet.
+/// LICENSE = licences logicielles / abonnements SaaS ; HARDWARE = matériel /
+/// équipement ; CLOUD = consommation cloud / hébergement ; SUBCONTRACTOR =
+/// sous-traitance / prestation externe ; OTHER = fourre-tout.
+enum ProjectExpenseCategory {
+  LICENSE
+  HARDWARE
+  CLOUD
+  SUBCONTRACTOR
+  OTHER
+}
+
+/// PLANNED = coût budgété (alimente le prévisionnel) ; INCURRED = coût engagé
+/// (alimente le réel). Miroir de la distinction prévu/réel de la main-d'œuvre.
+enum ProjectExpenseStatus {
+  PLANNED
+  INCURRED
+}
+
+/// Récurrence d'un coût. ONE_OFF = ponctuel ; MONTHLY / ANNUAL = récurrent sur
+/// une plage de dates (le budget multiplie le montant par le nombre de périodes).
+enum ProjectExpenseRecurrence {
+  ONE_OFF
+  MONTHLY
+  ANNUAL
+}
+
+/// Coût hors main-d'œuvre rattaché à un projet (licence, matériel, cloud,
+/// sous-traitance…). `amount` = coût interne (par période si récurrent) ;
+/// `billAmount` = montant refacturé au client (pass-through, null = non
+/// refacturé). `quantity` = multiplicateur (sièges, unités). Données sensibles :
+/// exposées sous `finance:view`, éditées sous `finance:manage`. Devise = réglage
+/// org `finance.currency`. Soft-delete via `deletedAt`.
+model ProjectExpense {
+  id             String                   @id @default(uuid())
+  organizationId String
+  projectId      String
+  category       ProjectExpenseCategory
+  label          String
+  description    String?
+  amount         Decimal                  @db.Decimal(14, 2)
+  billAmount     Decimal?                 @db.Decimal(14, 2)
+  quantity       Decimal                  @default(1) @db.Decimal(12, 2)
+  status         ProjectExpenseStatus     @default(INCURRED)
+  recurrence     ProjectExpenseRecurrence @default(ONE_OFF)
+  /// Début de la plage récurrente (ou date du coût ponctuel).
+  startDate      DateTime?
+  /// Fin de la plage récurrente (fallback : `Project.dueDate`).
+  endDate        DateTime?
+  createdById    String?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+  deletedAt      DateTime?
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy User?   @relation("ProjectExpenseCreator", fields: [createdById], references: [id])
+
+  @@index([projectId])
+  @@index([organizationId])
+}
+
+/// Statut d'envoi d'une notification email — purement observationnel (debug).
+/// `queued` à la création du job BullMQ, mis à jour par le worker.
+enum EmailDeliveryStatus {
+  QUEUED
+  SENT
+  FAILED
+  SKIPPED
+}
+
+/// Journal d'envois email pour debug. Pas de rétention longue : purgé via
+/// la rétention org (phase 8 audit). Ne stocke pas le corps des messages.
+model EmailDelivery {
+  id             String              @id @default(uuid())
+  organizationId String
+  /// Adresse destinataire (une ligne par destinataire si plusieurs).
+  toAddress      String
+  subject        String
+  /// Identifiant du template utilisé (assignment, mention, due, status, digest, test).
+  template       String
+  status         EmailDeliveryStatus @default(QUEUED)
+  /// Détail d'erreur SMTP si status = FAILED, ou raison du SKIPPED (quiet hours, kill switch).
+  error          String?
+  queuedAt       DateTime            @default(now())
+  sentAt         DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, queuedAt])
+  @@index([status])
+}
+
+// ============================================================
+// Phase 7 — Webhooks sortants
+// ============================================================
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+/// Webhook sortant configuré par un admin de l'organisation. Reçoit un POST
+/// HTTP signé HMAC-SHA256 à chaque event souscrit. Le secret est stocké en
+/// clair (utilisé pour signer côté serveur ET vérifier côté récepteur — pas
+/// un secret au sens cryptographique fort, juste un partagé).
+model Webhook {
+  id             String   @id @default(uuid())
+  organizationId String
+  /// URL cible du POST (https://…). Validée à la création.
+  url            String
+  /// Libellé humain pour l'admin UI (ex. "Slack #ops").
+  label          String   @default("")
+  /// Secret partagé utilisé pour signer le payload (header X-Vaks-Signature).
+  secret         String
+  /// Liste d'events souscrits. Wildcard "*" = tous. Ex. ["task.created", "comment.created"].
+  events         String[]
+  /// false = ne reçoit plus rien (utile pour suspendre sans supprimer).
+  active         Boolean  @default(true)
+  /// Périmètre de routage : ORG (défaut, historique) = tous les events de l'org ;
+  /// PROJECT = uniquement les events rattachés au projet `scopeId` ; TEAM =
+  /// uniquement les events rattachés à l'équipe `scopeId` (projets affectés à
+  /// l'équipe + demandes de compétence ciblant l'équipe). 1 canal Teams = 1
+  /// webhook scopé.
+  scopeType      String   @default("ORG")
+  /// projectId (scopeType=PROJECT) ou teamId (scopeType=TEAM) ; null si ORG.
+  scopeId        String?
+  /// Format du payload émis : "raw" = enveloppe JSON Vaks (défaut) ; "teams" =
+  /// message Adaptive Card prêt pour un canal Teams / Power Automate
+  /// ("Post card in a chat or channel").
+  format         String   @default("raw")
+  /// Nombre de livraisons terminales consécutives en échec (reset à 0 sur succès).
+  /// Sert à l'auto-désactivation après N échecs.
+  consecutiveFailures Int  @default(0)
+  /// Posé quand le webhook a été désactivé automatiquement (échecs répétés).
+  autoDisabledAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id])
+  deliveries   WebhookDelivery[]
+
+  @@index([organizationId])
+}
+
+/// Journal d'une tentative de livraison webhook. Une ligne par event x webhook ;
+/// les retries (jusqu'à `attempts` max via BullMQ) restent dans la même ligne et
+/// mettent à jour status / responseStatus / error / attemptCount.
+model WebhookDelivery {
+  id              String                @id @default(uuid())
+  organizationId  String
+  webhookId       String
+  event           String
+  /// Payload JSON envoyé (utile pour replay / debug).
+  payload         Json
+  status          WebhookDeliveryStatus @default(PENDING)
+  /// Code HTTP du dernier essai (null si jamais émis).
+  responseStatus  Int?
+  /// Snippet du corps de réponse (tronqué) pour debug ; null en cas de timeout.
+  responseBody    String?
+  /// Message d'erreur du dernier échec (timeout, DNS, 5xx, etc.).
+  error           String?
+  /// Nombre de tentatives effectuées (1..N).
+  attemptCount    Int                   @default(0)
+  queuedAt        DateTime              @default(now())
+  deliveredAt     DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  webhook      Webhook      @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, queuedAt])
+  @@index([webhookId, queuedAt])
+  @@index([status])
+}
+
+/// Jeton d'API (Phase 9). Deux types :
+///  - USER : agit AU NOM d'un utilisateur (hérite de son RBAC, restreint en
+///    option par `scopes`). Géré par l'utilisateur dans ses options.
+///  - ORG  : identité service (pas d'utilisateur) ; ses droits = `scopes`
+///    (défaut lecture seule). Géré par un admin.
+/// Le secret en clair n'est JAMAIS stocké : on garde `tokenHash` (SHA-256) et
+/// `prefix` (affiché dans la liste). Montré une seule fois à la création.
+model ApiToken {
+  id             String    @id @default(uuid())
+  organizationId String
+  /// 'USER' | 'ORG'
+  type           String
+  /// Utilisateur emprunté (type=USER). Null pour ORG.
+  userId         String?
+  name           String
+  /// Partie publique affichable (ex. "vaks_pat_AbC123…").
+  prefix         String
+  /// SHA-256 hex du secret complet. Lookup à l'authentification.
+  tokenHash      String    @unique
+  /// Permissions accordées (vocabulaire Permission). ORG : droits effectifs.
+  /// USER : restriction optionnelle (vide = tous les droits du user).
+  scopes         String[]
+  lastUsedAt     DateTime?
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  /// Posé quand le rappel « expiration proche » a été envoyé (anti-doublon).
+  expiryReminderSentAt DateTime?
+  /// Origine du jeton : 'manual' (créé à la main dans l'admin), 'oauth' (émis
+  /// par la façade OAuth/MCP), 'agent' (minté par un admin pour un agent),
+  /// 'inbound' (carte connecteur entrant), 'federation' (échangé contre un JWT
+  /// de plateforme). Remplace le matching par préfixe de nom, et pilote la purge
+  /// : les jetons `federation` sont émis en continu et doivent être ramassés.
+  source         String    @default("manual")
+  createdById    String
+  createdAt      DateTime  @default(now())
+
+  @@index([organizationId])
+  @@index([userId])
+  /// Purge des jetons fédérés expirés (cron) — scan borné par origine + date.
+  @@index([organizationId, source, expiresAt])
+}
+
+/// Jeton de réinitialisation de mot de passe (lien email déclenché par un admin).
+/// Le secret en clair n'est JAMAIS stocké — seul son SHA-256 (`tokenHash`).
+/// Usage unique, courte durée (`expiresAt`). Sans relation Prisma (scalaire
+/// `userId`) pour limiter le couplage, comme ApiToken.
+model PasswordResetToken {
+  id             String    @id @default(uuid())
+  organizationId String
+  userId         String
+  /// SHA-256 hex du token envoyé dans le lien. Lookup à la consommation.
+  tokenHash      String    @unique
+  expiresAt      DateTime
+  /// Posé à la première consommation réussie (usage unique).
+  usedAt         DateTime?
+  /// Admin ayant déclenché l'envoi (audit).
+  createdById    String?
+  createdAt      DateTime  @default(now())
+
+  @@index([organizationId])
+  @@index([userId])
+}
+
+/// Préférences de notification **par utilisateur** : override des défauts org
+/// événement par événement. `null` = hériter du défaut org ; `true`/`false` =
+/// choix explicite de l'utilisateur. Une ligne par (org, user).
+model UserNotificationPref {
+  id             String   @id @default(uuid())
+  organizationId String
+  userId         String
+  /// Tâche assignée à l'utilisateur.
+  assignment     Boolean?
+  /// @mention dans un commentaire.
+  mention        Boolean?
+  /// Rappel d'échéance (due date).
+  dueReminder    Boolean?
+  /// Changement de statut d'une tâche suivie.
+  statusChange   Boolean?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+/// Widgets du rapport projet affichés/masqués et réordonnés **par
+/// utilisateur, par projet** (chaque personne garde son propre layout sur
+/// chaque projet — même style scalaire que UserNotificationPref, avec un
+/// scope projet en plus). Pas de ligne = comportement par défaut (tous les
+/// widgets, ordre du registre `REPORT_WIDGET_KEYS`) — calculé à la lecture,
+/// jamais écrit tant que l'utilisateur ne personnalise rien.
+model ReportWidgetPreference {
+  id             String   @id @default(uuid())
+  organizationId String
+  userId         String
+  projectId      String
+  /// Ordre complet connu par l'utilisateur au dernier enregistrement
+  /// (widgets affichés ET masqués). Une clé du registre absente d'ici n'a
+  /// jamais été vue par l'utilisateur → traitée comme affichée, ajoutée en
+  /// fin de liste (un nouveau widget livré plus tard n'est jamais masqué
+  /// silencieusement).
+  widgetOrder    String[] @default([])
+  /// Sous-ensemble de widgetOrder explicitement masqué par l'utilisateur.
+  hiddenKeys     String[] @default([])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([organizationId, userId, projectId])
+  @@index([userId])
+  @@index([projectId])
+}
+
+// ============================================================
+// Skills — référentiel org global + association user/projet/tâche
+// ============================================================
+
+/// Compétence (skill) du référentiel organisationnel. Le catalogue est
+/// global à l'org : un skill est utilisable par n'importe quel projet ou
+/// tâche, et n'importe quel user peut s'y voir attribuer un niveau.
+/// Le niveau max autorisé est paramétrable via OrgSetting `skills.maxLevel`
+/// (défaut 10).
+model Skill {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  /// Description optionnelle pour aider à standardiser le catalogue.
+  description    String?
+  /// Couleur d'accent (hex `#rrggbb`) — purement cosmétique côté UI (badge).
+  color          String?
+  /// Domaine/famille du skill — sert de « dossier » dans le picker (search +
+  /// navigation par catégorie). Renseigné depuis le `label` du pack au seed
+  /// (ex. "Microsoft Azure (détaillé)"). Null = non classé.
+  category       String?
+  /// Synonymes / alias du skill (ex. ["Azure AD", "AAD"] pour Microsoft
+  /// Entra ID). Le picker matche aussi sur ces termes.
+  aliases        String[]   @default([])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization   @relation(fields: [organizationId], references: [id])
+  userSkills   UserSkill[]
+  projectSkills ProjectSkill[]
+  teamSkills    TeamSkill[]
+  taskRequirements TaskRequiredSkill[]
+  tasks        Task[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@index([organizationId, category])
+}
+
+/// Compétence couverte par une équipe. Définit la « disponibilité » des
+/// skills : sur un projet, les skills assignables = union des TeamSkill des
+/// équipes affectées au projet (ProjectTeam). Si le projet n'a aucune équipe,
+/// fallback = catalogue complet. Édité par les Org Admins ET les leads de
+/// l'équipe (TeamMember.isLead). Soft scoping : on n'efface jamais un skill
+/// déjà posé sur un projet/tâche quand une équipe est retirée — on le signale.
+model TeamSkill {
+  teamId    String
+  skillId   String
+  createdAt DateTime @default(now())
+
+  team  Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, skillId])
+  @@index([skillId])
+}
+
+/// Niveau d'un utilisateur sur un skill (1..maxLevel). Édition réservée
+/// aux Org Admins et aux Team Leads des équipes de l'utilisateur.
+model UserSkill {
+  userId    String
+  skillId   String
+  level     Int      @default(1)
+  /// Trace : qui a posé / mis à jour ce niveau (admin ou team-lead).
+  setById   String?
+  /// Dernière fois que le niveau a été *validé* (formellement par un lead /
+  /// admin, ou auto-confirmé à la clôture d'un projet). Distingue de
+  /// `updatedAt` qui reflète seulement la dernière écriture (decay, etc.).
+  lastValidatedAt DateTime?
+  /// Date d'expiration optionnelle (ex. cert AWS / Azure qui périme).
+  /// Si dépassée, l'UI affiche un badge "expiré" et le scoring d'assignees
+  /// peut pénaliser. Null = pas d'expiration.
+  expiresAt DateTime?
+  /// Suivi du cron de relance avant expiration : dernier seuil franchi.
+  /// 0 = aucun envoi, 30 = J-30 envoyé, 7 = J-7 envoyé, 1 = J0/expiré envoyé.
+  /// Reseté à 0 quand `expiresAt` change (re-validation / nouvelle cert).
+  expiryReminderStage Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([userId, skillId])
+  @@index([skillId])
+}
+
+/// Compétences additionnelles requises par une tâche (au-delà du
+/// `Task.requiredSkillId` qui reste la compétence "principale" pour la
+/// rétrocompatibilité du picker chip). Chacune avec son niveau souhaité,
+/// permettant le scoring multi-skill des assignees ("Terraform + Azure +
+/// Python" sur une même tâche).
+model TaskRequiredSkill {
+  taskId  String
+  skillId String
+  level   Int     @default(1)
+
+  task  Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, skillId])
+  @@index([skillId])
+}
+
+/// Skills retenus comme pertinents lors du setup du projet. Sert à
+/// pré-filtrer les pickers côté UI (sur une tâche du projet on propose
+/// d'abord les skills "du projet"). N'est pas une contrainte dure.
+model ProjectSkill {
+  projectId String
+  skillId   String
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  skill   Skill   @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, skillId])
+  @@index([skillId])
+}
+
+// ============================================================
+// Champs personnalisés (custom fields) — définitions par l'org + valeurs par
+// entité. Modèle EAV calqué sur le catalogue de skills (Skill + TaskRequiredSkill) :
+// une DÉFINITION org-globale, des VALEURS par tâche/projet.
+// ============================================================
+
+/// Définition d'un champ personnalisé, gérée par l'admin (catalogue org).
+/// `entityType` discrimine tâche vs projet ; la valeur va dans la table
+/// correspondante. `options` n'est renseigné que pour `type='select'`.
+model CustomFieldDefinition {
+  id             String    @id @default(uuid())
+  organizationId String
+  /// 'task' | 'project' — sur quelle entité ce champ s'applique.
+  entityType     String
+  name           String
+  /// 'text' | 'number' | 'date' | 'select' | 'checkbox'
+  type           String
+  /// Valeurs de la liste déroulante (type='select'), sinon [].
+  options        String[]  @default([])
+  /// Ordre d'affichage dans le détail de l'entité.
+  order          Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  projects      CustomFieldProject[]
+  taskValues    TaskCustomFieldValue[]
+  projectValues ProjectCustomFieldValue[]
+
+  @@unique([organizationId, entityType, name])
+  @@index([organizationId, entityType])
+}
+
+/// Restriction optionnelle d'un champ à certains projets. AUCUNE ligne pour un
+/// champ ⇒ il s'applique à TOUS les projets (calque ProjectSkill).
+model CustomFieldProject {
+  fieldId   String
+  projectId String
+
+  field   CustomFieldDefinition @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  project Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([fieldId, projectId])
+  @@index([projectId])
+}
+
+/// Valeur d'un champ personnalisé sur une tâche. `value` = sérialisation
+/// canonique en texte (nombre→"42", date→ISO, checkbox→"true", select→option) ;
+/// le type vit sur la définition (calque TaskRequiredSkill).
+model TaskCustomFieldValue {
+  taskId  String
+  fieldId String
+  value   String
+
+  task  Task                  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  field CustomFieldDefinition @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, fieldId])
+  @@index([fieldId])
+}
+
+/// Valeur d'un champ personnalisé sur un projet.
+model ProjectCustomFieldValue {
+  projectId String
+  fieldId   String
+  value     String
+
+  project Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  field   CustomFieldDefinition @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, fieldId])
+  @@index([fieldId])
+}
+
+/// Sous-statut configurable (Custom Status). Overlay ADDITIF sur l'enum
+/// `TaskStatus` : chaque sous-statut appartient à un statut parent parmi
+/// TODO / IN_PROGRESS / IN_REVIEW / ON_HOLD / DONE (validé service — jamais un
+/// statut du cycle agents), et `Task.status` reste la source de vérité du
+/// moteur (reports/automations/autoplan), synchronisée au parent au chokepoint
+/// TasksService.update/move. Affiché board (container dans la colonne parente)
+/// + TaskDetail uniquement — pas dans timeline/workload/reports.
+/// Défini org-wide, restriction optionnelle à des projets (calque custom fields).
+/// Suppression = HARD delete (le soft réserverait le nom dans l'unique → P2002)
+/// + fallback des tâches sur le statut parent (updateMany en transaction).
+model CustomStatus {
+  id             String     @id @default(uuid())
+  organizationId String
+  parentStatus   TaskStatus
+  name           String
+  color          String?
+  order          Int        @default(0)
+  /// Notification à l'ENTRÉE du sous-statut (hook TasksService → chokepoint
+  /// emit automations : email + carte Teams + cooldown). Users directs +
+  /// membres (tous) des équipes listées. Scalaires validés service. Vide = off.
+  notifyUserIds  String[]   @default([])
+  notifyTeamIds  String[]   @default([])
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  projects CustomStatusProject[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, parentStatus])
+}
+
+/// Restriction optionnelle d'un sous-statut à certains projets.
+/// Aucune ligne = sous-statut applicable à TOUS les projets de l'org.
+model CustomStatusProject {
+  statusId  String
+  projectId String
+
+  status  CustomStatus @relation(fields: [statusId], references: [id], onDelete: Cascade)
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([statusId, projectId])
+  @@index([projectId])
+}
+
+/// Définition d'un pack de compétences enregistré dynamiquement (par API).
+/// Coexiste avec les packs « builtin » lus depuis `api/prisma/skill-packs/*.json`
+/// — l'API merge les deux dans la liste unique exposée par `GET /skills/packs`.
+/// Sert de point d'extension pour les intégrations (partenaires, modules
+/// verticaux, futur marketplace) sans rebuild de l'image.
+///
+/// Format du contenu : `skills` est un tableau JSON `[{ name, description? }]`
+/// — identique à la structure des packs builtin (fichiers JSON).
+model SkillPack {
+  id             String   @id @default(uuid())
+  organizationId String
+  /// Identifiant logique du pack (ex. "azure", "my-custom-pack"). Unique par org.
+  /// Si une collision survient avec un pack builtin, la version DB l'emporte.
+  packId         String
+  label          String
+  color          String?
+  /// Définition des compétences sous forme JSON : [{ name, description? }, ...]
+  skills         Json
+  /// Trace : qui a créé/modifié ce pack (admin ou intégration via PAT à terme).
+  createdById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([organizationId, packId])
+  @@index([organizationId])
+}
+
+/// Scope d'un pack par équipe(s) : restreint qui voit/installe le pack.
+///
+///   - Aucune ligne pour un packId → pack org-wide (visible par tous les
+///     leads, comportement par défaut).
+///   - Au moins une ligne → seul un lead de l'une de ces équipes (ou un
+///     admin) voit le pack dans la bibliothèque et peut l'installer.
+///
+/// L'install d'un pack scopé auto-attache aussi ses compétences aux
+/// `TeamSkill` des équipes de scope (cohérent avec la règle "skill sans
+/// équipe = libre" — on ne veut pas que les skills d'un pack confidentiel
+/// deviennent visibles par tous les projets).
+model SkillPackTeamScope {
+  id             String   @id @default(uuid())
+  organizationId String
+  /// Identifiant du pack (builtin OU custom — pas de FK car un pack peut
+  /// vivre soit dans un fichier JSON, soit en DB via `SkillPack`).
+  packId         String
+  teamId         String
+  createdAt      DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, packId, teamId])
+  @@index([organizationId, packId])
+  @@index([teamId])
+}
+
+/// Nature d'une demande de compétence émise par un chef de projet vers un
+/// lead d'équipe quand aucune équipe affectée ne couvre un skill nécessaire.
+enum SkillRequestType {
+  /// Attribuer/relever le niveau d'un skill à un membre (cible `targetUserId`).
+  ASSIGN_SKILL
+  /// Planifier une montée en compétence (formation) sur le skill.
+  TRAINING
+  /// Faire appel à une ressource externe (sous-traitance/recrutement).
+  EXTERNAL
+}
+
+enum SkillRequestStatus {
+  OPEN
+  ACK
+  RESOLVED
+  REJECTED
+}
+
+/// Demande de compétence : un PM signale à un lead d'équipe qu'un skill
+/// manque pour un projet/tâche. Référentiels stockés en scalaires (pas de
+/// relations Prisma) pour limiter le couplage ; les noms sont résolus côté
+/// service. `skillId` OU `proposedName` (proposer un skill encore inexistant).
+// ============================================================
+// Watchers (automatisations built-in, lot 4)
+// ============================================================
+
+/// Abonnement passif à une tâche OU un projet : recevoir les changements sans
+/// en être assigné. Complète les @mentions (ponctuelles) par un suivi durable.
+///
+/// Polymorphe XOR : exactement un de `taskId`/`projectId` est renseigné
+/// (validé côté service). Les watchers d'un projet reçoivent aussi ce qui
+/// concerne ses tâches — l'union est faite à la résolution.
+///
+/// Références **scalaires**, sans relation Prisma (même parti-pris que
+/// SkillRequest / Deliverable / Task.claimedById) : limite le couplage et
+/// surtout évite d'altérer la table `User`, qui exigerait un db push superuser
+/// sur les 4 bases (cf. mémoire `project_user_table_schema_push`).
+model Watcher {
+  id             String   @id @default(uuid())
+  organizationId String
+  userId         String
+  taskId         String?
+  projectId      String?
+  createdAt      DateTime @default(now())
+
+  // Uniques partiels : Postgres traite les NULL comme distincts (NULLS
+  // DISTINCT par défaut), donc ces deux contraintes ne se gênent pas.
+  @@unique([organizationId, userId, taskId])
+  @@unique([organizationId, userId, projectId])
+  @@index([taskId])
+  @@index([projectId])
+  @@index([organizationId, userId])
+}
+
+/// Annonce projet : communication à la demande vers une audience résolue
+/// CÔTÉ SERVEUR par rôles (`pm` / `members` / `watchers` / `sponsors`), jamais
+/// par liste d'emails — c'est le canal « prévenir les parties prenantes »
+/// utilisé notamment via l'assistant IA (tool MCP `vaks_notify_stakeholders`).
+///
+/// Le contenu (`title`/`body`) est libre (rédigé par l'humain ou le LLM) mais
+/// livré dans l'enveloppe email brandée avec une ligne d'attribution résolue
+/// depuis le principal (« Envoyé par X via l'assistant IA ») ; le body est
+/// échappé au rendu et ses URLs ne sont pas cliquables (anti-phishing).
+///
+/// Append-only, références **scalaires** sans relation Prisma (même parti-pris
+/// que Watcher / SkillRequest) : l'historique survit aux suppressions.
+model Announcement {
+  id             String   @id @default(uuid())
+  organizationId String
+  projectId      String
+  /// Auteur (principal du jeton) + libellé snapshoté (survit à l'anonymisation
+  /// RGPD : blanchi par scrub comme les autres copies figées si nécessaire).
+  authorId       String
+  authorLabel    String
+  /// `HUMAN` ou `AGENT` (dérivé du principal, pas déclaratif).
+  actorType      String   @default("HUMAN")
+  title          String
+  body           String
+  /// Audiences demandées, ex. ["pm","sponsors"].
+  audience       Json
+  /// Nombre de destinataires effectivement résolus à l'envoi.
+  recipientCount Int      @default(0)
+  /// Tâche liée optionnelle (contexte + lien CTA).
+  taskId         String?
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId, projectId, createdAt])
+}
+
+/// Tâche récurrente : re-crée une copie d'une tâche modèle à un rythme donné
+/// (rapport hebdo, revue mensuelle…). Le modèle est une vraie tâche du projet —
+/// on ne duplique pas sa définition ici.
+///
+/// `nextRunAt` est l'**ancre d'idempotence** : le matérialiseur l'avance par un
+/// update conditionnel AVANT de créer la tâche, si bien que deux réplicas qui
+/// tickent en même temps ne peuvent pas créer de doublon (le perdant voit
+/// count=0 et s'arrête).
+model RecurringTask {
+  id             String    @id @default(uuid())
+  organizationId String
+  projectId      String
+  /// Tâche copiée à chaque occurrence (titre/description/estimé/priorité/skill).
+  templateTaskId String
+  /// 'daily' | 'weekly' | 'monthly' (validé au service).
+  frequency      String
+  /// Jour ISO 1-7 (weekly uniquement).
+  weekday        Int?
+  /// Jour du mois 1-28 (monthly uniquement — clampé à 28 : pas d'occurrence
+  /// perdue en février).
+  monthDay       Int?
+  active         Boolean   @default(true)
+  nextRunAt      DateTime
+  lastRunAt      DateTime?
+  createdById    String
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([organizationId, active, nextRunAt])
+  @@index([templateTaskId])
+  @@index([projectId])
+}
+
+model SkillRequest {
+  id             String             @id @default(uuid())
+  organizationId String
+  /// Équipe (et son lead) destinataire de la demande.
+  teamId         String
+  requestedById  String
+  type           SkillRequestType   @default(ASSIGN_SKILL)
+  status         SkillRequestStatus @default(OPEN)
+  /// Skill existant visé (null si on propose un nouveau skill via proposedName).
+  skillId        String?
+  /// Nom du skill proposé quand il n'existe pas encore au catalogue.
+  proposedName   String?
+  /// Niveau souhaité (pour ASSIGN_SKILL/TRAINING), borné par skills.maxLevel.
+  desiredLevel   Int?
+  /// Contexte optionnel.
+  projectId      String?
+  taskId         String?
+  targetUserId   String?
+  note           String?
+  resolvedById   String?
+  resolvedAt     DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([organizationId, status])
+  @@index([teamId, status])
+  @@index([requestedById])
+}
+
+// ============================================================
+// Audit log (Phase 8) — journal append-only des actions sensibles
+// ============================================================
+
+enum AuditSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AuditOutcome {
+  SUCCESS
+  FAILURE
+}
+
+enum AuditActorType {
+  USER
+  API_TOKEN
+  /// Requête relayée par le serveur MCP au nom d'un utilisateur (modif faite par
+  /// un agent IA). Plus spécifique que API_TOKEN : le jeton est porté par un
+  /// agent, pas par un script. Détecté via le header `X-Vaks-Agent`.
+  AGENT
+  SYSTEM
+  ANONYMOUS
+}
+
+/// Entrée du journal d'audit. Append-only : aucune API de suppression, seule
+/// la purge de rétention (cron) supprime. Volontairement SANS relation FK :
+/// les lignes survivent à la suppression des users/ressources, et l'insert
+/// (volume élevé, batché) ne paie pas les contrôles d'intégrité.
+/// `actorLabel` = snapshot lisible (email / nom de token) au moment du fait.
+model AuditLog {
+  id             String         @id @default(uuid())
+  organizationId String
+  createdAt      DateTime       @default(now())
+  /// Nom d'action hiérarchique, ex. "auth.login.failure", "task.update".
+  action         String
+  severity       AuditSeverity  @default(INFO)
+  outcome        AuditOutcome   @default(SUCCESS)
+  actorType      AuditActorType @default(USER)
+  /// userId ou apiTokenId selon actorType.
+  actorId        String?
+  actorLabel     String?
+  resourceType   String?
+  resourceId     String?
+  /// Libellé lisible de la ressource visée (nom/titre/email…) snapshoté au
+  /// moment du fait — survit à la suppression de l'entité. Tronqué à 200.
+  resourceLabel  String?
+  /// Route Express avec placeholders (ex. "/api/v1/tasks/:id").
+  route          String?
+  method         String?
+  statusCode     Int?
+  /// Tronqué à 64 chars (premier hop X-Forwarded-For derrière Traefik).
+  ip             String?
+  /// Tronqué à 500 chars.
+  userAgent      String?
+  /// Body sanitizé (interceptor) ou diff before/after (hooks explicites),
+  /// plafonné à 8 KB après redaction.
+  detail         Json?
+  /// Réservé au chaînage anti-altération (différé) — aucune logique encore.
+  prevHash       String?
+
+  @@index([organizationId, createdAt(sort: Desc)])
+  @@index([organizationId, action, createdAt(sort: Desc)])
+  @@index([organizationId, actorId, createdAt(sort: Desc)])
+  @@index([organizationId, severity, createdAt(sort: Desc)])
+  @@index([organizationId, resourceType, resourceId])
+}

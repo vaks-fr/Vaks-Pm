@@ -1,0 +1,48 @@
+{
+  "blurb": "Ajoutez vos propres champs aux tâches et aux projets. Un champ peut être restreint à certains projets.",
+  "newField": "Nouveau champ",
+  "empty": "Aucun champ personnalisé pour l'instant.",
+  "emptyTab": "Aucun champ sur cette entité pour l'instant.",
+  "noMatch": "Aucun champ ne correspond à votre recherche.",
+  "searchPlaceholder": "Rechercher un champ…",
+  "prev": "Précédent",
+  "next": "Suivant",
+  "pageOf": "Page {{page}} / {{pageCount}}",
+  "scopeNProjects": "{{count}} projet",
+  "scopeNProjects_other": "{{count}} projets",
+  "scopeSelected": "{{count}} sélectionné(s)",
+  "scopeSearchPlaceholder": "Rechercher un projet…",
+  "noProjectMatch": "Aucun projet ne correspond à votre recherche.",
+  "editTitle": "Modifier le champ",
+  "nameRequired": "Un nom est requis.",
+  "optionsRequired": "Une liste déroulante requiert au moins une option.",
+  "created": "Champ créé.",
+  "saved": "Champ enregistré.",
+  "deleted": "Champ supprimé.",
+  "deleteTitle": "Supprimer ce champ ?",
+  "deleteMsg": "Supprimer « {{name}} » le retire ainsi que toutes ses valeurs sur chaque tâche ou projet.",
+  "typeLocked": "Le type ne peut pas être changé après la création.",
+  "optionsLabel": "Options (une par ligne)",
+  "optionsPlaceholder": "Prod\nStaging\nDev",
+  "scopeLabel": "Restreindre à des projets",
+  "scopeHint": "Ne cochez rien pour appliquer le champ à tous les projets.",
+  "scopeAll": "Tous les projets",
+  "col": {
+    "name": "Nom",
+    "type": "Type",
+    "entity": "S'applique à",
+    "scope": "Portée"
+  },
+  "entity": {
+    "task": "Tâches",
+    "project": "Projets"
+  },
+  "type": {
+    "text": "Texte",
+    "number": "Nombre",
+    "date": "Date",
+    "select": "Liste déroulante",
+    "checkbox": "Case à cocher"
+  },
+  "sectionTitle": "Champs personnalisés"
+}

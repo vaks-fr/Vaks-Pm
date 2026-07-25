@@ -1,0 +1,28 @@
+apiVersion: v2
+name: vaks-pm
+description: >-
+  Vaks Project Management — self-hostable, on-premise project management
+  platform (Kanban, Gantt, time tracking, workload, SSO/SCIM, audit/SIEM).
+  This chart deploys the stateless application tier (api, web, worker, and the
+  optional pooled control-plane) onto Kubernetes. PostgreSQL, Redis and an
+  S3-compatible object store can be brought by the customer or bundled in-cluster
+  for evaluation.
+type: application
+# Chart version — bump on chart changes.
+version: 0.1.0
+# Tracks the application release the chart targets.
+appVersion: "1.0.0"
+keywords:
+  - project-management
+  - nestjs
+  - on-premise
+  - s3
+home: https://vaks-pm.com
+sources:
+  - https://vaks-pm.com
+maintainers:
+  - name: Vaks
+# No external sub-chart dependencies on purpose: the optional in-cluster
+# PostgreSQL / Redis / MinIO are templated inside this chart so it stays fully
+# self-contained and air-gap friendly (only the upstream container images are
+# needed, which a customer can mirror to a private registry).

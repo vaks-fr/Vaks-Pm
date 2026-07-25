@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vakspm.fullname" . }}-worker
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vakspm.selectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "vakspm.selectorLabels" (dict "root" . "component" "worker") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "vakspm.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "vakspm.image" (dict "root" . "repo" .Values.image.worker.repository) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "vakspm.fullname" . }}-config
+            - secretRef:
+                name: {{ include "vakspm.secretName" . }}
+          env:
+            # Internal API URL (cluster DNS) — never routed through the Ingress.
+            - name: INTERNAL_API_URL
+              value: {{ printf "http://%s-api:%v" (include "vakspm.fullname" .) .Values.api.port | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- include "vakspm.cryptoProviderEnv" . | nindent 12 }}
+          {{- $cryptoOn := eq (include "vakspm.cryptoKeyringEnabled" .) "true" }}
+          {{- $pgCaOn := eq (include "vakspm.pgCaEnabled" .) "true" }}
+          {{- if or .Values.secrets.syslogClientKey $cryptoOn $pgCaOn }}
+          volumeMounts:
+            {{- if .Values.secrets.syslogClientKey }}
+            - name: syslog-key
+              mountPath: /run/secrets/syslog_client_key
+              subPath: syslog_client_key
+              readOnly: true
+            {{- end }}
+            {{- if $cryptoOn }}
+            - name: crypto-keyring
+              mountPath: {{ .Values.crypto.keysDir }}
+              readOnly: true
+            {{- end }}
+            {{- if $pgCaOn }}
+            - name: pg-ca
+              mountPath: /etc/vaks/pg-ca
+              readOnly: true
+            {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      {{- if or .Values.secrets.syslogClientKey $cryptoOn $pgCaOn }}
+      volumes:
+        {{- if .Values.secrets.syslogClientKey }}
+        - name: syslog-key
+          secret:
+            secretName: {{ include "vakspm.secretName" . }}
+            items:
+              - key: syslog_client_key
+                path: syslog_client_key
+        {{- end }}
+        {{- if $cryptoOn }}
+        - name: crypto-keyring
+          secret:
+            secretName: {{ include "vakspm.cryptoSecretName" . }}
+        {{- end }}
+        {{- if $pgCaOn }}
+        - name: pg-ca
+          secret:
+            secretName: {{ .Values.tls.postgresCaSecret }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

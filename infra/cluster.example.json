@@ -1,0 +1,40 @@
+{
+  "_comment": "Manifeste de cluster — copier en infra/cluster.json (git-ignoré), remplir, puis `bash setup.sh --manifest infra/cluster.json`. Valeurs ${VAR} résolues depuis .env.local au rendu.",
+
+  "mode": "ha",
+  "baseDomain": "example.com",
+  "dbName": "vakspm",
+  "deploymentMode": "pooled",
+  "_imageSource": "ghcr = tirer les images publiques ghcr.io/itsmepoy/vakspm-{api,web,worker}:latest (défaut) ; build = compiler depuis les sources sur les hôtes (air-gapped). Surcharger imagePrefix/imageTag pour un registre miroir.",
+  "imageSource": "ghcr",
+  "sshKey": "${SSH_KEY}",
+
+  "hosts": [
+    { "name": "host1", "ip": "10.0.0.1", "sshUser": "${VM_USER}", "roles": ["manager", "db", "etcd", "cp", "app"] },
+    { "name": "host2", "ip": "10.0.0.2", "sshUser": "${VM_USER}", "roles": ["manager", "db", "etcd", "cp", "app"] },
+    { "name": "host3", "ip": "10.0.0.3", "sshUser": "${VM_USER}", "roles": ["worker", "db", "etcd", "app"] }
+  ],
+
+  "controlPlane": { "vip": null },
+  "infraPlacement": { "redis": "host1", "garage": ["host1", "host2", "host3"] },
+
+  "tenants": [
+    { "slug": "acme", "domain": "acme.example.com", "profile": "dedicated", "ha": true, "placement": "auto" },
+    { "slug": "globex", "domain": "globex.example.com", "profile": "pooled" },
+    { "slug": "demo", "domain": "demo.example.com", "profile": "pooled", "seed": "demo" }
+  ],
+
+  "_fields": {
+    "mode": "single | ha",
+    "baseDomain": "domaine racine ; un tenant <slug> est servi sur <slug>.<baseDomain>",
+    "dbName": "nom de la base de connexion (les bases tenant = <dbName>_<slug>)",
+    "deploymentMode": "pooled (N tenants/instance, résolus depuis le Host) | dedicated (1 tenant/instance)",
+    "sshKey": "chemin de clé SSH (orchestrateur) — laisser ${SSH_KEY}",
+    "hosts[].roles": "manager (Swarm) | db (Patroni) | etcd (membre, impair >=3) | cp (control plane: Traefik+controlplane) | app (services data: pool + cellules)",
+    "controlPlane.vip": "VIP keepalived sur les hosts cp (entrée unique). null = DNS round-robin",
+    "infraPlacement": "host (par name) portant redis / garage",
+    "tenants[].profile": "pooled (servi par le pool partagé) | dedicated (cellule: api-<slug>/worker-<slug> dédiés)",
+    "tenants[].ha": "cellule en 2 répliques réparties (profile dedicated uniquement)",
+    "tenants[].placement": "auto (spread) | [host, host] (pinning explicite)"
+  }
+}

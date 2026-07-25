@@ -1,0 +1,36 @@
+{
+  "_comment": "Exemple multi-datacenter (CAS EXTRÊME, préparé mais non validé). Chaque host porte une `zone` ; `primaryZone` = DC R/W, les autres = standby Postgres async. Le générateur produit un bundle par zone dans out/<zone>/ + out/multidc.md.",
+
+  "mode": "ha",
+  "baseDomain": "vaks-pm.com",
+  "dbName": "vakspm",
+  "deploymentMode": "pooled",
+  "sshKey": "${SSH_KEY}",
+  "primaryZone": "dc1",
+
+  "hosts": [
+    { "name": "dc1-h1", "ip": "10.1.0.1", "sshUser": "${VM_USER}", "zone": "dc1", "roles": ["manager","db","etcd","cp","app"] },
+    { "name": "dc1-h2", "ip": "10.1.0.2", "sshUser": "${VM_USER}", "zone": "dc1", "roles": ["manager","db","etcd","cp","app"] },
+    { "name": "dc1-h3", "ip": "10.1.0.3", "sshUser": "${VM_USER}", "zone": "dc1", "roles": ["worker","db","etcd","app"] },
+
+    { "name": "dc2-h1", "ip": "10.2.0.1", "sshUser": "${VM_USER}", "zone": "dc2", "roles": ["manager","db","etcd","cp","app"] },
+    { "name": "dc2-h2", "ip": "10.2.0.2", "sshUser": "${VM_USER}", "zone": "dc2", "roles": ["manager","db","etcd","cp","app"] },
+    { "name": "dc2-h3", "ip": "10.2.0.3", "sshUser": "${VM_USER}", "zone": "dc2", "roles": ["worker","db","etcd","app"] }
+  ],
+
+  "infraPlacement": {
+    "redis": null,
+    "garage": ["dc1-h1","dc1-h2","dc1-h3","dc2-h1","dc2-h2","dc2-h3"]
+  },
+
+  "tenants": [
+    { "slug": "acme", "domain": "acme.vaks-pm.com", "profile": "pooled" },
+    { "slug": "demo", "domain": "demo.vaks-pm.com", "profile": "pooled" }
+  ],
+
+  "_fields": {
+    "primaryZone": "zone (datacenter) portant le Postgres R/W ; les autres zones = Patroni standby async",
+    "hosts[].zone": "datacenter du host. >1 zone distincte ⇒ génération par zone + standby",
+    "infraPlacement.garage": "liste sur TOUTES les zones → cluster Garage géo-réparti (zones au layout). redis: null = auto-heal par zone"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "systems-network",
+  "label": "Systèmes & Réseau",
+  "color": "#64748b",
+  "skills": [
+    { "name": "Linux", "description": "Administration serveurs Linux (Debian, Ubuntu, RHEL, Rocky)." },
+    { "name": "Windows Server", "description": "Administration de l'écosystème serveur Microsoft." },
+    { "name": "PowerShell", "description": "Scripting et automatisation Windows / cross-platform." },
+    { "name": "Bash / Shell scripting", "description": "Automatisation Unix/Linux." },
+    { "name": "Active Directory", "description": "Annuaire Microsoft, forêts, GPO, trusts." },
+    { "name": "Group Policy", "description": "GPO Windows : déploiement et durcissement." },
+    { "name": "DHCP / WINS", "description": "Services réseau Windows historiques." },
+    { "name": "DNS", "description": "Résolution de noms, zones, DNSSEC, split-horizon." },
+    { "name": "VMware vSphere / ESXi", "description": "Hyperviseur enterprise et vCenter." },
+    { "name": "Hyper-V", "description": "Virtualisation Microsoft et clustering Failover." },
+    { "name": "Proxmox VE", "description": "Hyperviseur open source (KVM + LXC)." },
+    { "name": "Nutanix", "description": "Hyperconvergence (HCI) AHV / Prism." },
+    { "name": "Citrix Virtual Apps & Desktops", "description": "VDI et publication d'applications." },
+    { "name": "Azure Virtual Desktop", "description": "VDI managé sur Azure (AVD)." },
+
+    { "name": "TCP/IP", "description": "Protocoles fondamentaux du réseau (L3/L4)." },
+    { "name": "BGP", "description": "Routage inter-AS, peering, communities." },
+    { "name": "OSPF / EIGRP", "description": "Protocoles de routage intérieurs." },
+    { "name": "MPLS", "description": "Multi-Protocol Label Switching opérateur / enterprise." },
+    { "name": "VLAN / VXLAN", "description": "Segmentation L2 et overlays." },
+    { "name": "SD-WAN", "description": "Software-defined WAN (Velocloud, Fortinet, Cisco Viptela)." },
+    { "name": "Cisco IOS / NX-OS", "description": "Configuration de routeurs et switchs Cisco." },
+    { "name": "Cisco Meraki", "description": "Infra cloud-managed (MX, MS, MR)." },
+    { "name": "Aruba Networks", "description": "Switchs, AP et CX OS HPE Aruba." },
+    { "name": "Wi-Fi enterprise", "description": "Conception WLAN, 802.1X, roaming, 6/6E/7." },
+    { "name": "VPN", "description": "IPsec, OpenVPN, WireGuard, accès distants." },
+    { "name": "Load Balancing", "description": "Répartition de charge L4/L7 et HA." },
+
+    { "name": "Fortinet FortiGate", "description": "Pare-feu NGFW Fortinet, FortiOS." },
+    { "name": "Palo Alto Networks", "description": "Pare-feu NGFW PAN-OS, Panorama." },
+    { "name": "Check Point", "description": "Pare-feu Quantum, SmartConsole." },
+    { "name": "OPNsense / pfSense", "description": "Pare-feu / routeurs open source." },
+    { "name": "Firewall", "description": "Conception et exploitation de pare-feu enterprise." },
+    { "name": "IDS / IPS", "description": "Détection et prévention d'intrusion réseau." },
+
+    { "name": "SAN / NAS", "description": "Stockage bloc (FC/iSCSI) et fichiers." },
+    { "name": "NetApp ONTAP", "description": "Plateforme de stockage NetApp." },
+    { "name": "Pure Storage", "description": "Baies all-flash et FlashArray." },
+    { "name": "Veeam Backup & Replication", "description": "Sauvegarde et réplication virtuelles/physiques." },
+    { "name": "Sauvegarde & PRA", "description": "Stratégies de sauvegarde et plan de reprise d'activité." }
+  ]
+}

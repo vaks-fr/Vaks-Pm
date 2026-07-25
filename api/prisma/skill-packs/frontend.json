@@ -1,0 +1,14 @@
+{
+  "id": "frontend",
+  "label": "Frontend",
+  "color": "#06b6d4",
+  "skills": [
+    { "name": "React", "description": "Bibliothèque UI à base de composants, écosystème dominant côté web." },
+    { "name": "Angular", "description": "Framework frontend complet de Google (TypeScript, RxJS)." },
+    { "name": "Vue.js", "description": "Framework frontend progressif, simple à adopter." },
+    { "name": "Next.js", "description": "Framework React full-stack (SSR, SSG, routing, API routes)." },
+    { "name": "HTML5 / CSS3", "description": "Fondamentaux du web : structure sémantique et mise en forme." },
+    { "name": "Tailwind CSS", "description": "Framework CSS utilitaire pour un styling rapide et cohérent." },
+    { "name": "Svelte", "description": "Framework frontend compilé, sans virtual DOM." }
+  ]
+}

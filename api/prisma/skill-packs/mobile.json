@@ -1,0 +1,11 @@
+{
+  "id": "mobile",
+  "label": "Mobile",
+  "color": "#ec4899",
+  "skills": [
+    { "name": "React Native", "description": "Développement mobile cross-platform avec React." },
+    { "name": "Flutter", "description": "SDK Google (Dart) pour apps mobiles natives multi-plateformes." },
+    { "name": "Swift / iOS", "description": "Développement natif iOS avec Swift et l'écosystème Apple." },
+    { "name": "Android Natif", "description": "Développement Android natif (Kotlin/Java, Jetpack)." }
+  ]
+}

@@ -1,0 +1,25 @@
+{{- if .Values.web.apiUpstreamAlias.enabled }}
+{{- /*
+  The web image's baked nginx config proxies to a literal upstream host
+  `http://api:3000` (the Swarm service name). nginx resolves that name at
+  startup and crashes if it doesn't exist. This alias Service makes the name
+  resolve inside the namespace, pointing at the api pods. Requests to /api are
+  routed by the Ingress directly to the api Service anyway, so this is only to
+  satisfy nginx startup. Disable once the web image's upstream is configurable.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.web.apiUpstreamAlias.name }}
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-alias
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "vakspm.selectorLabels" (dict "root" . "component" "api") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.web.apiUpstreamAlias.port }}
+      targetPort: http
+{{- end }}

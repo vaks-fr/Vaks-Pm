@@ -1,0 +1,72 @@
+{{- if .Values.ingress.enabled -}}
+{{- $fullName := include "vakspm.fullname" . -}}
+{{- $host := include "vakspm.ingressHost" . -}}
+{{- if and (not $host) (not .Values.ingress.extraHosts) -}}
+{{- fail "ingress.enabled=true requires ingress.host (or publicBaseUrl, or ingress.extraHosts)" -}}
+{{- end -}}
+{{- $hosts := list -}}
+{{- if $host }}{{ $hosts = append $hosts $host }}{{ end -}}
+{{- range .Values.ingress.extraHosts }}{{ $hosts = append $hosts .host }}{{ end -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        {{- range $hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- with .Values.ingress.tls.secretName }}
+      secretName: {{ . }}
+      {{- end }}
+  {{- end }}
+  rules:
+    {{- range $hosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          {{- if eq $.Values.tenancy.mode "pooled" }}
+          # Auth (token minting) goes to the control-plane in pooled mode.
+          - path: /api/v1/auth
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-controlplane
+                port:
+                  number: {{ $.Values.api.port }}
+          {{- end }}
+          # WebSocket (Socket.IO, namespace /ws) — must reach the api, not web.
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-api
+                port:
+                  number: {{ $.Values.api.port }}
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-api
+                port:
+                  number: {{ $.Values.api.port }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-web
+                port:
+                  number: {{ $.Values.web.port }}
+    {{- end }}
+{{- end }}

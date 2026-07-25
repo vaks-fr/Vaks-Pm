@@ -1,0 +1,12 @@
+[Unit]
+Description=Vaks PM — Tier 1 sauvegarde logique (pg_dump)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=postgres
+Environment=VAKS_BACKUP_ENV=/etc/vaks-backup.env
+ExecStart=/opt/vaks-backup/vaks-backup-logical.sh
+Nice=10
+IOSchedulingClass=idle

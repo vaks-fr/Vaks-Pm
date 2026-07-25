@@ -1,0 +1,15 @@
+{
+  "id": "methodology",
+  "label": "Méthodo & Gestion",
+  "color": "#f97316",
+  "skills": [
+    { "name": "Agile / Scrum", "description": "Gestion de projet itérative et cadre Scrum." },
+    { "name": "Kanban", "description": "Gestion visuelle du flux et limitation du travail en cours." },
+    { "name": "SAFe", "description": "Scaled Agile Framework pour l'agilité à l'échelle." },
+    { "name": "ITIL", "description": "Référentiel de bonnes pratiques de gestion des services IT." },
+    { "name": "Gestion de projet", "description": "Pilotage, planification et suivi de projets." },
+    { "name": "Product Ownership", "description": "Gestion de backlog et de la valeur produit." },
+    { "name": "PRINCE2", "description": "Méthode structurée de gestion de projet." },
+    { "name": "Lean", "description": "Optimisation des processus et réduction du gaspillage." }
+  ]
+}

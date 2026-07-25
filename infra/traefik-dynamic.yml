@@ -1,0 +1,136 @@
+# Configuration dynamique Traefik — routes hardcodées pour le stack Phase 1.
+# Évite le provider Swarm (incompatible avec Docker 29 sur certaines combos).
+# Les noms de services (api, web) sont résolus via le DNS interne Swarm sur
+# le réseau overlay vakspm.
+http:
+  middlewares:
+    # En-têtes de sécurité appliqués à tous les routers (web, api, ws).
+    # Reference: OWASP Secure Headers Project.
+    #
+    # ⚠ Note CSP : on autorise `unsafe-inline` pour `style-src` car Vite
+    # injecte des styles inline au runtime (HMR + base styles). `script-src`
+    # reste strict ('self' uniquement). data: et blob: dans `img-src` couvrent
+    # le QR code MFA (data URL généré par qrcode lib) et les uploads.
+    # connect-src inclut ws:/wss: pour Socket.IO.
+    security-headers:
+      headers:
+        # HSTS : 1 an, incluant les sous-domaines. Preload non activé tant que
+        # le déploiement n'est pas en HTTPS public stable.
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        # Empêche le framing (clickjacking).
+        frameDeny: true
+        # MIME-sniffing désactivé.
+        contentTypeNosniff: true
+        # Pas de leak de l'URL complète en cross-origin.
+        referrerPolicy: "strict-origin-when-cross-origin"
+        # Désactive XSS Auditor (déprécié) — la directive existe encore pour
+        # quelques anciens browsers, on l'active à 0 pour signaler "no-op".
+        browserXssFilter: false
+        # Permissions-Policy : on coupe les APIs qu'on n'utilise pas.
+        permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=(), usb=(), fullscreen=(self)"
+        # Content-Security-Policy : strict mais compatible avec Vite + MinIO presigned.
+        contentSecurityPolicy: >-
+          default-src 'self';
+          script-src 'self';
+          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+          font-src 'self' https://fonts.gstatic.com data:;
+          img-src 'self' data: blob: https:;
+          connect-src 'self' ws: wss:;
+          frame-ancestors 'none';
+          base-uri 'self';
+          form-action 'self';
+          object-src 'none';
+
+    # Compression de réponse (gzip / brotli / zstd selon Accept-Encoding).
+    # Appliquée aux routers `web` (bundle JS/CSS) et `api` (JSON volumineux :
+    # listes de tâches, grille workload, rapports). Non appliquée au router `ws`
+    # (Socket.IO) ni au MCP (streaming). minResponseBodyBytes=1024 = défaut
+    # Traefik : on ne compresse pas les petites réponses (overhead > gain).
+    compress:
+      compress:
+        minResponseBodyBytes: 1024
+
+    # Refuse au bord toute route interne worker→API (préfixe /api/v1/internal).
+    # Ces endpoints sont overlay-only (worker -> http://api:3000) et NE DOIVENT
+    # JAMAIS être joignables depuis l'extérieur. ipAllowList avec une plage
+    # TEST-NET-1 (RFC 5737) qui ne matche aucun client réel => 403 systématique.
+    deny-internal:
+      ipAllowList:
+        sourceRange:
+          - "192.0.2.1/32"
+
+  routers:
+    # Garde-fou bord : bloque /api/v1/internal AVANT le router `api` (priorité
+    # plus haute). Le trafic worker→api passe par le DNS overlay `api:3000`,
+    # pas par Traefik, donc il n'est pas affecté par ce refus.
+    internal-deny:
+      rule: "PathPrefix(`/api/v1/internal`)"
+      entryPoints: [web, websecure]
+      service: api
+      priority: 200
+      middlewares: [security-headers, deny-internal]
+      tls: {}
+    # Control plane mutualisé : toutes les routes d'émission de token
+    # (/api/v1/auth/...) vont au service `controlplane`, pas aux cellules data.
+    # Priorité explicite > router `api` pour gagner le match (et indépendamment
+    # de la longueur de règle). Le control-plane résout le tenant depuis le Host
+    # et émet le JWT{tenant}.
+    auth:
+      rule: "PathPrefix(`/api/v1/auth`)"
+      entryPoints: [web, websecure]
+      service: controlplane
+      priority: 100
+      middlewares: [security-headers, compress]
+      tls: {}
+    api:
+      rule: "PathPrefix(`/api`)"
+      entryPoints: [web, websecure]
+      service: api
+      middlewares: [security-headers, compress]
+      # tls: {} → le router sert aussi le trafic TLS (websecure) avec le cert
+      # par défaut (wildcard *.vaks-pm.com du store `default`). Sans ça, le
+      # router ne matche que le HTTP plein (port 80) et renvoie 404 sur :443.
+      tls: {}
+    ws:
+      # Socket.IO namespace /ws — handshake HTTP polling + upgrade WebSocket.
+      rule: "PathPrefix(`/ws`) || PathPrefix(`/socket.io`)"
+      entryPoints: [web, websecure]
+      service: api
+      middlewares: [security-headers]
+      tls: {}
+    web:
+      rule: "PathPrefix(`/`)"
+      entryPoints: [web, websecure]
+      service: web
+      priority: 1
+      middlewares: [security-headers, compress]
+      tls: {}
+
+  services:
+    controlplane:
+      loadBalancer:
+        servers:
+          - url: "http://controlplane:3000"
+    api:
+      loadBalancer:
+        servers:
+          - url: "http://api:3000"
+    web:
+      loadBalancer:
+        servers:
+          - url: "http://web:80"
+
+# TLS : certificat wildcard `*.vaks-pm.com` (self-signed on-premise) servi par
+# défaut sur l'entrypoint websecure (:443). Permet le routing par sous-domaine
+# (multi-tenant pooled) sans erreur de certificat par tenant. Monté dans le
+# container via les configs Swarm `tls_cert_v*` / `tls_key_v*` (docker-stack.yml).
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/wildcard.crt
+        keyFile: /certs/wildcard.key
+  certificates:
+    - certFile: /certs/wildcard.crt
+      keyFile: /certs/wildcard.key
