@@ -120,15 +120,27 @@ GET('/projects/:id/tasks', ({ params }) =>
 
 GET('/projects/:id/teams', () => []);
 GET('/projects/:id/members', ({ params }) => {
-  // Membres dérivés des assignés du projet (utile aux pickers).
+  // Membres dérivés des assignés du projet. Forme alignée sur ce que consomme
+  // ManageModal (`member.user.{id,name,email}` + `member.role.{key,name}` +
+  // `isSponsor`) — un objet plat faisait planter le rendu de l'onglet Accès.
   const s = getState();
   const seen = new Set<string>();
-  const out: Array<{ userId: string; name: string; email: string; roleKey: string }> = [];
+  const out: Array<{
+    userId: string;
+    user: { id: string; name: string; email: string };
+    role: { key: string; name: string };
+    isSponsor?: boolean;
+  }> = [];
   for (const t of s.tasks.filter((x) => x.projectId === params.id)) {
     for (const a of t.assignees) {
       if (seen.has(a.userId)) continue;
       seen.add(a.userId);
-      out.push({ userId: a.userId, name: a.name, email: a.email, roleKey: 'CONTRIBUTOR' });
+      out.push({
+        userId: a.userId,
+        user: { id: a.userId, name: a.name, email: a.email },
+        role: { key: 'CONTRIBUTOR', name: 'Contributor' },
+        isSponsor: false,
+      });
     }
   }
   return out;

@@ -130,7 +130,7 @@ services:
         constraints: [node.role == manager]
 
   web:
-    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/itsmepoy/vakspm}-web:${VAKS_TAG:-latest}
+    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/thomasvaxelaire-vaks/vakspm}-web:${VAKS_TAG:-latest}
     networks: [vakspm]
     deploy:
       replicas: 2
@@ -150,7 +150,7 @@ services:
         - traefik.http.services.web.loadbalancer.server.port=80
 
   api:
-    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/itsmepoy/vakspm}-api:${VAKS_TAG:-latest}
+    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/thomasvaxelaire-vaks/vakspm}-api:${VAKS_TAG:-latest}
     environment:
       NODE_ENV: production
       API_PORT: "3000"
@@ -215,7 +215,7 @@ services:
   # traefik-dynamic.yml). Ne fait PAS `prisma db push` (l'`api`/data-plane
   # possède le schéma — évite une race sur la base partagée).
   controlplane:
-    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/itsmepoy/vakspm}-api:${VAKS_TAG:-latest}
+    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/thomasvaxelaire-vaks/vakspm}-api:${VAKS_TAG:-latest}
     environment:
       NODE_ENV: production
       API_PORT: "3000"
@@ -256,7 +256,7 @@ services:
       update_config: { parallelism: 1, order: start-first }
 
   worker:
-    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/itsmepoy/vakspm}-worker:${VAKS_TAG:-latest}
+    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/thomasvaxelaire-vaks/vakspm}-worker:${VAKS_TAG:-latest}
     environment:
       NODE_ENV: production
       REDIS_URL: redis://redis:6379

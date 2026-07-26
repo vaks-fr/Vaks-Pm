@@ -90,7 +90,7 @@ m.controlPlane = m.controlPlane || {};
 //   builder depuis les sources sur l'hôte de déploiement (air-gapped / sans egress).
 // imagePrefix/imageTag ne servent qu'en mode ghcr (surchargeables pour un miroir).
 const imageSource = m.imageSource === 'build' ? 'build' : 'ghcr';
-const imagePrefix = m.imagePrefix || 'ghcr.io/itsmepoy/vakspm';
+const imagePrefix = m.imagePrefix || 'ghcr.io/thomasvaxelaire-vaks/vakspm';
 const imageTag = m.imageTag || 'latest';
 const img = (svc) => (imageSource === 'build' ? `vaks-pm/${svc}:latest` : `${imagePrefix}-${svc}:${imageTag}`);
 

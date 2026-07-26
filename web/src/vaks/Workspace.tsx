@@ -1849,7 +1849,9 @@ export default function Workspace() {
                 }
               >
                 <Icon name="eye" size={15} />
-                {projWatching ? tr('watch.followingProjectBtn') : tr('watch.followProjectBtn')}
+                <span className="only-wide">
+                  {projWatching ? tr('watch.followingProjectBtn') : tr('watch.followProjectBtn')}
+                </span>
               </button>
             )}
           </div>
@@ -1900,7 +1902,7 @@ export default function Workspace() {
           {DEMO && (
             <div className="row gap2" style={{ alignItems: 'center' }}>
               <span
-                title="Environnement de démonstration — vos changements restent dans ce navigateur."
+                title={tr('shell.demoBadgeTitle')}
                 style={{
                   fontSize: 10.5,
                   fontWeight: 800,
@@ -1912,20 +1914,20 @@ export default function Workspace() {
                   border: '1px solid var(--warn-line, #f0d38a)',
                 }}
               >
-                DÉMO
+                {tr('shell.demoBadge')}
               </span>
               <button
                 className="btn btn-sm btn-ghost"
-                title="Réinitialiser la démo au jeu de données initial"
+                title={tr('shell.demoResetTitle')}
                 onClick={async () => {
-                  if (!window.confirm('Réinitialiser la démo ? Toutes vos modifications seront effacées.')) return;
+                  if (!window.confirm(tr('shell.demoResetConfirm'))) return;
                   const { resetDemo } = await import('../demo/store');
                   resetDemo();
                   window.location.reload();
                 }}
               >
                 <Icon name="refresh" size={15} />
-                <span className="only-wide">Réinitialiser</span>
+                <span className="only-wide">{tr('shell.demoReset')}</span>
               </button>
             </div>
           )}

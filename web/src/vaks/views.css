@@ -480,12 +480,26 @@ body.dragging-active { cursor: grabbing; user-select: none; }
      must stay visible on phones (the hide rule above only targets the
      toolbar search box). */
   .searchbox.login-field { display: flex; }
-  .crumb-name { max-width: 120px; }
+  /* Topbar : sur mobile, les boutons ne se compriment pas (white-space nowrap)
+     et faisaient déborder la barre → scroll horizontal de toute la page (qui
+     coupait aussi les cartes du dashboard). On resserre les gaps/paddings, on
+     laisse le fil d'Ariane rétrécir (son nom tronque) et on masque la pastille
+     live (non essentielle sur téléphone). Le bouton « Suivre » est déjà en
+     icône seule via `.only-wide`. */
+  .topbar { gap: 6px; padding: 10px 12px; overflow: hidden; }
+  .crumb { flex: 1 1 auto; min-width: 0; }
+  .crumb-name { max-width: none; min-width: 0; flex: 1 1 auto; }
+  .live-btn { display: none; }
   .subbar { flex-direction: column; align-items: flex-start; }
   .wl-wrap, .list-wrap { padding-left: 12px; padding-right: 12px; }
   .board-scroll { padding: 12px; }
   .col { width: 84vw; max-width: 320px; }
   .view-h1 { font-size: 18px; }
+  /* Dashboard : padding réduit + entête qui passe à la ligne pour ne pas
+     serrer le bouton « Actualiser » contre le titre. */
+  .dash-scroll { padding: 16px 14px 24px; }
+  .dash-head { flex-wrap: wrap; }
+  .dash-title { font-size: 22px; }
 }
 
 /* ============================================================ TASK DETAIL */
@@ -1566,11 +1580,14 @@ a.ts-rkey:hover { text-decoration: underline; }
 .dash-title { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; color: var(--text); }
 .dash-sub { font-size: 13px; color: var(--text-3); margin-top: 3px; }
 
-.dash-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; grid-auto-rows: min-content; }
+/* minmax(0,1fr) + min-width:0 sur les cartes : sans ça, un item de grille garde
+   min-width:auto (= min-content) et dilate sa piste (les cartes devenaient plus
+   larges que leur colonne et débordaient — « grid blowout »). */
+.dash-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; grid-auto-rows: min-content; }
 .dash-span2 { grid-column: span 2; }
 .dash-span3 { grid-column: span 3; }
 .dash-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
-  padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; }
+  padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .dash-ch { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .dash-nm { font-weight: 700; font-size: 14px; color: var(--text); }
 .dash-empty { color: var(--text-3); font-size: 13px; padding: 14px 2px; }
@@ -1644,7 +1661,7 @@ a.ts-rkey:hover { text-decoration: underline; }
 .dash-fitem-tm { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
 
 @media (max-width: 900px) {
-  .dash-grid { grid-template-columns: 1fr; }
+  .dash-grid { grid-template-columns: minmax(0, 1fr); }
   .dash-span2, .dash-span3 { grid-column: span 1; }
   .dash-stat-row { gap: 12px; }
 }

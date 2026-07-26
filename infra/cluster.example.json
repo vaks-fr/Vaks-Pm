@@ -5,7 +5,7 @@
   "baseDomain": "example.com",
   "dbName": "vakspm",
   "deploymentMode": "pooled",
-  "_imageSource": "ghcr = tirer les images publiques ghcr.io/itsmepoy/vakspm-{api,web,worker}:latest (défaut) ; build = compiler depuis les sources sur les hôtes (air-gapped). Surcharger imagePrefix/imageTag pour un registre miroir.",
+  "_imageSource": "ghcr = tirer les images publiques ghcr.io/thomasvaxelaire-vaks/vakspm-{api,web,worker}:latest (défaut) ; build = compiler depuis les sources sur les hôtes (air-gapped). Surcharger imagePrefix/imageTag pour un registre miroir.",
   "imageSource": "ghcr",
   "sshKey": "${SSH_KEY}",
 
