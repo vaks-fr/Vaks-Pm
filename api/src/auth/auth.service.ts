@@ -16,7 +16,7 @@ import { PasswordPolicyService } from './password-policy.service';
 import { AuthTokens } from '@vaks-pm/shared';
 import { AuditLogService } from '../audit-logs/audit-log.service';
 import { AuditAlertsService } from '../audit-logs/audit-alerts.service';
-import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { AUDIT_ACTIONS, severityForAction } from '../audit-logs/audit-actions';
 
 export interface JwtPayload {
   sub: string;
@@ -93,13 +93,24 @@ export class AuthService {
       meta?: { userAgent?: string; ipAddress?: string };
     } = {},
   ): Promise<void> {
-    // Retourne la promesse pour pouvoir chaîner (ex. détection brute-force
-    // APRÈS persistance de l'échec) — les autres call-sites restent en `void`.
-    return this.audit.logCritical({
+    const outcome = opts.outcome ?? 'SUCCESS';
+    // Sévérité pilotée par la table centrale (cf. AUDIT_SEVERITY). Cas
+    // dynamique : un rejeu de refresh token révoqué est un signal de vol →
+    // CRITICAL (l'expiration bénigne reste WARNING).
+    let severity = severityForAction(action, outcome);
+    const reason =
+      opts.detail && typeof opts.detail === 'object'
+        ? (opts.detail as Record<string, unknown>).reason
+        : undefined;
+    if (action === AUDIT_ACTIONS.AUTH_TOKEN_REFRESHED && reason === 'revoked_token_replayed') {
+      severity = 'CRITICAL';
+    }
+    const entry = {
       organizationId: user.organizationId,
       action,
-      outcome: opts.outcome ?? 'SUCCESS',
-      actorType: user.id ? 'USER' : 'ANONYMOUS',
+      severity,
+      outcome,
+      actorType: (user.id ? 'USER' : 'ANONYMOUS') as 'USER' | 'ANONYMOUS',
       actorId: user.id ?? null,
       actorLabel: user.email ?? null,
       resourceType: 'user',
@@ -108,7 +119,17 @@ export class AuthService {
       ip: opts.meta?.ipAddress,
       userAgent: opts.meta?.userAgent,
       detail: opts.detail,
-    });
+    };
+    // Écriture immédiate pour les faits de sécurité (échecs — relus aussitôt par
+    // la détection brute-force — et événements CRITICAL). Les succès de routine
+    // (login/logout/refresh) sont bufferisés : fort volume, désormais en INFO.
+    // On retourne la promesse pour pouvoir chaîner (ex. brute-force APRÈS
+    // persistance de l'échec) — les autres call-sites restent en `void`.
+    if (outcome === 'FAILURE' || severity === 'CRITICAL') {
+      return this.audit.logNow(entry);
+    }
+    this.audit.log(entry);
+    return Promise.resolve();
   }
 
   /** Metadata client capturée à la couche controller. Tronquée côté backend

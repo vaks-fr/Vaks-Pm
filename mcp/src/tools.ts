@@ -743,22 +743,25 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       description:
         "Déclare la consommation d'un run de travail : tokens (entrée/sortie) et/ou coût réel en €. " +
         "À appeler après avoir produit un livrable — sert la traçabilité et les budgets de l'agent " +
-        "(concurrence, budget jour/mois, coût max par tâche). Rattacher au `taskId` (et `deliverableId`) " +
-        "travaillé si connu. Vous ne déclarez que vos propres runs.",
+        "(concurrence, budget jour/mois, coût max par tâche). Rattacher au `taskId` ET au " +
+        "`deliverableId` produit (requis pour passer la tâche en revue si l'org exige la déclaration). " +
+        "Fournir un `runKey` stable rend l'appel idempotent : un réessai avec la même clé met à jour le " +
+        "run au lieu de compter le coût deux fois. Vous ne déclarez que vos propres runs.",
       inputSchema: {
         taskId: z.string().uuid().optional().describe('Tâche travaillée (optionnel).'),
-        deliverableId: z.string().uuid().optional().describe('Livrable produit (optionnel).'),
+        deliverableId: z.string().uuid().optional().describe('Livrable produit (à rattacher).'),
         model: z.string().optional().describe('Modèle utilisé, ex. claude-sonnet-5.'),
         tokensIn: z.number().int().nonnegative().optional().describe('Tokens en entrée.'),
         tokensOut: z.number().int().nonnegative().optional().describe('Tokens en sortie.'),
-        cost: z.number().nonnegative().optional().describe('Coût réel en euros.'),
+        cost: z.number().nonnegative().optional().describe('Coût réel en euros (optionnel : dérivé des tokens sinon).'),
+        runKey: z.string().min(1).max(200).optional().describe("Clé d'idempotence stable (évite le double comptage sur réessai)."),
         note: z.string().optional().describe("Ce que le run a fait (optionnel)."),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async ({ taskId, deliverableId, model, tokensIn, tokensOut, cost, note }) =>
+    async ({ taskId, deliverableId, model, tokensIn, tokensOut, cost, runKey, note }) =>
       run(() =>
-        api.post('agent-runs', { taskId, deliverableId, model, tokensIn, tokensOut, cost, note }),
+        api.post('agent-runs', { taskId, deliverableId, model, tokensIn, tokensOut, cost, runKey, note }),
       ),
   );
 

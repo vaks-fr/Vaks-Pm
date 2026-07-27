@@ -417,6 +417,66 @@ export class AutomationsHooksService {
     }
   }
 
+  /**
+   * Anti-triche sur le coût agent (batch 1, 2026-07-26) — un run vient d'être
+   * déclaré et paraît suspect : livrable produit sans tokens, coût déclaré à 0
+   * malgré un tarif, ou coût déclaré implausiblement en dessous du coût de
+   * référence recalculé serveur (`AgentRun.derivedCost`). On prévient l'**owner**
+   * de l'agent (son superviseur humain) pour qu'il vérifie — jamais l'agent
+   * lui-même. Ne modifie AUCUN chiffre : la facturation garde le coût déclaré.
+   *
+   * Gaté par le kill switch automations seulement (feature de sécurité, pas de
+   * toggle dédié). Fire-and-forget / fail-open comme les autres hooks.
+   */
+  async onAgentRunReported(
+    orgId: string,
+    run: {
+      runId: string;
+      agentId: string;
+      taskId: string | null;
+      projectId: string | null;
+      reason: 'no_tokens' | 'zero_cost' | 'below_reference';
+      declaredCost: number | null;
+      derivedCost: number | null;
+    },
+  ): Promise<void> {
+    try {
+      const s = await this.enabledSettings(orgId);
+      if (!s) return; // kill switch automations
+      const agent = await this.prisma.user.findFirst({
+        where: { id: run.agentId, organizationId: orgId, kind: 'AGENT' },
+        select: { name: true, ownerId: true },
+      });
+      if (!agent) return;
+      const to = await this.recipients.agentSupervisors(orgId, agent.ownerId);
+      if (!to.length) return;
+
+      const currency = await this.settings.getCurrency(orgId).catch(() => 'EUR');
+      const money = (n: number | null): string =>
+        n == null ? '—' : `${Math.round(n * 100) / 100} ${currency}`;
+
+      await this.actions.emit(orgId, {
+        kind: 'agent_run_anomaly',
+        entityId: run.runId,
+        // Une alerte par (agent × jour × motif) : on ne spamme pas l'owner à
+        // chaque run douteux, mais un motif différent ré-alerte.
+        qualifier: `${run.reason}:${new Date().toISOString().slice(0, 10)}`,
+        recipients: to,
+        params: {
+          userName: agent.name ?? 'Agent',
+          reason: run.reason,
+          amount: money(run.declaredCost),
+          budget: money(run.derivedCost),
+        },
+        taskId: run.taskId ?? undefined,
+        projectId: run.projectId ?? undefined,
+        url: `${this.appBase()}/?view=agents`,
+      });
+    } catch (err) {
+      this.log.warn(`onAgentRunReported(${run.runId}) failed: ${(err as Error).message}`);
+    }
+  }
+
   /** `TasksService` en lazy (cf. commentaire de classe : cycle de modules). */
   private tasksService(): TasksService | null {
     try {

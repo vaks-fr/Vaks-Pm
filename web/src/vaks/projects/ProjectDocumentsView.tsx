@@ -1,60 +1,78 @@
 /* ============================================================
    Vue « Documents » d'un projet — bascule entre l'espace fichiers vaks natif
-   (S3/Garage) et le SharePoint de la team Microsoft provisionnée (lecture seule,
-   membres invités uniquement). L'onglet SharePoint n'apparaît que si la source
-   est disponible pour l'utilisateur courant (gate serveur : licence + toggles +
-   grant + appartenance à la team).
+   (S3/Garage) et les sources de documents externes rattachées au projet en
+   lecture seule (SharePoint de la team Teams, Drive partagé Google provisionné,
+   …). Un onglet par source disponible : chaque source n'apparaît que si le gate
+   serveur la déclare `available` (licence + toggles + identité + accès).
    ============================================================ */
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { api } from '../../api/client';
+import { api, type ContextSourceAvailability } from '../../api/client';
 import { ProjectDocumentsTab } from './ProjectDocumentsTab';
-import { SharePointDocumentsTab } from './SharePointDocumentsTab';
+import { ContextFilesTab } from './ContextFilesTab';
 
 interface Props {
   projectId: string;
   pushToast: (text: string, warn?: boolean) => void;
 }
 
+/** Couleur d'accent par source (l'API ne la renvoie pas). */
+const SOURCE_ACCENT: Record<string, string> = {
+  sharepoint: '#038387',
+  'google-drive': '#1a73e8',
+};
+
 export function ProjectDocumentsView({ projectId, pushToast }: Props) {
   const { t } = useTranslation('projects');
-  const [tab, setTab] = useState<'vaks' | 'sharepoint'>('vaks');
-  const [spAvailable, setSpAvailable] = useState(false);
+  // 'vaks' = fichiers natifs ; sinon la clé machine de la source externe.
+  const [tab, setTab] = useState<string>('vaks');
+  const [sources, setSources] = useState<ContextSourceAvailability[]>([]);
 
   useEffect(() => {
     let alive = true;
-    setSpAvailable(false);
+    setSources([]);
     setTab('vaks');
     api
       .projectContextSources(projectId)
       .then((srcs) => {
-        if (alive) setSpAvailable(srcs.some((s) => s.source === 'sharepoint' && s.available));
+        if (alive) setSources(srcs.filter((s) => s.available));
       })
       .catch(() => {
-        /* source indispo → onglet masqué, silencieux */
+        /* sources indispo → onglets masqués, silencieux */
       });
     return () => {
       alive = false;
     };
   }, [projectId]);
 
+  const active = sources.find((s) => s.source === tab);
+
   return (
     <div>
-      {spAvailable && (
+      {sources.length > 0 && (
         <div className="seg seg-accent" style={{ marginBottom: 12 }}>
           <button className={'seg-btn' + (tab === 'vaks' ? ' seg-on' : '')} onClick={() => setTab('vaks')}>
             {t('documents.tabVaks')}
           </button>
-          <button
-            className={'seg-btn' + (tab === 'sharepoint' ? ' seg-on' : '')}
-            onClick={() => setTab('sharepoint')}
-          >
-            {t('documents.tabSharePoint')}
-          </button>
+          {sources.map((s) => (
+            <button
+              key={s.source}
+              className={'seg-btn' + (tab === s.source ? ' seg-on' : '')}
+              onClick={() => setTab(s.source)}
+            >
+              {s.label}
+            </button>
+          ))}
         </div>
       )}
-      {tab === 'sharepoint' && spAvailable ? (
-        <SharePointDocumentsTab projectId={projectId} pushToast={pushToast} />
+      {active ? (
+        <ContextFilesTab
+          projectId={projectId}
+          source={active.source}
+          label={active.label}
+          accent={SOURCE_ACCENT[active.source]}
+          pushToast={pushToast}
+        />
       ) : (
         <ProjectDocumentsTab projectId={projectId} pushToast={pushToast} />
       )}

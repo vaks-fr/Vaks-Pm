@@ -52,6 +52,7 @@ const AGENT_POLICY_KEYS = [
   'agents.policies',
   'agents.backpressure.maxPendingReviews',
   'agents.requireRunDeclaration',
+  'agents.preauthorizeBudget',
 ] as const;
 
 function pickAgentPolicies(all: Record<string, unknown>) {
@@ -60,6 +61,7 @@ function pickAgentPolicies(all: Record<string, unknown>) {
     'agents.backpressure.maxPendingReviews':
       all['agents.backpressure.maxPendingReviews'] ?? 5,
     'agents.requireRunDeclaration': all['agents.requireRunDeclaration'] === true,
+    'agents.preauthorizeBudget': all['agents.preauthorizeBudget'] === true,
   };
 }
 

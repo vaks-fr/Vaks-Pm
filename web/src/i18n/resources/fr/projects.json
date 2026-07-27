@@ -273,21 +273,19 @@
     "confirmDeleteFolderEyebrow": "Supprimer le dossier",
     "confirmDeleteFolderTitle": "Supprimer « {{name}} »",
     "confirmDeleteFolderBody": "Ses documents et sous-dossiers remontent au dossier parent — rien n'est perdu.",
-    "tabVaks": "Fichiers du projet",
-    "tabSharePoint": "SharePoint"
+    "tabVaks": "Fichiers du projet"
   },
-  "sharepoint": {
-    "root": "SharePoint",
+  "contextFiles": {
     "refresh": "Rafraîchir",
     "loading": "Chargement…",
     "emptyFolder": "Ce dossier est vide.",
     "folder": "Dossier",
     "previewTitle": "Aperçu du texte",
-    "openInSharePoint": "Ouvrir dans SharePoint",
+    "openIn": "Ouvrir dans {{source}}",
     "loadMore": "Charger plus",
-    "truncated": "Texte tronqué (fichier volumineux) — ouvrez dans SharePoint pour tout voir.",
-    "noText": "Aucun texte extractible pour ce fichier — ouvrez-le dans SharePoint.",
-    "explainer": "Vue en lecture seule du site Microsoft Teams lié à ce projet. Les fichiers restent dans SharePoint — rien n'est copié. Visible uniquement par les membres invités dans l'équipe."
+    "truncated": "Texte tronqué (fichier volumineux) — ouvrez dans {{source}} pour tout voir.",
+    "noText": "Aucun texte extractible pour ce fichier — ouvrez-le dans {{source}}.",
+    "explainer": "Vue en lecture seule des documents de ce projet dans {{source}}. Les fichiers y restent — rien n'est copié."
   },
   "create": {
     "duplicateEyebrow": "Dupliquer",

@@ -273,21 +273,19 @@
     "confirmDeleteFolderEyebrow": "Elimina cartella",
     "confirmDeleteFolderTitle": "Eliminare « {{name}} »",
     "confirmDeleteFolderBody": "I suoi documenti e le sottocartelle risalgono alla cartella superiore — nulla va perso.",
-    "tabVaks": "File del progetto",
-    "tabSharePoint": "SharePoint"
+    "tabVaks": "File del progetto"
   },
-  "sharepoint": {
-    "root": "SharePoint",
+  "contextFiles": {
     "refresh": "Aggiorna",
     "loading": "Caricamento…",
     "emptyFolder": "Questa cartella è vuota.",
     "folder": "Cartella",
     "previewTitle": "Anteprima del testo",
-    "openInSharePoint": "Apri in SharePoint",
+    "openIn": "Apri in {{source}}",
     "loadMore": "Carica altro",
-    "truncated": "Testo troncato (file di grandi dimensioni) — apri in SharePoint per vedere tutto.",
-    "noText": "Nessun testo estraibile per questo file — aprilo in SharePoint.",
-    "explainer": "Vista in sola lettura del sito Microsoft Teams collegato a questo progetto. I file restano in SharePoint — nulla viene copiato. Visibile solo ai membri invitati nel team."
+    "truncated": "Testo troncato (file di grandi dimensioni) — apri in {{source}} per vedere tutto.",
+    "noText": "Nessun testo estraibile per questo file — aprilo in {{source}}.",
+    "explainer": "Vista in sola lettura dei documenti di questo progetto in {{source}}. I file restano lì — nulla viene copiato."
   },
   "create": {
     "duplicateEyebrow": "Duplica",

@@ -28,6 +28,7 @@ import type {
   AssigneeSuggestionDto,
   DependencyDto,
   SkillDto,
+  TaskAgentActivityDto,
   TeamDto,
   UpdateAllocationDto,
   UserDto,
@@ -914,6 +915,29 @@ export function TaskDetail({
     return () => { alive = false; };
   }, [task.id, foreign]);
 
+  // Le projet effectif de la tâche : on résout par `projectId` (prop) ou par
+  // le champ `projectId` posé sur la tâche au moment du toVaksTask. Fallback
+  // PROJECTS[0] uniquement si rien n'est trouvé (cas dégradé maquette).
+  // Déclaré ici (haut du composant) car des effets ci-dessous (onglet AI) le lisent.
+  const proj =
+    PROJECTS.find((p) => p.id === (projectId ?? task.projectId)) ?? PROJECTS[0];
+
+  // ---- Activité agent (onglet AI) : runs déclarés + coût déclaré vs référence
+  // + anomalies + budget par tâche. Rechargé à l'ouverture de l'onglet. ----
+  const [aiActivity, setAiActivity] = useState<TaskAgentActivityDto | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  useEffect(() => {
+    if (tab !== 'ai' || foreign || !proj?.agentsEnabled) return;
+    let alive = true;
+    setAiLoading(true);
+    api.getTaskAgentActivity(task.id)
+      .then((a) => { if (alive) setAiActivity(a); })
+      .catch(() => { if (alive) setAiActivity(null); })
+      .finally(() => { if (alive) setAiLoading(false); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, task.id, foreign, proj?.agentsEnabled]);
+
   // ---- Watchers : abonnement passif (suivre sans être assigné) ----
   const [watchers, setWatchers] = useState<WatcherDto[]>([]);
   const [watching, setWatching] = useState(false);
@@ -1139,11 +1163,6 @@ export function TaskDetail({
   );
 
   const [dragOver, setDragOver] = useState(false);
-  // Le projet effectif de la tâche : on résout par `projectId` (prop) ou par
-  // le champ `projectId` posé sur la tâche au moment du toVaksTask. Fallback
-  // PROJECTS[0] uniquement si rien n'est trouvé (cas dégradé maquette).
-  const proj =
-    PROJECTS.find((p) => p.id === (projectId ?? task.projectId)) ?? PROJECTS[0];
   const sub = subOf(task);
   const due = fmt.due(task.due, monday);
   // Pour une tâche d'un autre projet (`foreign`), `task.col` référence une
@@ -2538,19 +2557,135 @@ export function TaskDetail({
           {tab === 'ai' && (
             <div className="td-section" style={{ borderTop: 'none', paddingTop: 4 }}>
               <div className="td-stitle">{t('detail.ai.title')}</div>
-              {proj?.agentsEnabled ? (
-                <div className="td-ai-empty">
-                  <Icon name="zap" size={26} style={{ color: 'var(--accent)' }} />
-                  <div style={{ fontWeight: 600, color: 'var(--text)' }}>
-                    {t('detail.ai.enabledTitle')}
-                  </div>
-                  <div>{t('detail.ai.planned')}</div>
-                </div>
-              ) : (
+              {!proj?.agentsEnabled ? (
                 <div className="td-ai-empty">
                   <Icon name="zap" size={26} style={{ color: 'var(--text-faint)' }} />
                   <div>{t('detail.ai.notEnabled')}</div>
                 </div>
+              ) : (
+                <>
+                  {/* Runs déclarés + coût (batch 1). Coût déclaré vs coût de
+                      référence recalculé serveur, flag d'anomalie. */}
+                  {aiLoading && !aiActivity ? (
+                    <div style={{ color: 'var(--text-3)', fontSize: 13, padding: '8px 0' }}>
+                      {t('detail.ai.loading', { defaultValue: 'Loading agent activity…' })}
+                    </div>
+                  ) : aiActivity ? (
+                    <>
+                      <div
+                        style={{
+                          display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center',
+                          padding: '10px 12px', background: 'var(--surface-2)',
+                          border: '1px solid var(--border)', borderRadius: 10, marginBottom: 12,
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                            {t('detail.ai.totalCost', { defaultValue: 'Total agent cost' })}
+                          </div>
+                          <div style={{ fontWeight: 700, fontSize: 18 }}>
+                            {aiActivity.budget.spent.toFixed(2)} €
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                            {t('detail.ai.runs', { defaultValue: 'Runs' })}
+                          </div>
+                          <div style={{ fontWeight: 700, fontSize: 18 }}>{aiActivity.budget.runCount}</div>
+                        </div>
+                        {aiActivity.budget.taskBudget != null && (
+                          <div style={{ minWidth: 160 }}>
+                            <div style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                              {t('detail.ai.budget', { defaultValue: 'Task budget' })}
+                            </div>
+                            <div style={{ fontWeight: 600, fontSize: 13 }}>
+                              {aiActivity.budget.spent.toFixed(2)} / {aiActivity.budget.taskBudget.toFixed(2)} €
+                            </div>
+                            <div style={{ height: 5, background: 'var(--border)', borderRadius: 3, marginTop: 4, overflow: 'hidden' }}>
+                              <div
+                                style={{
+                                  height: '100%',
+                                  width: `${Math.min(100, aiActivity.budget.taskBudget > 0 ? (aiActivity.budget.spent / aiActivity.budget.taskBudget) * 100 : 0)}%`,
+                                  background: aiActivity.budget.spent >= aiActivity.budget.taskBudget ? 'var(--danger, #d64545)' : 'var(--accent)',
+                                }}
+                              />
+                            </div>
+                          </div>
+                        )}
+                        {aiActivity.claim && (
+                          <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-3)' }}>
+                            {t('detail.ai.claimedBy', { defaultValue: 'Claimed by' })}{' '}
+                            <b style={{ color: 'var(--text-2)' }}>{aiActivity.claim.agentName ?? '—'}</b>
+                          </div>
+                        )}
+                      </div>
+
+                      {aiActivity.runs.length === 0 ? (
+                        <div style={{ color: 'var(--text-3)', fontSize: 13, padding: '4px 0 10px' }}>
+                          {t('detail.ai.noRuns', { defaultValue: 'No agent runs declared on this task yet.' })}
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 6 }}>
+                          {aiActivity.runs.map((r) => {
+                            const anomalyLabel = r.anomaly === 'no_tokens'
+                              ? t('detail.ai.anomalyNoTokens', { defaultValue: 'Deliverable, 0 tokens' })
+                              : r.anomaly === 'zero_cost'
+                                ? t('detail.ai.anomalyZeroCost', { defaultValue: 'Zero cost vs rate' })
+                                : r.anomaly === 'below_reference'
+                                  ? t('detail.ai.anomalyBelow', { defaultValue: 'Below reference' })
+                                  : null;
+                            return (
+                              <div
+                                key={r.id}
+                                style={{
+                                  display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap',
+                                  padding: '7px 10px', border: '1px solid var(--border)', borderRadius: 8,
+                                }}
+                              >
+                                <span className="mono" style={{ fontSize: 11, color: 'var(--text-3)', minWidth: 110 }}>
+                                  {r.model ?? '—'}
+                                </span>
+                                <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
+                                  {(r.tokensIn ?? 0).toLocaleString()} → {(r.tokensOut ?? 0).toLocaleString()} tok
+                                </span>
+                                <span style={{ fontSize: 13, fontWeight: 600 }}>
+                                  {r.cost != null ? `${r.cost.toFixed(2)} €` : '—'}
+                                </span>
+                                {r.derivedCost != null && (
+                                  <span style={{ fontSize: 11, color: 'var(--text-3)' }} title={t('detail.ai.refHint', { defaultValue: 'Server-computed reference cost' })}>
+                                    {t('detail.ai.ref', { defaultValue: 'ref' })} {r.derivedCost.toFixed(2)} €
+                                  </span>
+                                )}
+                                {anomalyLabel && (
+                                  <span
+                                    style={{
+                                      fontSize: 11, fontWeight: 600, padding: '1px 7px', borderRadius: 6,
+                                      color: 'var(--danger, #d64545)', background: 'var(--danger-soft, #fbe6e6)',
+                                    }}
+                                  >
+                                    ⚠ {anomalyLabel}
+                                  </span>
+                                )}
+                                {r.note && (
+                                  <span style={{ fontSize: 12, color: 'var(--text-3)', flexBasis: '100%' }}>{r.note}</span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </>
+                  ) : null}
+
+                  {/* Livrables + critères + budget agent (déplacés ici depuis
+                      l'onglet Activité : leur place logique est l'onglet IA). */}
+                  <DeliverablesSection
+                    task={task}
+                    can={can}
+                    me={userById[currentUser]}
+                    pushToast={pushToast}
+                  />
+                </>
               )}
             </div>
           )}
@@ -2639,14 +2774,7 @@ export function TaskDetail({
 
           {/* deliverables (chantier 2c) — Activité, uniquement si le projet autorise
               les agents IA (livrables/critères/budget IA sont des concepts agent). */}
-          {tab === 'activity' && proj?.agentsEnabled && (
-            <DeliverablesSection
-              task={task}
-              can={can}
-              me={userById[currentUser]}
-              pushToast={pushToast}
-            />
-          )}
+          {/* Livrables agent : déplacés vers l'onglet IA (leur place logique). */}
 
           {/* comments (Activité) */}
           {tab === 'activity' && (

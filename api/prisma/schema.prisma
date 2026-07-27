@@ -1498,12 +1498,24 @@ model AgentRun {
   model          String?
   tokensIn       Int?
   tokensOut      Int?
-  /// Coût réel en € (devise org) déclaré par l'agent.
+  /// Coût réel en € (devise org) déclaré par l'agent. Prioritaire sur `derivedCost`
+  /// pour la facturation/les budgets (il capture le cache/tiers qu'un taux ignore).
   cost           Decimal? @db.Decimal(12, 4)
+  /// Coût de **référence** recalculé côté serveur depuis les tokens × taux du
+  /// profil agent, TOUJOURS (même quand l'agent déclare un `cost`). Sert
+  /// l'anti-triche : si le `cost` déclaré est implausiblement en dessous de
+  /// cette référence, on alerte l'owner (automation `agent_run_anomaly`).
+  /// Jamais utilisé pour facturer — c'est un garde-fou, pas la vérité.
+  derivedCost    Decimal? @db.Decimal(12, 4)
+  /// Clé d'idempotence fournie par l'agent (`vaks_report_run`). Un retry avec la
+  /// même clé met à jour le run au lieu d'en créer un doublon (double comptage
+  /// du coût évité). NULL = pas d'idempotence (chaque appel crée un run).
+  runKey         String?
   /// Note libre (ce que le run a fait).
   note           String?
   createdAt      DateTime @default(now())
 
+  @@unique([organizationId, agentId, runKey])
   @@index([organizationId, agentId, createdAt])
   @@index([taskId])
   @@index([projectId, createdAt])

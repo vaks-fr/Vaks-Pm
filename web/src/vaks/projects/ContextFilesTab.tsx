@@ -1,8 +1,9 @@
 /* ============================================================
-   Onglet « SharePoint » d'un projet — navigation LECTURE SEULE du drive de la
-   team Microsoft provisionnée. Proxy live via l'API (aucune copie). Visible
-   uniquement pour les membres réellement invités dans la team (gate serveur).
-   Navigation dossiers (breadcrumb), aperçu texte, lien sortant vers SharePoint.
+   Onglet « documents externes » d'un projet — navigation LECTURE SEULE d'une
+   source de fichiers rattachée au projet (SharePoint de la team Teams, Drive
+   partagé Google provisionné, …). Proxy live via l'API (aucune copie).
+   Générique : paramétré par `source` (clé machine) + `label` (nom affiché).
+   Navigation dossiers (breadcrumb), aperçu texte, lien sortant vers la source.
    ============================================================ */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,12 +14,18 @@ import { fmtBytes } from './shared';
 
 interface Props {
   projectId: string;
+  /** Clé machine de la source (`sharepoint`, `google-drive`, …). */
+  source: string;
+  /** Nom affiché de la source (renvoyé par l'API : « Google Drive », …). */
+  label: string;
+  /** Couleur d'accent de la source (pour l'aperçu). */
+  accent?: string;
   pushToast: (text: string, warn?: boolean) => void;
 }
 
 type Crumb = { id: string | null; name: string };
 
-export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
+export function ContextFilesTab({ projectId, source, label, accent, pushToast }: Props) {
   const { t } = useTranslation('projects');
   const fmt = useFormat();
   const [stack, setStack] = useState<Crumb[]>([{ id: null, name: '' }]); // [0] = racine
@@ -29,6 +36,7 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
   const [preview, setPreview] = useState<{ doc: ContextFileEntry; content: string; truncated: boolean } | null>(null);
   const [previewLoading, setPreviewLoading] = useState<string | null>(null);
   const reqId = useRef(0);
+  const accentColor = accent || '#038387';
 
   const cwd = stack[stack.length - 1];
 
@@ -38,7 +46,7 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
       append ? setLoadingMore(true) : setLoading(true);
       try {
         const res = await api.listProjectContextFiles(projectId, {
-          source: 'sharepoint',
+          source,
           folderId: folderId ?? undefined,
           cursor: cur,
         });
@@ -54,16 +62,19 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
         }
       }
     },
-    [projectId, pushToast],
+    [projectId, source, pushToast],
   );
 
-  // (Re)charge à chaque changement de dossier courant.
+  // (Re)charge à chaque changement de dossier courant (ou de source).
+  useEffect(() => {
+    setStack([{ id: null, name: '' }]);
+  }, [source]);
   useEffect(() => {
     setItems([]);
     setCursor(null);
     void load(cwd.id, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd.id, projectId]);
+  }, [cwd.id, projectId, source]);
 
   const enterFolder = (f: ContextFileEntry) => setStack((s) => [...s, { id: f.id, name: f.name }]);
   const goTo = (idx: number) => setStack((s) => s.slice(0, idx + 1));
@@ -71,7 +82,7 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
   const openFile = async (f: ContextFileEntry) => {
     setPreviewLoading(f.id);
     try {
-      const res = await api.getProjectContextFile(projectId, 'sharepoint', f.id);
+      const res = await api.getProjectContextFile(projectId, source, f.id);
       setPreview({ doc: res.document, content: res.content, truncated: res.truncated });
     } catch (e) {
       pushToast((e as Error).message, true);
@@ -103,7 +114,7 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
             >
               {i === 0 ? (
                 <>
-                  <Icon name="folder" size={13} /> {t('sharepoint.root')}
+                  <Icon name="folder" size={13} /> {label}
                 </>
               ) : (
                 c.name
@@ -111,15 +122,15 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
             </button>
           </React.Fragment>
         ))}
-        <button className="icon-btn" title={t('sharepoint.refresh')} onClick={() => load(cwd.id, false)} style={{ marginLeft: 4 }}>
+        <button className="icon-btn" title={t('contextFiles.refresh')} onClick={() => load(cwd.id, false)} style={{ marginLeft: 4 }}>
           <Icon name="refresh" size={13} />
         </button>
       </div>
 
       {loading ? (
-        <div style={{ color: 'var(--text-3)', fontSize: 13 }}>{t('sharepoint.loading')}</div>
+        <div style={{ color: 'var(--text-3)', fontSize: 13 }}>{t('contextFiles.loading')}</div>
       ) : sorted.length === 0 ? (
-        <div className="md-span" style={{ color: 'var(--text-3)' }}>{t('sharepoint.emptyFolder')}</div>
+        <div className="md-span" style={{ color: 'var(--text-3)' }}>{t('contextFiles.emptyFolder')}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           {sorted.map((f) =>
@@ -129,7 +140,7 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
                   <Icon name="folder" size={14} style={{ color: 'var(--accent)' }} />
                   <span className="truncate">{f.name}</span>
                 </button>
-                <span className="doc-meta mono">{t('sharepoint.folder')}</span>
+                <span className="doc-meta mono">{t('contextFiles.folder')}</span>
                 <span className="doc-meta" />
                 <div className="doc-actions" />
               </div>
@@ -138,7 +149,7 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
                 <button
                   className="doc-name"
                   onClick={() => openFile(f)}
-                  title={t('sharepoint.previewTitle')}
+                  title={t('contextFiles.previewTitle')}
                   disabled={previewLoading === f.id}
                 >
                   <Icon name={previewLoading === f.id ? 'refresh' : 'eye'} size={14} />
@@ -153,7 +164,7 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
                       href={f.webUrl}
                       target="_blank"
                       rel="noreferrer noopener"
-                      title={t('sharepoint.openInSharePoint')}
+                      title={t('contextFiles.openIn', { source: label })}
                     >
                       <Icon name="link" size={13} />
                     </a>
@@ -168,13 +179,13 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
       {cursor && (
         <div style={{ marginTop: 8 }}>
           <button className="btn btn-ghost btn-sm" disabled={loadingMore} onClick={() => load(cwd.id, true, cursor)}>
-            {loadingMore ? t('sharepoint.loading') : t('sharepoint.loadMore')}
+            {loadingMore ? t('contextFiles.loading') : t('contextFiles.loadMore')}
           </button>
         </div>
       )}
 
       <div className="md-hint" style={{ marginTop: 8 }}>
-        {t('sharepoint.explainer')}
+        {t('contextFiles.explainer', { source: label })}
       </div>
 
       {/* Aperçu texte d'un fichier */}
@@ -188,19 +199,19 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
             style={{ width: 'min(760px, 100%)', outline: 'none' }}
           >
             <div className="md-head">
-              <div className="anav-mark" style={{ width: 38, height: 38, background: 'color-mix(in oklch, #038387 16%, transparent)', color: '#038387' }}>
+              <div className="anav-mark" style={{ width: 38, height: 38, background: `color-mix(in oklch, ${accentColor} 16%, transparent)`, color: accentColor }}>
                 <Icon name="eye" size={18} />
               </div>
               <div className="grow" style={{ minWidth: 0 }}>
                 <div className="md-eyebrow mono">
-                  {typeof preview.doc.size === 'number' ? fmtBytes(preview.doc.size) : 'SharePoint'}
+                  {typeof preview.doc.size === 'number' ? fmtBytes(preview.doc.size) : label}
                   {preview.doc.lastModified ? ` · ${fmt.dateTime(preview.doc.lastModified)}` : ''}
                 </div>
                 <div className="md-title truncate">{preview.doc.name}</div>
               </div>
               {preview.doc.webUrl && (
                 <a className="btn btn-ghost btn-sm" href={preview.doc.webUrl} target="_blank" rel="noreferrer noopener">
-                  <Icon name="link" size={13} /> {t('sharepoint.openInSharePoint')}
+                  <Icon name="link" size={13} /> {t('contextFiles.openIn', { source: label })}
                 </a>
               )}
               <button className="icon-btn" onClick={() => setPreview(null)} aria-label={t('common:close')}>
@@ -208,7 +219,7 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
               </button>
             </div>
             <div className="md-body">
-              {preview.truncated && <div className="md-hint" style={{ marginBottom: 6 }}>{t('sharepoint.truncated')}</div>}
+              {preview.truncated && <div className="md-hint" style={{ marginBottom: 6 }}>{t('contextFiles.truncated', { source: label })}</div>}
               <pre
                 style={{
                   whiteSpace: 'pre-wrap',
@@ -223,7 +234,7 @@ export function SharePointDocumentsTab({ projectId, pushToast }: Props) {
                   margin: 0,
                 }}
               >
-                {preview.content || t('sharepoint.noText')}
+                {preview.content || t('contextFiles.noText', { source: label })}
               </pre>
             </div>
           </div>

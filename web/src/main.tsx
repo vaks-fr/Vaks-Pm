@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { BrowserRouter } from 'react-router-dom';
+import { BrowserRouter } from 'react-router';
 import App from './App';
 import { AuthProvider } from './auth/AuthContext';
 import './i18n'; // initialise i18next (effet de bord : i18n.init)

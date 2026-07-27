@@ -176,14 +176,24 @@ export class AuditLogService implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
-  /** Écriture immédiate (événements de sécurité). Ne throw jamais. */
-  async logCritical(input: AuditEntryInput): Promise<void> {
+  /**
+   * Écriture immédiate (non bufferisée) avec la sévérité fournie (défaut INFO).
+   * À utiliser quand l'entrée doit être en base sans attendre le flush — p.ex.
+   * un `auth.login.failure` relu aussitôt par la détection brute-force. Ne throw
+   * jamais.
+   */
+  async logNow(input: AuditEntryInput): Promise<void> {
     try {
-      const entry = this.capture({ severity: 'CRITICAL', ...input });
+      const entry = this.capture(input);
       await this.persist(entry.client, entry.slug, [entry.row]);
     } catch (err) {
-      this.logger.error(`audit logCritical() failed: ${(err as Error).message}`);
+      this.logger.error(`audit logNow() failed: ${(err as Error).message}`);
     }
+  }
+
+  /** Écriture immédiate en CRITICAL (événements de sécurité). Ne throw jamais. */
+  async logCritical(input: AuditEntryInput): Promise<void> {
+    return this.logNow({ severity: 'CRITICAL', ...input });
   }
 
   /** Capture le client/slug du tenant courant + normalise la ligne. */

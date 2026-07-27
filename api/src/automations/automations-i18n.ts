@@ -39,6 +39,8 @@ export interface AutomationMessageParams {
   /** Statuts avant/après (feed sponsor, règle statut projet) — clés d'enum. */
   from?: string;
   to?: string;
+  /** Motif d'anomalie de coût agent : 'no_tokens' | 'zero_cost' | 'below_reference'. */
+  reason?: string;
 }
 
 /** Libellés localisés des statuts projet (feed sponsor). Fallback = clé brute. */
@@ -708,6 +710,68 @@ const M: Record<AutomationKind, Record<Lang, MessageBuilder>> = {
       text: `${p.scope}-Agent-Budget bei ${p.pct} % (${p.amount} von ${p.budget}).`,
       ctaLabel: 'Agenten öffnen',
     }),
+  },
+  agent_run_anomaly: {
+    en: (p) => {
+      const why =
+        p.reason === 'no_tokens'
+          ? 'produced a deliverable but declared no token usage'
+          : p.reason === 'zero_cost'
+            ? `declared a zero cost even though a rate is configured (reference ${p.budget})`
+            : `declared ${p.amount}, well below the server-computed reference of ${p.budget}`;
+      return {
+        subject: `[Agent cost] ${p.userName} — suspicious cost declaration`,
+        heading: 'An AI agent cost declaration looks off',
+        bodyHtml: `<strong>${esc(p.userName ?? '')}</strong> ${esc(why)}. Billing keeps the declared figure — please review whether the reported usage is accurate.`,
+        text: `${p.userName}: ${why}.`,
+        ctaLabel: 'Open agents',
+      };
+    },
+    fr: (p) => {
+      const why =
+        p.reason === 'no_tokens'
+          ? 'a produit un livrable sans déclarer de tokens'
+          : p.reason === 'zero_cost'
+            ? `a déclaré un coût nul alors qu'un tarif est configuré (référence ${p.budget})`
+            : `a déclaré ${p.amount}, bien en dessous du coût de référence recalculé ${p.budget}`;
+      return {
+        subject: `[Coût agent] ${p.userName} — déclaration de coût suspecte`,
+        heading: 'Une déclaration de coût d\'agent IA paraît anormale',
+        bodyHtml: `<strong>${esc(p.userName ?? '')}</strong> ${esc(why)}. La facturation conserve le montant déclaré — vérifiez si la consommation rapportée est exacte.`,
+        text: `${p.userName} ${why}.`,
+        ctaLabel: 'Ouvrir les agents',
+      };
+    },
+    it: (p) => {
+      const why =
+        p.reason === 'no_tokens'
+          ? 'ha prodotto un deliverable senza dichiarare token'
+          : p.reason === 'zero_cost'
+            ? `ha dichiarato un costo nullo pur avendo una tariffa configurata (riferimento ${p.budget})`
+            : `ha dichiarato ${p.amount}, ben al di sotto del costo di riferimento ${p.budget}`;
+      return {
+        subject: `[Costo agente] ${p.userName} — dichiarazione di costo sospetta`,
+        heading: 'Una dichiarazione di costo di un agente IA sembra anomala',
+        bodyHtml: `<strong>${esc(p.userName ?? '')}</strong> ${esc(why)}. La fatturazione mantiene l'importo dichiarato — verifica se il consumo riportato è corretto.`,
+        text: `${p.userName} ${why}.`,
+        ctaLabel: 'Apri gli agenti',
+      };
+    },
+    de: (p) => {
+      const why =
+        p.reason === 'no_tokens'
+          ? 'hat ein Ergebnis erstellt, aber keine Token-Nutzung angegeben'
+          : p.reason === 'zero_cost'
+            ? `hat trotz konfigurierter Rate Kosten von null angegeben (Referenz ${p.budget})`
+            : `hat ${p.amount} angegeben, deutlich unter der server-berechneten Referenz ${p.budget}`;
+      return {
+        subject: `[Agent-Kosten] ${p.userName} — verdächtige Kostenangabe`,
+        heading: 'Eine KI-Agent-Kostenangabe wirkt auffällig',
+        bodyHtml: `<strong>${esc(p.userName ?? '')}</strong> ${esc(why)}. Die Abrechnung behält den angegebenen Betrag — bitte prüfen Sie, ob die gemeldete Nutzung korrekt ist.`,
+        text: `${p.userName} ${why}.`,
+        ctaLabel: 'Agenten öffnen',
+      };
+    },
   },
   deliverable_stale: {
     en: (p) => ({

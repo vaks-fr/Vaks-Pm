@@ -22,7 +22,7 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { SkipAudit } from '../audit-logs/audited.decorator';
 import { AuditLogService } from '../audit-logs/audit-log.service';
-import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { AUDIT_ACTIONS, severityForAction } from '../audit-logs/audit-actions';
 
 @ApiTags('users')
 @ApiBearerAuth()
@@ -183,9 +183,10 @@ export class UsersController {
     @Param('userId', ParseUUIDPipe) id: string,
   ) {
     const data = await this.users.exportData(user.orgId, id);
-    void this.audit.logCritical({
+    void this.audit.log({
       organizationId: user.orgId,
       action: AUDIT_ACTIONS.USER_DATA_EXPORTED,
+      severity: severityForAction(AUDIT_ACTIONS.USER_DATA_EXPORTED),
       actorId: user.userId,
       actorLabel: user.email,
       resourceType: 'user',

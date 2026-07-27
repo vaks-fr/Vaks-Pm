@@ -56,11 +56,16 @@ interface CachedToken {
 
 /**
  * Provider Google Drive — deuxième source de fichiers du seam (après SharePoint).
- * Connecteur autonome (contrairement à SharePoint qui réutilise l'identité Teams) :
- * l'admin colle une **clé de compte de service** (JSON) et l'ID du **dossier racine**
- * (ou Shared Drive) que le SA est autorisé à lire. Proxy live, aucune copie.
+ * `managedElsewhere` : il ne détient PAS de connecteur propre. La config/secret
+ * de lecture est dérivée du **provisioning Google Drive** (`gdrive.provisioning.*`,
+ * via `AdminSettingsService.getGoogleDriveReadContext`) et injectée dans le
+ * `FileSourceContext` par `FileSourcesService.buildResolution` — l'identité qui
+ * a créé le Drive partagé du projet le lit (le scope `drive` inclut `drive.readonly`).
+ * Une seule config à maintenir, comme SharePoint réutilise l'identité Teams.
+ * Proxy live, aucune copie. La racine lue est le Drive partagé du projet
+ * (`ctx.project.gdriveId`).
  *
- * Deux modes d'authentification (`authMode`) :
+ * Deux modes d'authentification (`authMode`, hérités du provisioning) :
  *  - **`sa_key`** (défaut) : clé de compte de service téléchargée (JSON). Simple,
  *    mais exige de détenir une clé SA — refusé par la contrainte d'org
  *    `iam.disableServiceAccountKeyCreation` (fréquente en sécurité renforcée).
@@ -93,71 +98,15 @@ export class GoogleDriveProvider implements FileSourceProvider {
       source: this.source,
       label: this.label,
       blurb:
-        "Lecture, par les agents IA, des documents d'un dossier Google Drive (ou Shared Drive) partagé avec un compte de service. Proxy live, aucune copie. Portée par organisation ; chaque projet l'active via son contexte documentaire.",
+        "Lecture des documents du Drive partagé provisionné pour le projet. Réutilise l'identité du provisioning Google Drive — configurée dans « Google Drive — provisioning ». Proxy live, aucune copie.",
       accent: '#1a73e8',
       short: 'gd',
-      fields: [
-        {
-          key: 'authMode',
-          label: "Mode d'authentification",
-          type: 'select',
-          required: false,
-          secret: false,
-          default: 'sa_key',
-          help: "sa_key = clé de compte de service (JSON). wif = Workload Identity Federation, sans clé (générer la clé ci-dessous, impersonation requise).",
-          options: [
-            { value: 'sa_key', label: 'Clé de compte de service (JSON)' },
-            { value: 'wif', label: 'Workload Identity Federation (sans clé)' },
-          ],
-        },
-        {
-          key: 'rootFolderId',
-          label: 'ID du dossier racine (repli org)',
-          type: 'text',
-          required: false,
-          secret: false,
-          placeholder: '1AbCdEfGhIjKlMnOpQrStUvWxYz',
-          help: "ID du dossier Drive (ou du Shared Drive) partagé avec le compte de service, commun à toute l'organisation. Se lit dans l'URL après « /folders/ ». Ignoré pour les projets qui ont leur propre Drive partagé provisionné.",
-        },
-        {
-          key: 'impersonateSubject',
-          label: 'Utilisateur impersonné',
-          type: 'text',
-          required: false,
-          secret: false,
-          placeholder: 'user@votre-domaine.com',
-          help: "Email de l'utilisateur Workspace à impersoner (délégation domain-wide). OBLIGATOIRE en mode wif. En mode sa_key, laisser vide si le dossier est partagé directement avec le compte de service.",
-        },
-        {
-          key: 'serviceAccountKey',
-          label: 'Clé du compte de service (JSON)',
-          type: 'textarea',
-          required: false,
-          secret: true,
-          showIf: { field: 'authMode', equals: 'sa_key' },
-          help: "Fichier JSON de clé du compte de service Google Cloud (contient `client_email` et `private_key`). Stocké chiffré, jamais renvoyé.",
-        },
-        {
-          key: 'serviceAccountEmail',
-          label: 'Email du compte de service',
-          type: 'text',
-          required: false,
-          secret: false,
-          showIf: { field: 'authMode', equals: 'wif' },
-          placeholder: 'vaks-pm-drive@projet.iam.gserviceaccount.com',
-          help: "Compte de service impersoné via la fédération d'identité (aucune clé détenue).",
-        },
-        {
-          key: 'wifAudience',
-          label: 'Audience du pool WIF',
-          type: 'text',
-          required: false,
-          secret: false,
-          showIf: { field: 'authMode', equals: 'wif' },
-          placeholder: '//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/vaks/providers/vaks',
-          help: 'Nom de ressource complet du provider WIF (généré côté Google Cloud).',
-        },
-      ],
+      // `managedElsewhere` : pas de connecteur chiffré propre. La config/secret de
+      // lecture est dérivée de `gdrive.provisioning.*` (le scope d'écriture `drive`
+      // inclut la lecture `drive.readonly`) — une seule config à maintenir, comme
+      // SharePoint qui réutilise l'identité Graph du provisioning Teams.
+      managedElsewhere: true,
+      fields: [],
     };
   }
 

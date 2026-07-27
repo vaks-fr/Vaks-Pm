@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import { BrandMark, Icon } from '../vaks/primitives';
 import { api } from '../api/client';

@@ -273,21 +273,19 @@
     "confirmDeleteFolderEyebrow": "Ordner löschen",
     "confirmDeleteFolderTitle": "« {{name}} » löschen",
     "confirmDeleteFolderBody": "Seine Dokumente und Unterordner rücken in den übergeordneten Ordner auf — nichts geht verloren.",
-    "tabVaks": "Projektdateien",
-    "tabSharePoint": "SharePoint"
+    "tabVaks": "Projektdateien"
   },
-  "sharepoint": {
-    "root": "SharePoint",
+  "contextFiles": {
     "refresh": "Aktualisieren",
     "loading": "Wird geladen…",
     "emptyFolder": "Dieser Ordner ist leer.",
     "folder": "Ordner",
     "previewTitle": "Textvorschau",
-    "openInSharePoint": "In SharePoint öffnen",
+    "openIn": "In {{source}} öffnen",
     "loadMore": "Mehr laden",
-    "truncated": "Text gekürzt (große Datei) — in SharePoint öffnen, um alles zu sehen.",
-    "noText": "Kein extrahierbarer Text für diese Datei — in SharePoint öffnen.",
-    "explainer": "Schreibgeschützte Ansicht der mit diesem Projekt verknüpften Microsoft-Teams-Website. Dateien bleiben in SharePoint — nichts wird kopiert. Nur für in das Team eingeladene Mitglieder sichtbar."
+    "truncated": "Text gekürzt (große Datei) — in {{source}} öffnen, um alles zu sehen.",
+    "noText": "Kein extrahierbarer Text für diese Datei — in {{source}} öffnen.",
+    "explainer": "Schreibgeschützte Ansicht der Dokumente dieses Projekts in {{source}}. Die Dateien bleiben dort — nichts wird kopiert."
   },
   "create": {
     "duplicateEyebrow": "Duplizieren",

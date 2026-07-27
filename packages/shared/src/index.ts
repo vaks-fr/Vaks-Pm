@@ -1039,18 +1039,33 @@ export interface AgentDto {
  * Le `provider` n'est PAS modifiable depuis le workspace — seul le `model` l'est,
  * dans la liste du provider de l'agent. Étendre à la demande.
  */
-export const KNOWN_AGENT_MODELS: { provider: string; model: string; label: string }[] = [
-  { provider: 'anthropic', model: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
-  { provider: 'anthropic', model: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
-  { provider: 'anthropic', model: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+export interface KnownAgentModel {
+  provider: string;
+  model: string;
+  label: string;
+  /**
+   * Tarifs PUBLICS INDICATIFS en €/1K tokens (entrée/sortie) — servent
+   * uniquement à **pré-remplir** le profil de coût à la création manuelle d'un
+   * agent. Approximatifs et datés : l'admin les remplace par ses tarifs
+   * fournisseur/négociés réels. Absents = pas de suggestion (open-source auto-
+   * hébergé, tarif inconnu). Air-gap : embarqués dans l'app, aucun appel réseau.
+   */
+  suggestedCostInPerKTokens?: number;
+  suggestedCostOutPerKTokens?: number;
+}
+
+export const KNOWN_AGENT_MODELS: KnownAgentModel[] = [
+  { provider: 'anthropic', model: 'claude-opus-4-8', label: 'Claude Opus 4.8', suggestedCostInPerKTokens: 0.014, suggestedCostOutPerKTokens: 0.069 },
+  { provider: 'anthropic', model: 'claude-sonnet-5', label: 'Claude Sonnet 5', suggestedCostInPerKTokens: 0.0028, suggestedCostOutPerKTokens: 0.014 },
+  { provider: 'anthropic', model: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', suggestedCostInPerKTokens: 0.0009, suggestedCostOutPerKTokens: 0.0046 },
   { provider: 'anthropic', model: 'claude-fable-5', label: 'Claude Fable 5' },
-  { provider: 'openai', model: 'gpt-5', label: 'GPT-5' },
-  { provider: 'openai', model: 'gpt-5-mini', label: 'GPT-5 mini' },
-  { provider: 'azure-openai', model: 'gpt-5', label: 'Azure GPT-5' },
-  { provider: 'azure-openai', model: 'gpt-4.1', label: 'Azure GPT-4.1' },
-  { provider: 'google', model: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-  { provider: 'google', model: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
-  { provider: 'mistral', model: 'mistral-large', label: 'Mistral Large' },
+  { provider: 'openai', model: 'gpt-5', label: 'GPT-5', suggestedCostInPerKTokens: 0.0011, suggestedCostOutPerKTokens: 0.0092 },
+  { provider: 'openai', model: 'gpt-5-mini', label: 'GPT-5 mini', suggestedCostInPerKTokens: 0.0002, suggestedCostOutPerKTokens: 0.0018 },
+  { provider: 'azure-openai', model: 'gpt-5', label: 'Azure GPT-5', suggestedCostInPerKTokens: 0.0011, suggestedCostOutPerKTokens: 0.0092 },
+  { provider: 'azure-openai', model: 'gpt-4.1', label: 'Azure GPT-4.1', suggestedCostInPerKTokens: 0.0018, suggestedCostOutPerKTokens: 0.0073 },
+  { provider: 'google', model: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', suggestedCostInPerKTokens: 0.0011, suggestedCostOutPerKTokens: 0.0092 },
+  { provider: 'google', model: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', suggestedCostInPerKTokens: 0.0003, suggestedCostOutPerKTokens: 0.0023 },
+  { provider: 'mistral', model: 'mistral-large', label: 'Mistral Large', suggestedCostInPerKTokens: 0.0018, suggestedCostOutPerKTokens: 0.0055 },
 ];
 
 /** Un projet sur lequel un agent est affecté (`GET /me/agents/:id`). */
@@ -2908,6 +2923,29 @@ export const EVENTS = {
 } as const;
 export type EventName = (typeof EVENTS)[keyof typeof EVENTS];
 
+/**
+ * Event de notification personnelle poussé dans la room `user:<id>` (canal
+ * distinct des rooms projet). Alimente la cloche in-app pour les événements qui
+ * concernent l'utilisateur où qu'il soit dans l'app, sans qu'il soit dans la
+ * room du projet concerné.
+ */
+export const USER_NOTIFICATION_EVENT = 'notification' as const;
+
+export type UserNotificationKind = 'assignment' | 'mention' | 'status' | 'comment' | 'system';
+
+export interface UserNotificationPayload {
+  kind: UserNotificationKind;
+  taskId?: string;
+  projectId?: string;
+  taskTitle?: string;
+  /** Auteur de l'action (assignation, mention, changement de statut). */
+  actorName?: string;
+  /** Extrait de commentaire (mention). */
+  excerpt?: string;
+  fromStatus?: string;
+  toStatus?: string;
+}
+
 // ============================================================
 // Phase 5 — Workload (capacity vs allocation)
 // ============================================================
@@ -3482,8 +3520,43 @@ export interface AgentRunDto {
   tokensIn: number | null;
   tokensOut: number | null;
   cost: number | null;
+  /** Coût de référence recalculé serveur (tokens × taux profil) — garde-fou
+   *  anti-triche, jamais facturé. Null si aucun taux/token. */
+  derivedCost: number | null;
+  /** Clé d'idempotence si l'agent en a fourni une (sinon null). */
+  runKey: string | null;
   note: string | null;
   createdAt: string;
+}
+
+/** Un run d'agent tel qu'affiché dans l'onglet AI d'une tâche. */
+export interface TaskAgentRunDto {
+  id: string;
+  agentId: string;
+  agentName: string | null;
+  model: string | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  cost: number | null;
+  derivedCost: number | null;
+  /** Motif d'anomalie recalculé à la lecture, ou null. */
+  anomaly: 'no_tokens' | 'zero_cost' | 'below_reference' | null;
+  note: string | null;
+  createdAt: string;
+}
+
+/** Activité agent consolidée d'une tâche (onglet AI du détail de tâche). */
+export interface TaskAgentActivityDto {
+  agentsEnabled: boolean;
+  budget: {
+    /** Enveloppe `Task.agentCostBudget` (€) ou null si non plafonnée. */
+    taskBudget: number | null;
+    /** Coût agent réel cumulé sur la tâche. */
+    spent: number;
+    runCount: number;
+  };
+  claim: { agentId: string; agentName: string | null; claimedAt: string | null } | null;
+  runs: TaskAgentRunDto[];
 }
 
 /** Synthèse d'usage d'un agent (lecture admin). */

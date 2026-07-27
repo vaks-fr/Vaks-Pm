@@ -6,13 +6,14 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
 import { DataManagementService } from './data-management.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
-import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { AUDIT_ACTIONS, severityForAction } from '../audit-logs/audit-actions';
 import { SkipAudit } from '../audit-logs/audited.decorator';
 
 /**
  * **Admin > Data Management.** Purge du soft-delete + export org (portabilité).
  * Réservé `org:manage`, app-privé (jamais `@PublicApi` : opérations destructives
- * / dump complet). Audit CRITICAL sur purge et export.
+ * / dump complet). Audit CRITICAL sur la purge (irréversible), WARNING sur
+ * l'export org.
  */
 @ApiTags('admin')
 @ApiBearerAuth()
@@ -56,9 +57,10 @@ export class DataManagementController {
   @Header('Content-Disposition', 'attachment; filename="org-export.json"')
   async exportOrg(@CurrentUser() user: AuthUser) {
     const data = await this.svc.exportOrg(user.orgId);
-    void this.audit.logCritical({
+    void this.audit.log({
       organizationId: user.orgId,
       action: AUDIT_ACTIONS.ORG_DATA_EXPORTED,
+      severity: severityForAction(AUDIT_ACTIONS.ORG_DATA_EXPORTED),
       actorId: user.userId,
       actorLabel: user.email,
       resourceType: 'organization',

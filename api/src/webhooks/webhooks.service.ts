@@ -12,7 +12,7 @@ import { AdminSettingsService } from '../admin/admin-settings.service';
 import { TenantContext } from '../tenancy/tenant-context.service';
 import { getWebhookQueue } from './webhook-queue';
 import { AuditLogService } from '../audit-logs/audit-log.service';
-import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { AUDIT_ACTIONS, severityForAction } from '../audit-logs/audit-actions';
 
 /** Appelant d'une opération de gestion de webhook (pour l'autorisation). */
 export interface WebhookCaller {
@@ -237,7 +237,8 @@ export class WebhooksService {
     return this.toDto(hook);
   }
 
-  /** Trace d'audit conf webhook (cible d'exfiltration → CRITICAL, immédiat). */
+  /** Trace d'audit conf webhook. Configuration visible et réversible (gouvernée
+   *  par l'allowlist de domaines) → WARNING bufferisé (cf. AUDIT_SEVERITY). */
   private auditHook(
     orgId: string,
     action: string,
@@ -246,9 +247,10 @@ export class WebhooksService {
     detail: unknown,
     label?: string,
   ): void {
-    void this.audit.logCritical({
+    void this.audit.log({
       organizationId: orgId,
       action,
+      severity: severityForAction(action),
       actorId: actorId ?? null,
       resourceType: 'webhook',
       resourceId: hookId,

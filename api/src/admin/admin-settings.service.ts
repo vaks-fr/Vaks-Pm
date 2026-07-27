@@ -3,7 +3,11 @@ import { normalizeAgentPolicies } from '@vaks-pm/shared';
 import type { LicenseFeature } from '@vaks-pm/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
-import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import {
+  AUDIT_ACTIONS,
+  SECURITY_SETTING_PREFIXES,
+  severityForAction,
+} from '../audit-logs/audit-actions';
 import { auditDiff } from '../audit-logs/audit-sanitize';
 import { TenantCryptoService } from '../common/crypto/tenant-crypto.service';
 import { LicenseService } from '../licensing/license.service';
@@ -442,6 +446,56 @@ export class AdminSettingsService {
   }
 
   /**
+   * Contexte de LECTURE Google Drive, dérivé de la config de PROVISIONING
+   * (`gdrive.provisioning.*`). Google Drive est `managedElsewhere` : la lecture
+   * (scope `drive.readonly` ⊂ `drive`) réutilise l'identité qui a créé les Shared
+   * Drives par projet — **aucun connecteur « Document source » séparé à
+   * configurer**. Renvoie `config`/`secret` au format exact attendu par
+   * `GoogleDriveProvider` (recompose le blob JSON `serviceAccountKey` en sa_key,
+   * puisque le provisioning stocke email + clé PEM séparément).
+   */
+  async getGoogleDriveReadContext(
+    orgId: string,
+  ): Promise<{ enabled: boolean; hasCredential: boolean; config: Record<string, unknown>; secret: Record<string, string> }> {
+    const all = await this.getAll(orgId);
+    const str = (k: string) => (typeof all[k] === 'string' ? (all[k] as string).trim() : '');
+    const enabled = all['gdrive.provisioning.enabled'] === true;
+    const authMode = all['gdrive.provisioning.authMode'] === 'wif' ? 'wif' : 'sa_key';
+    const subject = str('gdrive.provisioning.subjectEmail');
+    const serviceAccountEmail = str('gdrive.provisioning.serviceAccountEmail');
+
+    if (authMode === 'wif') {
+      const wifSigningKey = await this.getDecryptedSecret(orgId, 'gdrive.provisioning.wifSigningKey');
+      return {
+        enabled,
+        hasCredential: !!(wifSigningKey && serviceAccountEmail && subject),
+        config: {
+          authMode: 'wif',
+          serviceAccountEmail,
+          impersonateSubject: subject,
+          wifAudience: str('gdrive.provisioning.wifAudience'),
+          wifIssuer: str('gdrive.provisioning.wifIssuer'),
+          wifKeyId: str('gdrive.provisioning.wifKeyId'),
+        },
+        secret: wifSigningKey ? { wifSigningKey } : {},
+      };
+    }
+
+    // sa_key : recompose le JSON `{ client_email, private_key }` attendu par le provider.
+    const privateKeyPem = await this.getDecryptedSecret(orgId, 'gdrive.provisioning.privateKey');
+    const serviceAccountKey =
+      privateKeyPem && serviceAccountEmail
+        ? JSON.stringify({ client_email: serviceAccountEmail, private_key: privateKeyPem })
+        : '';
+    return {
+      enabled,
+      hasCredential: !!serviceAccountKey,
+      config: { authMode: 'sa_key', impersonateSubject: subject },
+      secret: serviceAccountKey ? { serviceAccountKey } : {},
+    };
+  }
+
+  /**
    * Config de l'alerte brute-force (journal d'audit) : N échecs de login sur
    * un même compte en X minutes → email admins + webhook `audit.alert`.
    * Activée par défaut (sécurité opt-out).
@@ -607,15 +661,26 @@ export class AdminSettingsService {
     );
     const diff = auditDiff(before, values, entries.map(([k]) => k));
     if (diff) {
-      void this.audit.logCritical({
+      // WARNING par défaut ; CRITICAL si la modification touche une clé de
+      // sécurité (security.* / audit.* / smtp.* / sso.*).
+      const touchesSecurity = entries.some(([k]) =>
+        SECURITY_SETTING_PREFIXES.some((p) => k.startsWith(p)),
+      );
+      const severity = touchesSecurity
+        ? 'CRITICAL'
+        : severityForAction(AUDIT_ACTIONS.SETTINGS_UPDATED);
+      const entry = {
         organizationId: orgId,
         action: AUDIT_ACTIONS.SETTINGS_UPDATED,
-        actorType: actor?.id ? 'USER' : 'SYSTEM',
+        severity,
+        actorType: (actor?.id ? 'USER' : 'SYSTEM') as 'USER' | 'SYSTEM',
         actorId: actor?.id ?? null,
         actorLabel: actor?.email ?? null,
         resourceType: 'orgSetting',
         detail: diff,
-      });
+      };
+      if (severity === 'CRITICAL') void this.audit.logNow(entry);
+      else void this.audit.log(entry);
     }
     return this.getAll(orgId);
   }

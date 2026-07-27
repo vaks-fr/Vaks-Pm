@@ -8,7 +8,7 @@ import { AgentConnectorDto, AgentSyncResultDto, UpsertAgentConnectorDto } from '
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantCryptoService } from '../common/crypto/tenant-crypto.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
-import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { AUDIT_ACTIONS, severityForAction } from '../audit-logs/audit-actions';
 import { AgentProviderRegistry } from './agent-provider.registry';
 import { AgentsService, AgentMutationActor } from './agents.service';
 import { AgentProviderDescriptor, ProviderContext } from './agent-directory.types';
@@ -150,9 +150,10 @@ export class AgentConnectorsService {
         defaultOwnerId: dto.defaultOwnerId ?? null,
       },
     });
-    void this.audit.logCritical({
+    void this.audit.log({
       organizationId: orgId,
       action: AUDIT_ACTIONS.CONNECTOR_CREATED,
+      severity: severityForAction(AUDIT_ACTIONS.CONNECTOR_CREATED),
       actorId: actor.id ?? null,
       actorLabel: actor.email ?? null,
       resourceType: 'agentConnector',
@@ -201,9 +202,10 @@ export class AgentConnectorsService {
     }
 
     const updated = await this.prisma.agentConnector.update({ where: { id }, data });
-    void this.audit.logCritical({
+    void this.audit.log({
       organizationId: orgId,
       action: AUDIT_ACTIONS.CONNECTOR_UPDATED,
+      severity: severityForAction(AUDIT_ACTIONS.CONNECTOR_UPDATED),
       actorId: actor.id ?? null,
       actorLabel: actor.email ?? null,
       resourceType: 'agentConnector',
@@ -221,9 +223,10 @@ export class AgentConnectorsService {
     });
     if (!existing) throw new NotFoundException('Connecteur introuvable.');
     await this.prisma.agentConnector.delete({ where: { id } });
-    void this.audit.logCritical({
+    void this.audit.log({
       organizationId: orgId,
       action: AUDIT_ACTIONS.CONNECTOR_DELETED,
+      severity: severityForAction(AUDIT_ACTIONS.CONNECTOR_DELETED),
       actorId: actor.id ?? null,
       actorLabel: actor.email ?? null,
       resourceType: 'agentConnector',

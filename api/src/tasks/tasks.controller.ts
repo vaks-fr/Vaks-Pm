@@ -112,6 +112,17 @@ export class TasksController {
   }
 
   /**
+   * Activité agent d'une tâche (onglet « AI » du détail) : runs déclarés (coût
+   * déclaré vs référence, anomalies), coût total, budget par tâche + dépensé,
+   * agent en cours. App-privé (lecture humaine, PM/reviewer).
+   */
+  @Get('tasks/:taskId/agent-activity')
+  @RequirePermissions('task:view')
+  agentActivity(@CurrentUser() user: AuthUser, @Param('taskId', ParseUUIDPipe) id: string) {
+    return this.tasks.getAgentActivity(user.orgId, id);
+  }
+
+  /**
    * Contenu texte d'un document « Contexte IA » du projet de la tâche. Lu PAR la
    * tâche (même périmètre d'accès que le work-context) → `@PublicApi('task:view')`
    * pour être atteignable par un PAT agent via `vaks_read` (MCP). Binaire → 415.

@@ -17,6 +17,7 @@ import {
   dismissNotification,
   markAllNotificationsRead,
   useRealtime,
+  type Notification,
 } from './store';
 
 function formatRelative(t: TFunction, ms: number, now = Date.now()): string {
@@ -67,7 +68,7 @@ function eventLabel(t: TFunction, name: string): string {
   }
 }
 
-export function NotificationsPanel() {
+export function NotificationsPanel({ onOpen }: { onOpen?: (n: Notification) => void }) {
   const { t } = useTranslation();
   const { buffered, notifications, mode } = useRealtime();
   const [open, setOpen] = useState(false);
@@ -194,15 +195,39 @@ export function NotificationsPanel() {
                 {t('notif.empty')}
               </div>
             )}
-            {notifications.map((n) => (
+            {notifications.map((n) => {
+              const clickable = Boolean(onOpen && n.taskId);
+              return (
               <div
                 key={n.id}
+                onClick={
+                  clickable
+                    ? () => {
+                        onOpen?.(n);
+                        setOpen(false);
+                      }
+                    : undefined
+                }
+                role={clickable ? 'button' : undefined}
+                tabIndex={clickable ? 0 : undefined}
+                onKeyDown={
+                  clickable
+                    ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          onOpen?.(n);
+                          setOpen(false);
+                        }
+                      }
+                    : undefined
+                }
                 style={{
                   padding: '10px 12px',
                   borderBottom: '1px solid var(--border)',
                   display: 'flex',
                   gap: 8,
                   alignItems: 'flex-start',
+                  cursor: clickable ? 'pointer' : 'default',
                 }}
               >
                 <Icon
@@ -231,14 +256,18 @@ export function NotificationsPanel() {
                 </div>
                 <button
                   className="icon-btn"
-                  onClick={() => dismissNotification(n.id)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    dismissNotification(n.id);
+                  }}
                   aria-label={t('dismiss')}
                   style={{ padding: 2 }}
                 >
                   <Icon name="x" size={12} />
                 </button>
               </div>
-            ))}
+              );
+            })}
             {/* Mode paused : liste compacte des events buffés pour info */}
             {buffered.length > 0 && (
               <div style={{ padding: '8px 12px' }}>

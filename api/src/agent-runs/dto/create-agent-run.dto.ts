@@ -31,6 +31,15 @@ export class CreateAgentRunDto {
   @Min(0)
   cost?: number;
 
+  /**
+   * Clé d'idempotence (optionnelle) : un retry avec la même clé met à jour le
+   * run au lieu d'en créer un doublon (évite le double comptage du coût).
+   */
+  @IsOptional()
+  @IsString()
+  @Length(1, 200)
+  runKey?: string;
+
   @IsOptional()
   @IsString()
   @Length(0, 500)

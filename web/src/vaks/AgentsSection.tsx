@@ -9,7 +9,7 @@ import type {
   UserDto,
   UserSkillDto,
 } from '@vaks-pm/shared';
-import { AGENT_TRUST_LEVELS } from '@vaks-pm/shared';
+import { AGENT_TRUST_LEVELS, KNOWN_AGENT_MODELS } from '@vaks-pm/shared';
 import { api } from '../api/client';
 import { Icon } from './primitives';
 import { useConfirm } from './confirm';
@@ -371,6 +371,25 @@ function AgentEditorModal({
   const toggleCap = (c: string) =>
     setCaps((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
 
+  // Modèles connus (catalogue embarqué, filtré par provider si renseigné). Sert
+  // de suggestions au champ modèle ET pré-remplit les taux de coût s'ils sont
+  // encore vides (l'admin garde la main : on n'écrase jamais une valeur saisie).
+  const modelOptions = KNOWN_AGENT_MODELS.filter(
+    (m) => !modelProvider.trim() || m.provider === modelProvider.trim(),
+  );
+  const applyModel = (val: string) => {
+    setModel(val);
+    const entry = KNOWN_AGENT_MODELS.find(
+      (m) => m.model === val && (!modelProvider.trim() || m.provider === modelProvider.trim()),
+    );
+    if (!entry) return;
+    if (!modelProvider.trim()) setModelProvider(entry.provider);
+    if (!costInPerK.trim() && entry.suggestedCostInPerKTokens != null)
+      setCostInPerK(String(entry.suggestedCostInPerKTokens));
+    if (!costOutPerK.trim() && entry.suggestedCostOutPerKTokens != null)
+      setCostOutPerK(String(entry.suggestedCostOutPerKTokens));
+  };
+
   const save = async () => {
     if (!name.trim() || !ownerId) {
       flash(t('agents.nameOwnerRequired'));
@@ -583,7 +602,7 @@ function AgentEditorModal({
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
           {field(t('agents.modelProviderField'), <input className="td-in" value={modelProvider} placeholder="anthropic" onChange={(e) => setModelProvider(e.target.value)} />)}
-          {field(t('agents.modelField'), <input className="td-in" value={model} placeholder="claude-sonnet-5" onChange={(e) => setModel(e.target.value)} />)}
+          {field(t('agents.modelField'), <><input className="td-in" list="vaks-agent-model-catalog" value={model} placeholder="claude-sonnet-5" onChange={(e) => applyModel(e.target.value)} /><datalist id="vaks-agent-model-catalog">{modelOptions.map((m) => (<option key={`${m.provider}/${m.model}`} value={m.model}>{m.label}</option>))}</datalist></>)}
           {field(t('agents.regionField'), <input className="td-in" value={hostingRegion} placeholder="eu" onChange={(e) => setHostingRegion(e.target.value)} />)}
           {field(t('agents.maxConcurrentField'), <input className="td-in" type="number" min={1} value={maxConcurrent} onChange={(e) => setMaxConcurrent(e.target.value)} />)}
           {field(t('agents.dailyRunsField'), <input className="td-in" type="number" min={1} value={dailyRuns} onChange={(e) => setDailyRuns(e.target.value)} />)}

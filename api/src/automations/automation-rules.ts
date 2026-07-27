@@ -44,6 +44,11 @@ export type AutomationKind =
   // il retire l'agent de la tâche au lieu de se contenter d'alerter.
   | 'agent_budget'
   | 'deliverable_stale'
+  // Anti-triche coût agent (batch 1, 2026-07-26, événementiel) — un run déclaré
+  // paraît sous-déclaré (livrable sans tokens, coût nul malgré un tarif, ou coût
+  // implausiblement sous le coût de référence recalculé serveur). Alerte l'owner
+  // de l'agent. Gaté par le kill switch automations seulement.
+  | 'agent_run_anomaly'
   // Planning (lot 3, événementiel)
   | 'timeoff_conflict'
   | 'autoplan_overflow'
@@ -101,6 +106,8 @@ export const COOLDOWN_TTL_S: Record<AutomationKind, number> = {
   // Paliers de budget agent : clé qualifiée par périmètre+palier.
   agent_budget: 24 * 3600,
   deliverable_stale: 24 * 3600,
+  // Anti-triche : clé qualifiée par motif+jour → une alerte par agent×jour×motif.
+  agent_run_anomaly: 24 * 3600,
   timeoff_conflict: 24 * 3600,
   autoplan_overflow: 24 * 3600,
   // Événementiel : un jalon n'est atteint qu'une fois (re-clôture rapprochée

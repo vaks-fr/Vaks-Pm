@@ -273,21 +273,19 @@
     "confirmDeleteFolderEyebrow": "Delete folder",
     "confirmDeleteFolderTitle": "Delete « {{name}} »",
     "confirmDeleteFolderBody": "Its documents and sub-folders move up to the parent folder — nothing is lost.",
-    "tabVaks": "Project files",
-    "tabSharePoint": "SharePoint"
+    "tabVaks": "Project files"
   },
-  "sharepoint": {
-    "root": "SharePoint",
+  "contextFiles": {
     "refresh": "Refresh",
     "loading": "Loading…",
     "emptyFolder": "This folder is empty.",
     "folder": "Folder",
     "previewTitle": "Preview text",
-    "openInSharePoint": "Open in SharePoint",
+    "openIn": "Open in {{source}}",
     "loadMore": "Load more",
-    "truncated": "Text truncated (large file) — open in SharePoint to see everything.",
-    "noText": "No extractable text for this file — open it in SharePoint.",
-    "explainer": "Read-only view of the Microsoft Teams site linked to this project. Files stay in SharePoint — nothing is copied. Visible only to members invited to the team."
+    "truncated": "Text truncated (large file) — open in {{source}} to see everything.",
+    "noText": "No extractable text for this file — open it in {{source}}.",
+    "explainer": "Read-only view of this project's documents in {{source}}. Files stay there — nothing is copied."
   },
   "create": {
     "duplicateEyebrow": "Duplicate",

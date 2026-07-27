@@ -2,7 +2,7 @@ import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { RolesService } from '../admin/roles.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
-import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { AUDIT_ACTIONS, severityForAction } from '../audit-logs/audit-actions';
 import { RoleScope } from '@vaks-pm/shared';
 import { Prisma } from '@db';
 import type { IdentityProvider } from '@db';
@@ -137,10 +137,12 @@ export class SsoProvisioningService {
     const orgId = provider.organizationId;
     const idpSource = provider.slug;
 
+    // Écriture immédiate (échec de sécurité) mais WARNING, pas CRITICAL.
     const fail = (reason: string, userId?: string) =>
-      this.audit.logCritical({
+      this.audit.logNow({
         organizationId: orgId,
         action: AUDIT_ACTIONS.AUTH_SSO_FAILURE,
+        severity: severityForAction(AUDIT_ACTIONS.AUTH_SSO_FAILURE, 'FAILURE'),
         outcome: 'FAILURE',
         actorType: 'USER',
         actorId: userId ?? null,
@@ -259,9 +261,10 @@ export class SsoProvisioningService {
       }
       throw e;
     }
-    this.audit.logCritical({
+    void this.audit.log({
       organizationId: orgId,
       action: AUDIT_ACTIONS.USER_PROVISIONED_SSO,
+      severity: severityForAction(AUDIT_ACTIONS.USER_PROVISIONED_SSO),
       actorType: 'USER',
       actorId: created.id,
       actorLabel: claims.email,

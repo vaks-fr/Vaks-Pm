@@ -11,7 +11,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../tenancy/tenant-context.service';
 import { AuthService } from '../auth/auth.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
-import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { AUDIT_ACTIONS, severityForAction } from '../audit-logs/audit-actions';
 import { AuthTokens } from '@vaks-pm/shared';
 import { OidcClientService } from './oidc-client.service';
 import { SamlClientService } from './saml-client.service';
@@ -164,9 +164,10 @@ export class SsoService {
       userAgent: meta.userAgent,
       ipAddress: meta.ip,
     });
-    this.audit.logCritical({
+    void this.audit.log({
       organizationId: result.organizationId,
       action: AUDIT_ACTIONS.AUTH_SSO_LOGIN,
+      severity: severityForAction(AUDIT_ACTIONS.AUTH_SSO_LOGIN),
       actorType: 'USER',
       actorId: result.userId,
       actorLabel: result.email,
@@ -228,9 +229,10 @@ export class SsoService {
       userAgent: meta.userAgent,
       ipAddress: meta.ip,
     });
-    this.audit.logCritical({
+    void this.audit.log({
       organizationId: result.organizationId,
       action: AUDIT_ACTIONS.AUTH_SSO_LOGIN,
+      severity: severityForAction(AUDIT_ACTIONS.AUTH_SSO_LOGIN),
       actorType: 'USER',
       actorId: result.userId,
       actorLabel: result.email,

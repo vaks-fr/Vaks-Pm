@@ -18,6 +18,7 @@ import type {
   ConnectorTestResultDto,
   AgentDto,
   AgentRunSummaryDto,
+  TaskAgentActivityDto,
   CreateAgentDto,
   UpdateAgentDto,
   WorkspaceAgentsPageDto,
@@ -698,6 +699,8 @@ export const api = {
       method: 'DELETE',
     }),
   getAgentRuns: (id: string) => request<AgentRunSummaryDto>(`/admin/agents/${id}/runs`),
+  getTaskAgentActivity: (taskId: string) =>
+    request<TaskAgentActivityDto>(`/tasks/${taskId}/agent-activity`),
   listAgentConnectorProviders: () =>
     request<{ provider: string; label: string; blurb: string; accent?: string; short?: string; fields: ConnectorProviderDescriptorDto['fields'] }[]>(
       '/admin/agent-connectors/providers',

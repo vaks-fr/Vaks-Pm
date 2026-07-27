@@ -1222,6 +1222,7 @@ export class TasksService {
               maxConcurrentTasks: true, dailyRunBudget: true,
               dailyCostBudget: true, monthlyCostBudget: true, trustLevel: true,
               modelProvider: true, model: true,
+              costRateInPerKTokens: true, costRateOutPerKTokens: true,
             },
           })
         : null;
@@ -1256,6 +1257,46 @@ export class TasksService {
           message: `Le modèle de l'agent (${declared}) n'est pas autorisé par le client de ce projet.`,
         });
       }
+    }
+
+    // (3a) Gate profil de coût (batch 1) — un agent doit avoir un profil de coût
+    // configuré (au moins un taux entrée OU sortie) pour travailler : sans ça,
+    // ses runs seraient non costés et échapperaient aux budgets. Un taux
+    // explicitement à 0 (modèle interne/gratuit) est un choix délibéré et suffit
+    // (null ≠ 0). Refus dur, avant tout effet de bord.
+    if (
+      actor.actorKind === 'AGENT' &&
+      agent?.costRateInPerKTokens == null &&
+      agent?.costRateOutPerKTokens == null
+    ) {
+      throw new ConflictException({
+        code: 'AGENT_NO_COST_PROFILE',
+        message:
+          "Profil de coût de l'agent non configuré (Admin > Agents : taux par 1K tokens) — revendication refusée.",
+      });
+    }
+
+    // (6) Budget pré-autorisé (opt-in `agents.preauthorizeBudget`) : on estime le
+    // coût de CETTE tâche à partir du coût moyen par tâche historique de l'agent,
+    // pour refuser le claim si l'enveloppe restante ne le couvre pas — au lieu de
+    // ne bloquer qu'APRÈS dépassement. Fail-open tant qu'il n'y a pas d'historique
+    // (premier run d'un agent : `costEstimate` reste null → aucun blocage).
+    const preauthorizeBudget =
+      actor.actorKind === 'AGENT' ? await this.policies.getPreauthorizeBudget(orgId) : false;
+    let costEstimate: number | null = null;
+    if (preauthorizeBudget) {
+      const grouped = await this.prisma.agentRun.groupBy({
+        by: ['taskId'],
+        where: {
+          organizationId: orgId,
+          agentId: actor.userId,
+          taskId: { not: null },
+          cost: { not: null },
+        },
+        _sum: { cost: true },
+      });
+      const perTask = grouped.map((g) => Number(g._sum.cost ?? 0)).filter((v) => v > 0);
+      costEstimate = perTask.length ? perTask.reduce((a, b) => a + b, 0) / perTask.length : null;
     }
 
     // Moteur de policies (chantier 3) : évalué au claim contre le contexte de la
@@ -1314,10 +1355,17 @@ export class TasksService {
           where: { organizationId: orgId, agentId: actor.userId, createdAt: { gte: dayStart } },
         });
         const spent = Number(agg._sum.cost ?? 0);
-        if (spent >= Number(agent.dailyCostBudget)) {
+        const budget = Number(agent.dailyCostBudget);
+        if (spent >= budget) {
           throw new ConflictException({
             code: 'BUDGET_COST_DAILY',
-            message: `Budget de coût quotidien atteint (${Number(agent.dailyCostBudget)} €, dépensé ${spent.toFixed(2)} €).`,
+            message: `Budget de coût quotidien atteint (${budget} €, dépensé ${spent.toFixed(2)} €).`,
+          });
+        }
+        if (costEstimate != null && spent + costEstimate > budget) {
+          throw new ConflictException({
+            code: 'BUDGET_COST_DAILY_PREAUTH',
+            message: `Coût estimé de la tâche (${costEstimate.toFixed(2)} €) au-dessus du budget quotidien restant (${(budget - spent).toFixed(2)} €).`,
           });
         }
       }
@@ -1330,10 +1378,17 @@ export class TasksService {
           where: { organizationId: orgId, agentId: actor.userId, createdAt: { gte: monthStart } },
         });
         const spent = Number(agg._sum.cost ?? 0);
-        if (spent >= Number(agent.monthlyCostBudget)) {
+        const budget = Number(agent.monthlyCostBudget);
+        if (spent >= budget) {
           throw new ConflictException({
             code: 'BUDGET_COST_MONTHLY',
-            message: `Budget de coût mensuel atteint (${Number(agent.monthlyCostBudget)} €, dépensé ${spent.toFixed(2)} €).`,
+            message: `Budget de coût mensuel atteint (${budget} €, dépensé ${spent.toFixed(2)} €).`,
+          });
+        }
+        if (costEstimate != null && spent + costEstimate > budget) {
+          throw new ConflictException({
+            code: 'BUDGET_COST_MONTHLY_PREAUTH',
+            message: `Coût estimé de la tâche (${costEstimate.toFixed(2)} €) au-dessus du budget mensuel restant (${(budget - spent).toFixed(2)} €).`,
           });
         }
       }
@@ -1347,10 +1402,17 @@ export class TasksService {
           where: { organizationId: orgId, projectId: task.projectId },
         });
         const spent = Number(agg._sum.cost ?? 0);
-        if (spent >= Number(task.project.agentCostBudget)) {
+        const budget = Number(task.project.agentCostBudget);
+        if (spent >= budget) {
           throw new ConflictException({
             code: 'BUDGET_COST_PROJECT',
-            message: `Budget de coût agent du projet atteint (${Number(task.project.agentCostBudget)} €, dépensé ${spent.toFixed(2)} €).`,
+            message: `Budget de coût agent du projet atteint (${budget} €, dépensé ${spent.toFixed(2)} €).`,
+          });
+        }
+        if (costEstimate != null && spent + costEstimate > budget) {
+          throw new ConflictException({
+            code: 'BUDGET_COST_PROJECT_PREAUTH',
+            message: `Coût estimé de la tâche (${costEstimate.toFixed(2)} €) au-dessus du budget agent projet restant (${(budget - spent).toFixed(2)} €).`,
           });
         }
       }
@@ -1360,10 +1422,17 @@ export class TasksService {
           where: { organizationId: orgId, taskId },
         });
         const spent = Number(agg._sum.cost ?? 0);
-        if (spent >= Number(task.agentCostBudget)) {
+        const budget = Number(task.agentCostBudget);
+        if (spent >= budget) {
           throw new ConflictException({
             code: 'BUDGET_COST_TASK',
-            message: `Budget de coût agent de la tâche atteint (${Number(task.agentCostBudget)} €, dépensé ${spent.toFixed(2)} €).`,
+            message: `Budget de coût agent de la tâche atteint (${budget} €, dépensé ${spent.toFixed(2)} €).`,
+          });
+        }
+        if (costEstimate != null && spent + costEstimate > budget) {
+          throw new ConflictException({
+            code: 'BUDGET_COST_TASK_PREAUTH',
+            message: `Coût estimé (${costEstimate.toFixed(2)} €) au-dessus du budget agent restant de la tâche (${(budget - spent).toFixed(2)} €).`,
           });
         }
       }
@@ -1581,28 +1650,36 @@ export class TasksService {
       });
     }
     if (actor.actorKind === 'AGENT') {
-      const pending = await this.prisma.deliverable.count({
+      const pending = await this.prisma.deliverable.findMany({
         where: { taskId, organizationId: orgId, reviewStatus: 'PENDING', deletedAt: null },
+        select: { id: true },
       });
-      if (pending === 0) {
+      if (pending.length === 0) {
         throw new ConflictException({
           code: 'NO_DELIVERABLE',
           message: 'Un agent doit soumettre au moins un livrable avant de passer en revue.',
         });
       }
       // Déclaration de consommation obligatoire (opt-in `agents.requireRunDeclaration`) :
-      // pour connaître le budget réellement dépensé par tâche, on exige qu'au
-      // moins un run de coût (`AgentRun`) ait été déclaré par cet agent sur la
-      // tâche AVANT de la passer en revue. L'agent déclare via `vaks_report_run`.
+      // pour connaître le budget réellement dépensé, on exige qu'au moins un run
+      // de coût (`AgentRun`) ait été déclaré par cet agent **et rattaché au
+      // livrable soumis** (porte A1, batch 1) AVANT la revue — pas juste « un run
+      // sur la tâche » : le run et le livrable doivent être liés (l'agent passe le
+      // `deliverableId` à `vaks_report_run`). Rapproche le coût de l'artefact revu.
       if (await this.policies.getRequireRunDeclaration(orgId)) {
         const runs = await this.prisma.agentRun.count({
-          where: { organizationId: orgId, taskId, agentId: actor.userId },
+          where: {
+            organizationId: orgId,
+            taskId,
+            agentId: actor.userId,
+            deliverableId: { in: pending.map((d) => d.id) },
+          },
         });
         if (runs === 0) {
           throw new ConflictException({
             code: 'NO_RUN_DECLARED',
             message:
-              "Déclarez d'abord la consommation de la tâche (report_run : tokens/coût) avant de la passer en revue.",
+              "Déclarez la consommation du livrable soumis (report_run avec son deliverableId : tokens/coût) avant de passer en revue.",
           });
         }
       }
@@ -1900,6 +1977,89 @@ export class TasksService {
    * brief projet + garde-fous (projet & tâche) + tâche + critères d'acceptation +
    * journal vivant borné (livrables APPROUVÉS) + commentaires récents.
    */
+  /**
+   * Activité agent d'une tâche (batch 1 UI, 2026-07-26) : ce que les agents ont
+   * fait SUR cette tâche — runs déclarés (tokens, coût déclaré vs coût de
+   * référence `derivedCost`, flag d'anomalie recalculé), coût total, enveloppe
+   * `agentCostBudget` + dépensé, et l'agent qui l'a revendiquée. Alimente
+   * l'onglet « AI » du détail de tâche (les données existaient déjà en base, il
+   * manquait juste cette lecture consolidée par tâche).
+   */
+  async getAgentActivity(orgId: string, taskId: string) {
+    const task = await this.prisma.task.findFirst({
+      where: { id: taskId, organizationId: orgId, deletedAt: null },
+      select: {
+        id: true,
+        agentCostBudget: true,
+        claimedById: true,
+        claimedAt: true,
+        project: { select: { agentsEnabled: true } },
+      },
+    });
+    if (!task) throw new NotFoundException('Tâche introuvable');
+
+    const runs = await this.prisma.agentRun.findMany({
+      where: { organizationId: orgId, taskId },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+
+    const ids = new Set<string>(runs.map((r) => r.agentId));
+    if (task.claimedById) ids.add(task.claimedById);
+    const users = ids.size
+      ? await this.prisma.user.findMany({
+          where: { id: { in: [...ids] }, organizationId: orgId },
+          select: { id: true, name: true },
+        })
+      : [];
+    const nameById = new Map(users.map((u) => [u.id, u.name]));
+
+    const num = (d: Prisma.Decimal | null): number | null => (d == null ? null : Number(d));
+    let spent = 0;
+    const runDtos = runs.map((r) => {
+      const cost = num(r.cost);
+      const derivedCost = num(r.derivedCost);
+      if (cost != null) spent += cost;
+      const tokensTotal = (r.tokensIn ?? 0) + (r.tokensOut ?? 0);
+      // Anomalie recalculée à la lecture (mêmes règles que report_run).
+      let anomaly: 'no_tokens' | 'zero_cost' | 'below_reference' | null = null;
+      if (r.deliverableId && tokensTotal === 0) anomaly = 'no_tokens';
+      else if (cost === 0 && (derivedCost ?? 0) > 0) anomaly = 'zero_cost';
+      else if (cost != null && cost > 0 && derivedCost != null && derivedCost > 0 && cost < derivedCost * 0.5)
+        anomaly = 'below_reference';
+      return {
+        id: r.id,
+        agentId: r.agentId,
+        agentName: nameById.get(r.agentId) ?? null,
+        model: r.model,
+        tokensIn: r.tokensIn,
+        tokensOut: r.tokensOut,
+        cost,
+        derivedCost,
+        anomaly,
+        note: r.note,
+        createdAt: r.createdAt.toISOString(),
+      };
+    });
+
+    return {
+      agentsEnabled: !!task.project?.agentsEnabled,
+      budget: {
+        taskBudget: num(task.agentCostBudget),
+        spent: Math.round(spent * 10000) / 10000,
+        runCount: runs.length,
+      },
+      claim: task.claimedById
+        ? {
+            agentId: task.claimedById,
+            agentName: nameById.get(task.claimedById) ?? null,
+            claimedAt: task.claimedAt ? task.claimedAt.toISOString() : null,
+          }
+        : null,
+      runs: runDtos,
+    };
+  }
+
   async getWorkContext(orgId: string, taskId: string) {
     const task = await this.prisma.task.findFirst({
       where: { id: taskId, organizationId: orgId, deletedAt: null },

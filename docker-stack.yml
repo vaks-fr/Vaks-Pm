@@ -90,7 +90,7 @@ configs:
 
 services:
   traefik:
-    image: traefik:v3.4
+    image: traefik:v3.6.24
     command:
       - --providers.file.filename=/etc/traefik/dynamic.yml
       - --providers.file.watch=true

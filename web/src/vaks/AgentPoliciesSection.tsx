@@ -68,6 +68,7 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
   const [rules, setRules] = useState<AgentPolicyRule[]>([]);
   const [backpressure, setBackpressure] = useState(5);
   const [requireRun, setRequireRun] = useState(false);
+  const [preauthorize, setPreauthorize] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -81,6 +82,7 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
         const bp = Number(s['agents.backpressure.maxPendingReviews']);
         setBackpressure(Number.isInteger(bp) && bp >= 0 ? bp : 5);
         setRequireRun(s['agents.requireRunDeclaration'] === true);
+        setPreauthorize(s['agents.preauthorizeBudget'] === true);
       } catch (e) {
         flash(t('agentPolicies.loadError', { defaultValue: 'Unable to load policies: {{message}}', message: (e as Error).message }));
       } finally {
@@ -116,6 +118,7 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
         'agents.policies': rules,
         'agents.backpressure.maxPendingReviews': backpressure,
         'agents.requireRunDeclaration': requireRun,
+        'agents.preauthorizeBudget': preauthorize,
       } as Record<string, unknown>));
       const raw = s['agents.policies'];
       setRules(Array.isArray(raw) ? (raw as AgentPolicyRule[]) : []);
@@ -189,6 +192,34 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
           <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
             {t('agentPolicies.requireRunToggle', {
               defaultValue: 'Block review submission until a run is declared',
+            })}
+          </span>
+        </label>
+      </div>
+
+      {/* Budget pré-autorisé au claim */}
+      <div style={cardStyle}>
+        <div style={{ fontWeight: 600, fontSize: 14 }}>
+          {t('agentPolicies.preauthTitle', { defaultValue: 'Pre-authorize cost at claim' })}
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 3, lineHeight: 1.5, maxWidth: 620 }}>
+          {t('agentPolicies.preauthDesc', {
+            defaultValue:
+              "When enabled, an agent is refused a task at claim time if the task's estimated cost (its own historical average cost per task) would push spend over a budget envelope — instead of only blocking after the budget is already exceeded. Fails open until the agent has history (first tasks are never blocked). Only affects agents.",
+          })}
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={preauthorize}
+            onChange={(e) => {
+              setPreauthorize(e.target.checked);
+              setDirty(true);
+            }}
+          />
+          <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
+            {t('agentPolicies.preauthToggle', {
+              defaultValue: 'Refuse claim when the estimated task cost would exceed the remaining budget',
             })}
           </span>
         </label>

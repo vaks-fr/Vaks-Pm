@@ -527,7 +527,7 @@ if (garageMulti) {
     : ha
       ? ['    deploy:', '      mode: global', '      placement:', `        constraints: [${cpConstraint}]`].join('\n')
       : deployBlock({ replicas: 1, constraint: null, spread: false, startFirst: false });
-  services.push(['  traefik:', '    image: traefik:v3.4', cmd, cfgs, ...(tvols ? [tvols] : []), ports, '    networks: [vakspm]', tdeploy].join('\n'));
+  services.push(['  traefik:', '    image: traefik:v3.6.24', cmd, cfgs, ...(tvols ? [tvols] : []), ports, '    networks: [vakspm]', tdeploy].join('\n'));
 }
 // postgres (single uniquement)
 if (!ha) {

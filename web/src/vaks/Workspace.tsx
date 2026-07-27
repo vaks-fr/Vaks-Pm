@@ -5,7 +5,7 @@
    ============================================================ */
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router';
 import {
   comments as DATA_COMMENTS,
   columns as DATA_COLUMNS,
@@ -91,7 +91,7 @@ import {
   apiUnwatchProject,
   hueFromId,
 } from './api';
-import { useProjectEvents } from '../api/realtime';
+import { useProjectEvents, useUserNotifications } from '../api/realtime';
 import {
   getMode,
   pushNotification,
@@ -1280,6 +1280,7 @@ export default function Workspace() {
         title: tr('realtime.newComment'),
         body: dto.body.slice(0, 120),
         taskId: dto.taskId,
+        projectId: currentProjectId ?? undefined,
       });
     },
     'comment.deleted': (payload) => {
@@ -1311,6 +1312,38 @@ export default function Workspace() {
         return next;
       });
     },
+  });
+
+  // Notifications personnelles (assignation, mention, changement de statut) —
+  // canal `user:<id>`, reçu quel que soit le projet affiché. Alimente la cloche
+  // en haut à droite. Le libellé est construit ici pour rester dans la langue de
+  // l'UI (le serveur envoie des données structurées, pas du texte rendu).
+  useUserNotifications((p) => {
+    const title =
+      p.kind === 'assignment'
+        ? tr('realtime.assignedToYou')
+        : p.kind === 'mention'
+        ? tr('realtime.mentionedYou', { name: p.actorName ?? tr('realtime.someone') })
+        : p.kind === 'status'
+        ? tr('realtime.statusChangedTitle')
+        : tr('realtime.newNotification');
+    const body =
+      p.kind === 'status'
+        ? tr('realtime.statusChangedBody', {
+            task: p.taskTitle ?? '',
+            from: p.fromStatus ?? '',
+            to: p.toStatus ?? '',
+          })
+        : p.kind === 'mention'
+        ? p.excerpt ?? p.taskTitle
+        : p.taskTitle;
+    pushNotification({
+      kind: p.kind === 'comment' ? 'comment' : p.kind,
+      title,
+      body,
+      taskId: p.taskId,
+      projectId: p.projectId,
+    });
   });
 
   const localOpenTask = tasks.find((tk) => tk.id === openId) || null;
@@ -1940,7 +1973,12 @@ export default function Workspace() {
           >
             <Icon name={t.theme === 'dark' ? 'sun' : 'moon'} size={18} />
           </button>
-          <NotificationsPanel />
+          <NotificationsPanel
+            onOpen={(n) => {
+              const pid = n.projectId ?? currentProjectId;
+              if (n.taskId && pid) void openSearchTask(pid, n.taskId);
+            }}
+          />
         </header>
 
         {/* view title bar for workload scope */}

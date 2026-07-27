@@ -69,6 +69,10 @@ export class EventsGateway implements OnGatewayConnection {
       client.data.user = user;
       // Room "org:<id>" : tout event broadcast à l'org si besoin.
       client.join(`org:${user.orgId}`);
+      // Room "user:<id>" : notifications personnelles (assignation, mention,
+      // changement de statut) reçues quel que soit le projet affiché — la
+      // cloche in-app ne dépend plus de la room du projet courant.
+      client.join(`user:${user.userId}`);
     } catch (err) {
       this.logger.warn(`WS rejet: ${(err as Error).message}`);
       client.emit('error', { message: 'unauthorized' });
@@ -127,6 +131,17 @@ export class EventsGateway implements OnGatewayConnection {
         ? { ...(payload as Record<string, unknown>), clientMutationId, actorUserId }
         : { data: payload, clientMutationId, actorUserId };
     this.server.to(`org:${orgId}`).emit(event, wrapped);
+  }
+
+  /**
+   * Notification personnelle : diffusée à la room `user:<id>` (rejointe à la
+   * connexion). Utilisée par `NotificationsService` pour alimenter la cloche
+   * in-app en parallèle des emails. Pas de wrap `clientMutationId` : ce n'est
+   * pas une mutation à dédupliquer, et le serveur exclut déjà l'acteur de ses
+   * propres notifications. Cross-instance via l'adapter Redis (main.ts).
+   */
+  emitToUser(userId: string, event: EventName | string, payload: unknown) {
+    this.server.to(`user:${userId}`).emit(event, payload);
   }
 
   // ---- helpers ----

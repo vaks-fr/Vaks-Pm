@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './auth/AuthContext';
 import Login from './pages/Login';

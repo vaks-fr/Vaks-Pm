@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { EVENTS } from '@vaks-pm/shared';
+import { EVENTS, USER_NOTIFICATION_EVENT, type UserNotificationPayload } from '@vaks-pm/shared';
 import { getAccessToken } from './client';
 import { DEMO } from '../demo/config';
 import {
@@ -160,6 +160,26 @@ const ORG_PROJECT_EVENTS = ['project.created', 'project.updated', 'project.delet
  * `useProjectEvents`, pas de filtre self-mutation ni de mode paused : le
  * handler est typiquement un refresh idempotent et silencieux.
  */
+/**
+ * Abonne aux notifications personnelles (room `user:<id>`, rejointe côté serveur
+ * à la connexion). Indépendant du projet courant : reçoit assignation, mention
+ * et changement de statut où que l'utilisateur se trouve dans l'app. Pas de
+ * filtre self-mutation ni de mode paused — une notif personnelle est toujours
+ * pertinente et n'est jamais causée par soi (le serveur exclut déjà l'acteur).
+ */
+export function useUserNotifications(handler: (payload: UserNotificationPayload) => void) {
+  const ref = useRef(handler);
+  ref.current = handler;
+  useEffect(() => {
+    const s = getSocket();
+    const fn = (payload: unknown) => ref.current(payload as UserNotificationPayload);
+    s.on(USER_NOTIFICATION_EVENT, fn);
+    return () => {
+      s.off(USER_NOTIFICATION_EVENT, fn);
+    };
+  }, []);
+}
+
 export function useOrgProjectEvents(handler: (event: string, payload: unknown) => void) {
   const ref = useRef(handler);
   ref.current = handler;

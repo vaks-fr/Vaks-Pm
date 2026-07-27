@@ -6,7 +6,7 @@ import { RolesService } from '../admin/roles.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { PasswordPolicyService } from '../auth/password-policy.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
-import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { AUDIT_ACTIONS, severityForAction } from '../audit-logs/audit-actions';
 import { LicenseService } from '../licensing/license.service';
 import { anonEmail, anonLabel, isAnonymizedEmail, scrubJsonColumn } from '../common/rgpd.util';
 
@@ -324,7 +324,10 @@ export class UsersService {
     }
   }
 
-  /** Trace d'audit user (fire-and-forget). */
+  /** Trace d'audit user (fire-and-forget). Sévérité pilotée par la table
+   *  centrale (cf. AUDIT_SEVERITY) : rôle/admin/suspension/suppression/mot de
+   *  passe = CRITICAL (écrit immédiatement) ; création = WARNING ; siège = INFO
+   *  (bufferisés). */
   private auditUser(
     orgId: string,
     action: string,
@@ -332,16 +335,20 @@ export class UsersService {
     target: { id: string; email?: string | null },
     detail?: unknown,
   ): void {
-    void this.audit.logCritical({
+    const severity = severityForAction(action);
+    const entry = {
       organizationId: orgId,
       action,
+      severity,
       actorId: actor.id ?? null,
       actorLabel: actor.email ?? null,
       resourceType: 'user',
       resourceId: target.id,
       resourceLabel: target.email ?? null,
       detail: { targetEmail: target.email ?? undefined, ...(detail as object | undefined) },
-    });
+    };
+    if (severity === 'CRITICAL') void this.audit.logNow(entry);
+    else this.audit.log(entry);
   }
 
   async create(orgId: string, dto: CreateUserInput, actor: UserMutationActor) {

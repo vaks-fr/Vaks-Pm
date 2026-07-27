@@ -32,6 +32,7 @@ export class PolicyEngineService {
       rules: AgentPolicyRule[];
       backpressureMax: number;
       requireRunDeclaration: boolean;
+      preauthorizeBudget: boolean;
       expires: number;
     }
   >();
@@ -44,6 +45,7 @@ export class PolicyEngineService {
     rules: AgentPolicyRule[];
     backpressureMax: number;
     requireRunDeclaration: boolean;
+    preauthorizeBudget: boolean;
   }> {
     const now = Date.now();
     const hit = this.cache.get(orgId);
@@ -55,6 +57,9 @@ export class PolicyEngineService {
     // forcément leur run aujourd'hui). L'admin l'active pour rendre la
     // traçabilité du coût par tâche obligatoire.
     let requireRunDeclaration = false;
+    // Défaut OFF : ne bloque pas un claim sur une estimation tant que l'admin
+    // ne l'a pas activé (les enveloppes dures restent le filet par défaut).
+    let preauthorizeBudget = false;
     try {
       const all = await this.settings.getAll(orgId);
       const raw = all['agents.policies'];
@@ -64,6 +69,7 @@ export class PolicyEngineService {
       const bp = Number(all['agents.backpressure.maxPendingReviews']);
       if (Number.isInteger(bp) && bp >= 0 && bp <= 1000) backpressureMax = bp;
       requireRunDeclaration = all['agents.requireRunDeclaration'] === true;
+      preauthorizeBudget = all['agents.preauthorizeBudget'] === true;
     } catch (e) {
       // Fail-safe : on garde les défauts plutôt que de crasher un claim.
       this.log.warn(`[policy] lecture settings échouée org=${orgId}: ${String(e)}`);
@@ -72,6 +78,7 @@ export class PolicyEngineService {
       rules,
       backpressureMax,
       requireRunDeclaration,
+      preauthorizeBudget,
       expires: now + this.CACHE_TTL_MS,
     };
     this.cache.set(orgId, entry);
@@ -97,6 +104,16 @@ export class PolicyEngineService {
   async getRequireRunDeclaration(orgId: string): Promise<boolean> {
     const { requireRunDeclaration } = await this.load(orgId);
     return requireRunDeclaration;
+  }
+
+  /**
+   * Vrai si le claim doit être refusé quand le coût ESTIMÉ de la tâche (moyenne
+   * historique de l'agent) ferait déborder une enveloppe de budget — au lieu de
+   * ne bloquer qu'après dépassement réel. Opt-in ; fail-open sans historique.
+   */
+  async getPreauthorizeBudget(orgId: string): Promise<boolean> {
+    const { preauthorizeBudget } = await this.load(orgId);
+    return preauthorizeBudget;
   }
 
   /** Règles effectives (défauts inclus) — pour l'UI / le diagnostic. */

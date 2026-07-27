@@ -144,6 +144,12 @@
   "event.attachmentDeleted": "Pièce jointe supprimée",
   "event.dependency": "Dépendance",
   "realtime.newComment": "Nouveau commentaire",
+  "realtime.assignedToYou": "Une tâche vous a été assignée",
+  "realtime.mentionedYou": "{{name}} vous a mentionné",
+  "realtime.statusChangedTitle": "Statut modifié",
+  "realtime.statusChangedBody": "{{task}} · {{from}} → {{to}}",
+  "realtime.newNotification": "Nouvelle notification",
+  "realtime.someone": "Quelqu'un",
   "pwRule": {
     "minLength": "Au moins {{count}} caractères",
     "letter": "Une lettre",

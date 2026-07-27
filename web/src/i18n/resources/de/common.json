@@ -144,6 +144,12 @@
   "event.attachmentDeleted": "Anhang entfernt",
   "event.dependency": "Abhängigkeit",
   "realtime.newComment": "Neuer Kommentar",
+  "realtime.assignedToYou": "Ihnen wurde eine Aufgabe zugewiesen",
+  "realtime.mentionedYou": "{{name}} hat Sie erwähnt",
+  "realtime.statusChangedTitle": "Status geändert",
+  "realtime.statusChangedBody": "{{task}} · {{from}} → {{to}}",
+  "realtime.newNotification": "Neue Benachrichtigung",
+  "realtime.someone": "Jemand",
   "pwRule": {
     "minLength": "Mindestens {{count}} Zeichen",
     "letter": "Ein Buchstabe",

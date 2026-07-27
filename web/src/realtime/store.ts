@@ -16,14 +16,15 @@ export interface BufferedEvent {
 
 export interface Notification {
   id: string;
-  /** Type sémantique (mention, assignment, comment, system) */
-  kind: 'mention' | 'assignment' | 'comment' | 'system';
+  /** Type sémantique (mention, assignment, status, comment, system) */
+  kind: 'mention' | 'assignment' | 'status' | 'comment' | 'system';
   title: string;
   body?: string;
   /** ms epoch */
   at: number;
-  /** Cible cliquable (taskId, projectId) */
+  /** Cible cliquable (taskId + projectId pour rouvrir la tâche). */
   taskId?: string;
+  projectId?: string;
   read: boolean;
 }
 

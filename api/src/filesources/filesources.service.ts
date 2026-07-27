@@ -276,8 +276,19 @@ export class FileSourcesService {
       if (!project.msTeamDriveId) {
         throw new FileSourceError('FS_SOURCE_UNAVAILABLE', 'Drive SharePoint non résolu.');
       }
+    } else if (source === 'google-drive') {
+      // `managedElsewhere` comme SharePoint : la lecture réutilise l'identité du
+      // provisioning Google Drive (scope `drive` ⊃ `drive.readonly`) — pas de
+      // connecteur séparé. Gate sur le provisioning activé + une identité résolue.
+      const gd = await this.settings.getGoogleDriveReadContext(orgId);
+      if (!gd.enabled) {
+        throw new FileSourceError('FS_DISABLED', 'Provisioning Google Drive désactivé (admin).');
+      }
+      if (!gd.hasCredential) {
+        throw new FileSourceError('FS_AUTH_FAILED', 'Identité Google Drive non configurée (provisioning).');
+      }
     } else {
-      // Source à connecteur autonome (Google Drive, …) : un connecteur de ce
+      // Autre source à connecteur autonome (S3/WebDAV…) : un connecteur de ce
       // type doit exister ET être activé pour l'org.
       const pc = await this.connectors.resolveProviderContext(orgId, source);
       if (!pc) {
@@ -305,12 +316,21 @@ export class FileSourcesService {
   ): Promise<{ ctx: FileSourceContext; provider: NonNullable<ReturnType<FileSourceProviderRegistry['get']>> }> {
     const provider = this.registry.get(source)!;
 
-    // Providers à connecteur (google/s3/webdav) : config+secret déchiffrés.
-    // SharePoint : géré via l'identité de provisioning (config/secret vides).
-    const pc =
-      source === 'sharepoint'
-        ? { config: {}, secret: {} }
-        : (await this.connectors.resolveProviderContext(orgId, source)) ?? { config: {}, secret: {} };
+    // Résolution de l'identité selon la source :
+    //  - SharePoint : identité de provisioning Teams (config/secret vides,
+    //    résolus par le provider lui-même).
+    //  - Google Drive : `managedElsewhere` — réutilise l'identité du provisioning
+    //    Google Drive (config/secret dérivés de `gdrive.provisioning.*`).
+    //  - Autres (S3/WebDAV…) : connecteur chiffré autonome.
+    let pc: { config: Record<string, unknown>; secret: Record<string, string> };
+    if (source === 'sharepoint') {
+      pc = { config: {}, secret: {} };
+    } else if (source === 'google-drive') {
+      const gd = await this.settings.getGoogleDriveReadContext(orgId);
+      pc = { config: gd.config, secret: gd.secret };
+    } else {
+      pc = (await this.connectors.resolveProviderContext(orgId, source)) ?? { config: {}, secret: {} };
+    }
 
     // Drive partagé provisionné pour ce projet (s'il existe) : il prime sur la
     // racine org du connecteur — un drive par projet, comme le site SharePoint

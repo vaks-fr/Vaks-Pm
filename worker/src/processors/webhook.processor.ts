@@ -126,6 +126,7 @@ const AUTOMATION_KIND_LABELS: Record<string, string> = {
   skill_gap: '🎓 Compétence manquante',
   parent_ready: '✅ Tâche parente prête à revoir',
   agent_budget: "🤖 Budget d'agent IA",
+  agent_run_anomaly: '🕵️ Déclaration de coût agent suspecte',
   deliverable_stale: '📄 Livrable en attente de revue',
   timeoff_conflict: '🌴 Congé vs plan de charge',
   autoplan_overflow: '📐 Plan hors échéance',

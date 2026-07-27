@@ -43,6 +43,8 @@ import {
   normalizeEmailLang,
 } from './email-templates';
 import { EmailJobData, getEmailQueue } from './email-queue';
+import { USER_NOTIFICATION_EVENT } from '@vaks-pm/shared';
+import { EventsGateway } from '../realtime/events.gateway';
 
 /**
  * Rétention du journal d'envois. `EmailDelivery` est un outil de debug, pas une
@@ -104,7 +106,24 @@ export class NotificationsService {
     private readonly s3: S3Service,
     private readonly tenant: TenantContext,
     private readonly tenantUrl: TenantUrlService,
+    private readonly events: EventsGateway,
   ) {}
+
+  /**
+   * Notification in-app (cloche haut-droite) poussée à l'utilisateur cible via
+   * la room `user:<id>`. Fire-and-forget : ne doit jamais faire échouer une
+   * `notify*`. Émise en parallèle de l'email, mais AVANT les quiet hours /
+   * digest (l'in-app est instantané et passif) — elle reste toutefois soumise
+   * aux mêmes toggles par-event (`isAllowed`) et opt-out user que l'email, car
+   * l'émission n'a lieu qu'après ces garde-fous dans chaque `notify*`.
+   */
+  private pushInApp(userId: string, payload: Record<string, unknown>): void {
+    try {
+      this.events.emitToUser(userId, USER_NOTIFICATION_EVENT, payload);
+    } catch (err) {
+      this.log.warn(`pushInApp failed: ${(err as Error).message}`);
+    }
+  }
 
   /**
    * Charge le logo org depuis MinIO et renvoie payload prêt à attacher inline
@@ -171,7 +190,10 @@ export class NotificationsService {
   ): Promise<void> {
     try {
       const prefs = readNotificationsSettings(await this.settings.getAll(orgId));
-      if (!this.isAllowed(prefs, 'onAssignment', orgId)) return;
+      // Gate in-app (cloche) : kill switch + toggle par-event, MAIS pas le digest
+      // ni les quiet hours (ceux-ci ne concernent que la remise email). En mode
+      // digest, l'email est différé mais la cloche notifie en temps réel.
+      if (!prefs.enabled || !prefs.onAssignment) return;
       if (actorUserId === recipientUserId) return;
       if (await this.userOptedOut(orgId, recipientUserId, 'assignment')) return;
 
@@ -186,6 +208,16 @@ export class NotificationsService {
       ]);
       if (!recipient || !task || !org) return;
 
+      this.pushInApp(recipientUserId, {
+        kind: 'assignment',
+        taskId: task.id,
+        projectId: task.projectId,
+        taskTitle: task.title,
+        actorName: actor?.name ?? undefined,
+      });
+
+      // Email : soumis en plus au digest/quiet hours.
+      if (!this.isAllowed(prefs, 'onAssignment', orgId)) return;
       const lang = await this.resolveRecipientLanguage(orgId, recipient.preferredLanguage);
       const ctx = this.buildContext(prefs, recipient.name, org.name, lang);
       const rendered = renderAssignment(ctx, {
@@ -209,18 +241,32 @@ export class NotificationsService {
   ): Promise<void> {
     try {
       const prefs = readNotificationsSettings(await this.settings.getAll(orgId));
-      if (!this.isAllowed(prefs, 'onMention', orgId)) return;
+      // Voir notifyAssignment : in-app = kill switch + toggle, sans digest/quiet.
+      if (!prefs.enabled || !prefs.onMention) return;
       if (actorUserId === recipientUserId) return;
       if (await this.userOptedOut(orgId, recipientUserId, 'mention')) return;
 
       const [recipient, actor, task, org] = await Promise.all([
         this.prisma.user.findUnique({ where: { id: recipientUserId } }),
         this.prisma.user.findUnique({ where: { id: actorUserId } }),
-        this.prisma.task.findUnique({ where: { id: taskId }, select: { id: true, title: true } }),
+        this.prisma.task.findUnique({
+          where: { id: taskId },
+          select: { id: true, title: true, projectId: true },
+        }),
         this.prisma.organization.findUnique({ where: { id: orgId } }),
       ]);
       if (!recipient || !actor || !task || !org) return;
 
+      this.pushInApp(recipientUserId, {
+        kind: 'mention',
+        taskId: task.id,
+        projectId: task.projectId,
+        taskTitle: task.title,
+        actorName: actor.name,
+        excerpt: commentBody.slice(0, 140),
+      });
+
+      if (!this.isAllowed(prefs, 'onMention', orgId)) return;
       const lang = await this.resolveRecipientLanguage(orgId, recipient.preferredLanguage);
       const ctx = this.buildContext(prefs, recipient.name, org.name, lang);
       const rendered = renderMention(ctx, {
@@ -302,20 +348,36 @@ export class NotificationsService {
   ): Promise<void> {
     try {
       const prefs = readNotificationsSettings(await this.settings.getAll(orgId));
-      if (!this.isAllowed(prefs, 'onStatusChange', orgId)) return;
+      // In-app = kill switch + toggle ; email = en plus digest/quiet (calculé
+      // une fois, invariant de boucle).
+      if (!prefs.enabled || !prefs.onStatusChange) return;
+      const emailAllowed = this.isAllowed(prefs, 'onStatusChange', orgId);
       const targets = recipientUserIds.filter((id) => id !== actorUserId);
       if (targets.length === 0) return;
 
       const [recipients, actor, task, org] = await Promise.all([
         this.prisma.user.findMany({ where: { id: { in: targets } } }),
         actorUserId ? this.prisma.user.findUnique({ where: { id: actorUserId } }) : null,
-        this.prisma.task.findUnique({ where: { id: taskId }, select: { id: true, title: true } }),
+        this.prisma.task.findUnique({
+          where: { id: taskId },
+          select: { id: true, title: true, projectId: true },
+        }),
         this.prisma.organization.findUnique({ where: { id: orgId } }),
       ]);
       if (!task || !org || recipients.length === 0) return;
 
       for (const r of recipients) {
         if (await this.userOptedOut(orgId, r.id, 'statusChange')) continue;
+        this.pushInApp(r.id, {
+          kind: 'status',
+          taskId: task.id,
+          projectId: task.projectId,
+          taskTitle: task.title,
+          actorName: actor?.name ?? undefined,
+          fromStatus,
+          toStatus,
+        });
+        if (!emailAllowed) continue;
         const lang = await this.resolveRecipientLanguage(orgId, r.preferredLanguage);
         const ctx = this.buildContext(prefs, r.name, org.name, lang);
         const rendered = renderStatus(ctx, {

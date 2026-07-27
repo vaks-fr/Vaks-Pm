@@ -116,3 +116,91 @@ export const AUDIT_ACTIONS = {
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS] | string;
+
+// Type-only (effacé à la compilation) → pas de cycle d'import runtime avec
+// audit-log.service, qui reste la source du type.
+import type { AuditSeverity } from './audit-log.service';
+
+/**
+ * Politique de sévérité du journal d'audit — **source de vérité unique**
+ * (revue 2026-07-26). Principe :
+ *  - INFO     : opération réussie, routinière, fort volume (login réussi,
+ *               logout, refresh de token, CRUD métier, export de ses propres
+ *               données, attribution de siège).
+ *  - WARNING  : déviation ou signal de sécurité sans incident (échec de login,
+ *               permission refusée, création de user/webhook/connecteur, export
+ *               de données d'autrui, échec SSO/MFA).
+ *  - CRITICAL : irréversible, élévation de privilège, changement de credential
+ *               ou d'état de sécurité, incident confirmé (rôle/admin, suppression
+ *               ou suspension de compte, anonymisation, purge, MFA, mot de passe,
+ *               rotation de clés, tokens, actions security.*, alerte brute-force).
+ *
+ * Un `outcome:'FAILURE'` remonte automatiquement un INFO à WARNING
+ * (cf. `severityForAction`) : un échec est au minimum un signal.
+ *
+ * Actions absentes de la table : héritent d'INFO (mutations CRUD via
+ * l'interceptor, avec bump WARNING sur 401/403). Les hooks `logCritical()`
+ * écrivent en CRITICAL immédiat *par construction* — ils couvrent les domaines
+ * toujours-critiques non listés ici (crypto.*, apiToken.*, security.*, agent.*,
+ * client/contact.anonymized, SCIM…).
+ */
+export const AUDIT_SEVERITY: Record<string, AuditSeverity> = {
+  // — Authentification : routine = INFO ; les échecs passent WARNING via l'outcome —
+  [AUDIT_ACTIONS.AUTH_LOGIN_SUCCESS]: 'INFO',
+  [AUDIT_ACTIONS.AUTH_LOGIN_FAILURE]: 'WARNING',
+  [AUDIT_ACTIONS.AUTH_LOGOUT]: 'INFO',
+  [AUDIT_ACTIONS.AUTH_TOKEN_REFRESHED]: 'INFO',
+  [AUDIT_ACTIONS.AUTH_SSO_LOGIN]: 'INFO',
+  [AUDIT_ACTIONS.AUTH_SSO_FAILURE]: 'WARNING',
+  [AUDIT_ACTIONS.AUTH_MFA_SUCCESS]: 'INFO',
+  [AUDIT_ACTIONS.AUTH_MFA_FAILURE]: 'WARNING',
+  // Changements d'état de sécurité du compte → CRITICAL.
+  [AUDIT_ACTIONS.AUTH_MFA_ENROLLED]: 'CRITICAL',
+  [AUDIT_ACTIONS.AUTH_MFA_DISABLED]: 'CRITICAL',
+  [AUDIT_ACTIONS.AUTH_PASSWORD_CHANGED]: 'CRITICAL',
+  // — Utilisateurs —
+  [AUDIT_ACTIONS.USER_CREATED]: 'WARNING',
+  [AUDIT_ACTIONS.USER_UPDATED]: 'INFO',
+  [AUDIT_ACTIONS.USER_SUSPENDED]: 'CRITICAL',
+  [AUDIT_ACTIONS.USER_REACTIVATED]: 'CRITICAL',
+  [AUDIT_ACTIONS.USER_UNLOCKED]: 'WARNING',
+  [AUDIT_ACTIONS.USER_DELETED]: 'CRITICAL',
+  [AUDIT_ACTIONS.USER_ROLE_CHANGED]: 'CRITICAL',
+  [AUDIT_ACTIONS.USER_ADMIN_TOGGLED]: 'CRITICAL',
+  [AUDIT_ACTIONS.USER_AGENT_ADMIN_TOGGLED]: 'CRITICAL',
+  [AUDIT_ACTIONS.USER_SEAT_GRANTED]: 'INFO',
+  [AUDIT_ACTIONS.USER_SEAT_REVOKED]: 'INFO',
+  [AUDIT_ACTIONS.USER_ANONYMIZED]: 'CRITICAL',
+  [AUDIT_ACTIONS.USER_DATA_EXPORTED]: 'WARNING',
+  [AUDIT_ACTIONS.USER_PROVISIONED_SSO]: 'WARNING',
+  [AUDIT_ACTIONS.USER_LINKED_SSO]: 'WARNING',
+  // — Données / organisation —
+  [AUDIT_ACTIONS.DATA_PURGED]: 'CRITICAL',
+  [AUDIT_ACTIONS.ORG_DATA_EXPORTED]: 'WARNING',
+  // settings.updated : WARNING par défaut, remonté à CRITICAL au call-site si la
+  // modification touche une clé de sécurité (cf. SECURITY_SETTING_PREFIXES).
+  [AUDIT_ACTIONS.SETTINGS_UPDATED]: 'WARNING',
+  // — Intégrations : configuration visible et réversible, gouvernée (allowlist) —
+  [AUDIT_ACTIONS.WEBHOOK_CREATED]: 'WARNING',
+  [AUDIT_ACTIONS.WEBHOOK_UPDATED]: 'WARNING',
+  [AUDIT_ACTIONS.WEBHOOK_DELETED]: 'WARNING',
+  [AUDIT_ACTIONS.CONNECTOR_CREATED]: 'WARNING',
+  [AUDIT_ACTIONS.CONNECTOR_UPDATED]: 'WARNING',
+  [AUDIT_ACTIONS.CONNECTOR_DELETED]: 'WARNING',
+};
+
+/** Préfixes de clés `OrgSetting` dont la modification est CRITICAL. */
+export const SECURITY_SETTING_PREFIXES = ['security.', 'audit.', 'smtp.', 'sso.'];
+
+/**
+ * Sévérité d'une action selon `AUDIT_SEVERITY`. Un échec relève au minimum d'un
+ * WARNING. Défaut INFO pour les actions non répertoriées.
+ */
+export function severityForAction(
+  action: string,
+  outcome: 'SUCCESS' | 'FAILURE' = 'SUCCESS',
+): AuditSeverity {
+  const base = AUDIT_SEVERITY[action] ?? 'INFO';
+  if (outcome === 'FAILURE' && base === 'INFO') return 'WARNING';
+  return base;
+}

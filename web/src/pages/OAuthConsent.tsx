@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { Navigate, useSearchParams } from 'react-router-dom';
+import { Navigate, useSearchParams } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../auth/AuthContext';
 import { api } from '../api/client';
