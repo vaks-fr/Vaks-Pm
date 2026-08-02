@@ -285,9 +285,13 @@
     "task": "Task",
     "color": "Color",
     "parentGroup": "Parent group",
+
+    "parentTask": "Parent task",
+
+    "breakdown": "Breakdown",
     "noneRoot": "None (root)",
     "noneRootDash": "— None (root) —",
-    "noGroupAvailable": "No group available",
+    "noGroupAvailable": "No task available",
     "milestone": "Milestone",
     "clickToToggle": "Click to toggle",
     "yes": "Yes",
@@ -448,13 +452,15 @@
   },
   "dep": {
     "conflictTitle": "Dependency conflict",
-    "conflictTooltip": "The start date is earlier than the due date of a predecessor task",
+    "conflictTooltip": "The start date violates a dependency with a predecessor task",
     "endsOn": "ends on",
+    "startsOn": "starts on",
     "lag": "(lag {{lag}}d)",
     "expectedStart": "→ expected start no earlier than {{date}}.",
     "lateStartTitle": "Late start",
-    "lateStartTooltip": "The task starts later than its predecessor's end",
+    "lateStartTooltip": "The task starts later than required by a dependency",
     "startsAfter": "Starts {{days}}d after the end of {{title}}",
+    "startsAfterStart": "Starts {{days}}d after the start of {{title}}",
     "holidayTooltip": "Public holiday — the assignee likely won't work that day.",
     "holiday": "Holiday: {{holidays}}"
   },

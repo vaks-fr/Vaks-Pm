@@ -109,6 +109,29 @@ export class WorkloadGridQuery {
   teamId?: string;
 }
 
+/** Badge « plan obsolète » (Lot 3.3, AUTOPLAN_IMPROVEMENTS.md §3.3). */
+export class PlanStatusQuery {
+  @IsUUID()
+  projectId!: string;
+}
+
+/** Vue agrégée des agents IA dans le workload (Lot 5, AUTOPLAN_IMPROVEMENTS.md
+ *  §5.1) : concurrence + budget + file de revue. `projectId` absent = scope
+ *  org borné aux projets accessibles `agentsEnabled` (self-scoping). */
+export class AgentWorkloadQuery {
+  @IsOptional()
+  @IsDateString()
+  from?: string;
+
+  @IsOptional()
+  @IsDateString()
+  to?: string;
+
+  @IsOptional()
+  @IsUUID()
+  projectId?: string;
+}
+
 /**
  * Déplace UN seul jour d'une allocation multi-jours vers une autre case
  * (autre user ou autre date), en effectuant la coupe et le rebuild de

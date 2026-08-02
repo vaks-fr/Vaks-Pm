@@ -6,6 +6,7 @@ import { CapacityService } from '../workload/capacity.service';
 import { FinanceService } from '../finance/finance.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { CacheService } from '../common/cache.service';
+import { blankStatusCounts } from '../common/task-status.util';
 import { BurndownDto, TimeBreakdownDto } from './dto/reports.dto';
 
 @Injectable()
@@ -35,16 +36,7 @@ export class ReportsService {
       },
     });
 
-    const counts: Record<TaskStatus, number> = {
-      TODO: 0,
-      CLAIMED: 0,
-      IN_PROGRESS: 0,
-      IN_REVIEW: 0,
-      CHANGES_REQUESTED: 0,
-      APPROVED: 0,
-      ON_HOLD: 0,
-      DONE: 0,
-    };
+    const counts: Record<TaskStatus, number> = blankStatusCounts();
     let totalEstimateH = 0;
     let doneEstimateH = 0;
     let overdue = 0;
@@ -719,7 +711,7 @@ export class ReportsService {
     const points: Array<{ date: string } & Record<TaskStatus, number>> = [];
     for (let d = new Date(from); d.getTime() <= to.getTime(); d = addDays(d, step)) {
       const cutoff = addDays(d, 1).getTime(); // fin de journée
-      const counts: Record<TaskStatus, number> = { TODO: 0, CLAIMED: 0, IN_PROGRESS: 0, IN_REVIEW: 0, CHANGES_REQUESTED: 0, APPROVED: 0, ON_HOLD: 0, DONE: 0 };
+      const counts: Record<TaskStatus, number> = blankStatusCounts();
       for (const entries of byTask.values()) {
         let status: TaskStatus | null = null;
         for (const e of entries) {

@@ -26,6 +26,13 @@ const BASE_BUCKETS = {
   /// purge AVANT suppression, quand `audit.archive.enabled`). Clé :
   /// `<orgId>/<date-purge>.jsonl.gz`. Jamais purgé automatiquement.
   auditArchive: 'vaks-pm-audit-archive',
+  /// Artefacts des exports asynchrones (rapports, portabilité RGPD…). Clé :
+  /// `<orgId>/<jobId>.<ext>`. Servis par `GET /exports/:id/download`, **jamais**
+  /// par URL pré-signée : `S3_ENDPOINT` est un nom DNS interne à l'overlay, une
+  /// pré-signature pointerait `http://garage:3900` — injoignable d'un client.
+  /// Rétention alignée sur le TTL du job (24 h) côté état ; l'objet lui-même
+  /// n'est pas purgé automatiquement.
+  exports: 'vaks-pm-exports',
 } as const;
 
 /**

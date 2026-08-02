@@ -77,6 +77,12 @@ export const AUDIT_ACTIONS = {
   // Automatisations built-in (actorType SYSTEM — BUILTIN_AUTOMATIONS.md)
   AUTOMATION_ALERT: 'automation.alert',
   AUTOMATION_MUTATION: 'automation.mutation',
+  // Auto-plan — levée CIBLÉE du gel du passé (Lot 4.2, « Libérer cette
+  // journée ») : un user, un jour, geste explicite du PM. Distinct de la
+  // capture générique de /workload/autoplan (l'interceptor loggue déjà la
+  // requête) — celle-ci trace spécifiquement le contournement de la règle de
+  // gel, pour qu'il reste repérable dans le journal sans dépouiller le detail.
+  WORKLOAD_UNFREEZE_DAY: 'workload.autoplan.unfreeze_day',
   // Annonce projet (audience résolue serveur — hook explicite, @SkipAudit)
   ANNOUNCEMENT_CREATED: 'project.announcement.created',
   // Agents IA (chantier 1 — toutes logCritical, @SkipAudit sur les handlers)
@@ -109,10 +115,28 @@ export const AUDIT_ACTIONS = {
   // Transition de statut refusée par la matrice (chantier 2 ; WARNING). En mode
   // observation = simplement tracée ; en enforce = accompagne un 409.
   TASK_TRANSITION_OBSERVED: 'task.transition.observed',
+  // Bail d'exécution échu (lot A) : l'agent n'a plus donné signe de vie, la
+  // tâche est rendue au vivier. Signal de fiabilité de la flotte d'agents, pas
+  // un incident de sécurité → WARNING.
+  AGENT_LEASE_EXPIRED: 'agent.task.lease_expired',
+  // Enveloppe de coût consommée EN COURS de tâche (coupe-circuit lot A).
+  // WARNING quand on se contente d'alerter, CRITICAL quand la tâche est
+  // effectivement retirée à l'agent (sévérité posée à l'appel).
+  AGENT_BUDGET_EXCEEDED: 'agent.budget_exceeded',
   // Opérations / infrastructure (signalées par les scripts host via /ops/*)
   BACKUP_FAILED: 'backup.failed',
+  // Provisioning Microsoft Teams : retries BullMQ épuisés (ou cas non-retryable
+  // connu d'avance, ex. aucun membre lié à Entra) → échec DÉFINITIF et
+  // silencieux jusqu'ici, alerté aux admins du tenant (WARNING).
+  TEAMS_PROVISION_FAILED: 'teams.provision.failed',
   // Diagnostic / support (bundle exporté par un admin)
   ADMIN_DIAGNOSTICS_EXPORTED: 'admin.diagnostics.exported',
+  // Garde-fou de confirmation MCP (WARNING) : le défi émis sur une action
+  // destructrice, et le refus d'un jeton invalide/rejoué/dépareillé. L'action
+  // confirmée, elle, est déjà couverte par la capture générique des mutations —
+  // le rapport défis/actions donne directement le taux d'abandon des agents.
+  MCP_CONFIRM_CHALLENGED: 'mcp.confirm_challenged',
+  MCP_CONFIRM_REJECTED: 'mcp.confirm_rejected',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS] | string;
@@ -187,6 +211,13 @@ export const AUDIT_SEVERITY: Record<string, AuditSeverity> = {
   [AUDIT_ACTIONS.CONNECTOR_CREATED]: 'WARNING',
   [AUDIT_ACTIONS.CONNECTOR_UPDATED]: 'WARNING',
   [AUDIT_ACTIONS.CONNECTOR_DELETED]: 'WARNING',
+  // — Boucle d'exécution des agents (lot A) —
+  [AUDIT_ACTIONS.AGENT_LEASE_EXPIRED]: 'WARNING',
+  [AUDIT_ACTIONS.AGENT_BUDGET_EXCEEDED]: 'WARNING',
+  // — Provisioning Microsoft Teams —
+  [AUDIT_ACTIONS.TEAMS_PROVISION_FAILED]: 'WARNING',
+  // — Auto-plan : contournement explicite (mais borné) du gel du passé —
+  [AUDIT_ACTIONS.WORKLOAD_UNFREEZE_DAY]: 'WARNING',
 };
 
 /** Préfixes de clés `OrgSetting` dont la modification est CRITICAL. */

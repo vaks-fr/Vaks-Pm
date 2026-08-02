@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
 import * as os from 'node:os';
+import { createHash } from 'node:crypto';
 import { AuditSyslogEntry, AuditSyslogJob } from '../queues';
 
 /**
@@ -10,8 +11,11 @@ import { AuditSyslogEntry, AuditSyslogJob } from '../queues';
  * avec **framing octet-counting RFC 6587** (`<len> <msg>`), le seul framing
  * fiable pour des messages contenant des retours ligne potentiels.
  *
- * - Connexions poolées par cible (host:port:protocol), fermées après 60 s
- *   d'inactivité — un batch réutilise la connexion du précédent.
+ * - Connexions poolées par cible ET par identité (org/tenant + matériel TLS),
+ *   fermées après 60 s d'inactivité — un batch réutilise la connexion du
+ *   précédent. Le pool ne doit JAMAIS partager un socket entre deux tenants
+ *   pointant vers le même collecteur SIEM (sinon le tenant B hérite de la
+ *   session mTLS — cert client, CA, rejectUnauthorized — du tenant A).
  * - Reconnexion = retries BullMQ (attempts 5, backoff exponentiel, conf côté
  *   producteur `api/src/audit-logs/audit-syslog-queue.ts`). Livraison
  *   at-least-once : l'`id` d'entrée (UUID) permet le dédoublonnage côté SIEM.
@@ -33,8 +37,16 @@ interface PooledConn {
 
 const pool = new Map<string, PooledConn>();
 
-function poolKey(cfg: AuditSyslogJob['config']): string {
-  return `${cfg.host}:${cfg.port}:${cfg.protocol}`;
+/** Empreinte du matériel TLS (CA + cert client + mode de vérif) — deux configs
+ *  qui diffèrent sur l'un de ces champs ne doivent jamais partager un socket. */
+function tlsFingerprint(cfg: AuditSyslogJob['config']): string {
+  const raw = `${cfg.caPem ?? ''}\0${cfg.clientCertPem ?? ''}\0${cfg.rejectUnauthorized !== false}`;
+  return createHash('sha256').update(raw).digest('hex').slice(0, 16);
+}
+
+function poolKey(job: AuditSyslogJob): string {
+  const { config: cfg } = job;
+  return `${job.organizationId}:${job.tenantSlug ?? ''}:${cfg.host}:${cfg.port}:${cfg.protocol}:${tlsFingerprint(cfg)}`;
 }
 
 function closeConn(key: string): void {
@@ -95,8 +107,8 @@ function connect(cfg: AuditSyslogJob['config']): Promise<net.Socket> {
   });
 }
 
-async function getConn(cfg: AuditSyslogJob['config']): Promise<net.Socket> {
-  const key = poolKey(cfg);
+async function getConn(job: AuditSyslogJob): Promise<net.Socket> {
+  const key = poolKey(job);
   const existing = pool.get(key);
   if (existing && !existing.socket.destroyed) {
     clearTimeout(existing.idleTimer);
@@ -105,7 +117,7 @@ async function getConn(cfg: AuditSyslogJob['config']): Promise<net.Socket> {
     return existing.socket;
   }
   if (existing) closeConn(key);
-  const socket = await connect(cfg);
+  const socket = await connect(job.config);
   socket.setTimeout(0); // le timeout de connexion ne s'applique pas au steady-state
   socket.on('error', () => closeConn(key));
   socket.on('close', () => closeConn(key));
@@ -214,11 +226,11 @@ export async function processAuditSyslog(
       detail: { message: 'Test de connexion SIEM depuis Vaks PM' },
     };
     try {
-      const socket = await getConn(job.config);
+      const socket = await getConn(job);
       await writeAll(socket, frame(buildMessage(job, entry)));
       await reportTestResult(job, true);
     } catch (err) {
-      closeConn(poolKey(job.config));
+      closeConn(poolKey(job));
       await reportTestResult(job, false, (err as Error).message);
       // Pas de throw : un test échoué ne doit pas être retenté 5 fois — le
       // résultat (badge rouge + message) est déjà rapporté à l'admin.
@@ -229,11 +241,11 @@ export async function processAuditSyslog(
   if (!job.entries.length) return;
   const payload = job.entries.map((e) => frame(buildMessage(job, e))).join('');
   try {
-    const socket = await getConn(job.config);
+    const socket = await getConn(job);
     await writeAll(socket, payload);
   } catch (err) {
     // Connexion morte → on la jette et on laisse BullMQ retenter le batch.
-    closeConn(poolKey(job.config));
+    closeConn(poolKey(job));
     const e = err instanceof Error ? err : new Error(String(err));
     // Dernière tentative : le lot est définitivement perdu → on le signale à
     // l'API (compteur + badge admin) AVANT de rethrow.

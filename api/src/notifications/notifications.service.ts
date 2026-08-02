@@ -37,6 +37,8 @@ import {
   SecurityAlertPayload,
   renderBackupAlert,
   BackupAlertPayload,
+  renderTeamsProvisionFailed,
+  TeamsProvisionFailedPayload,
   renderBillingExport,
   Lang,
   EMAIL_LANGUAGES,
@@ -623,6 +625,28 @@ export class NotificationsService {
     const ctx = this.buildContext(prefs, recipientName, org?.name ?? 'Vaks', lang);
     const rendered = renderBackupAlert(ctx, payload);
     await this.enqueue(orgId, to, 'backup_failed', rendered, prefs);
+  }
+
+  /**
+   * Alerte aux admins du tenant : le provisioning Microsoft Teams d'un projet a
+   * échoué DÉFINITIVEMENT (retries BullMQ épuisés, ou cas non-retryable connu
+   * d'avance). Transactionnel critique → respecte le kill switch org
+   * (`notif.enabled`) mais pas les quiet hours.
+   */
+  async sendTeamsProvisionFailedAlert(
+    orgId: string,
+    to: string,
+    recipientName: string,
+    payload: TeamsProvisionFailedPayload,
+    recipientLanguage?: string | null,
+  ): Promise<void> {
+    const prefs = readNotificationsSettings(await this.settings.getAll(orgId));
+    if (!prefs.enabled) return;
+    const org = await this.prisma.organization.findUnique({ where: { id: orgId } });
+    const lang = await this.resolveRecipientLanguage(orgId, recipientLanguage);
+    const ctx = this.buildContext(prefs, recipientName, org?.name ?? 'Vaks', lang);
+    const rendered = renderTeamsProvisionFailed(ctx, payload);
+    await this.enqueue(orgId, to, 'teams_provision_failed', rendered, prefs);
   }
 
   /**

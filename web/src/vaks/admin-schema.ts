@@ -50,6 +50,7 @@ export type SpecialKind =
   | 'agentlist'
   /** Policies de gouvernance des agents (chantier agents 3). */
   | 'agentpolicies'
+  | 'agentruns'
   /** Connecteurs d'annuaire d'agents (Entra Agent ID, …) — groupe Integrations. */
   | 'agentconnectors'
   /** Connecteurs CI signataires (vérification des livrables agents — phase C). */
@@ -133,9 +134,18 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       },
       { title: 'Users', kind: 'userlist', nav: true, navIcon: 'user', blurb: 'Everyone with an account — search, roles and status.' },
       { title: 'Agents', kind: 'agentlist', nav: true, navIcon: 'zap', blurb: 'AI agent identities: owner, trust level, capabilities, tokens and directory sync. Separate from human members — agents never consume a seat.' },
-      { title: 'Agent policies', kind: 'agentpolicies', nav: true, navIcon: 'shield', blurb: 'Governance rules for AI agents: require review, deny or notify based on labels, trust level, estimate or transition — plus review backpressure.' },
       { title: 'Teams', kind: 'teamlist', nav: true, navIcon: 'users', blurb: 'Working groups, their leads and members.' },
       { title: 'Roles', kind: 'rolelist', nav: true, navIcon: 'shield', blurb: 'System roles available in this organization and the permissions they grant.' },
+    ],
+  },
+  {
+    id: 'aiAgentManagement',
+    label: 'AI Agent Management',
+    icon: 'bot',
+    blurb: 'Govern your AI agents and audit what they cost: policy rules that gate reviews and transitions, and the full usage & cost ledger.',
+    sections: [
+      { title: 'Policies', kind: 'agentpolicies', nav: true, navIcon: 'shield', blurb: 'Governance rules for AI agents: require review, deny or notify based on labels, trust level, estimate or transition — plus review backpressure.' },
+      { title: 'Usage & cost ledger', kind: 'agentruns', nav: true, navIcon: 'coins', blurb: 'Every run declared by an AI agent: cost, tokens, model, project and task. The audit log of AI consumption — filter by agent, project or period, flag suspicious declarations, export to CSV.' },
     ],
   },
   {
@@ -187,6 +197,14 @@ export const ADMIN_GROUPS: AdminGroup[] = [
             value: { mon: true, tue: true, wed: true, thu: true, fri: true, sat: false, sun: false },
           },
           { id: 'weekStart', label: 'Week starts on', desc: 'First column of the workload & timeline grids.', type: 'segmented', options: ['Monday', 'Sunday'], value: 'Monday' },
+          {
+            id: 'autoplan.concentration',
+            label: 'Auto-plan concentration',
+            desc: 'Default for the "how many people per task" trade-off when auto-plan assigns tasks. Focus favors fewer people; spread restores the historical one-person-per-task behavior. Overridable per run.',
+            type: 'segmented',
+            options: ['focus', 'balanced', 'spread'],
+            value: 'balanced',
+          },
           {
             id: 'holidays.defaultCountry',
             label: 'Default holiday country',
@@ -598,6 +616,8 @@ export const ADMIN_GROUPS: AdminGroup[] = [
           { id: 'automations.utilization.enabled', label: 'Billable utilization', desc: 'Alert the team leads when someone logs too little of their time on billable projects. Measured per person on the finished week — billability is a project property, so a per-project ratio would always be 100% or 0%.', type: 'toggle', value: false },
           { id: 'automations.utilization.thresholdPct', label: 'Utilization target', desc: 'Share of logged time expected on billable projects.', type: 'number', unit: '%', value: 60, min: 0, max: 100 },
           { id: 'automations.timeOffConflict.enabled', label: 'Time off vs plan', desc: 'Alert the project managers when approved time off overlaps allocations already planned — the plan goes stale the moment the leave is entered.', type: 'toggle', value: true },
+          { id: 'automations.allocationWindowMissed.enabled', label: 'Allocated but never started', desc: 'Alert the allocated people and the project managers when a task had time allocated for it, but its planned window closed and it never left To do. Based on status, not on logged time — an empty timesheet is the normal case without daily entries.', type: 'toggle', value: true },
+          { id: 'automations.allocationWindowMissed.graceDays', label: 'Grace period', desc: 'Days after the window closes before the alert fires.', type: 'number', unit: 'days', value: 1, min: 0, max: 30 },
         ],
       },
       {

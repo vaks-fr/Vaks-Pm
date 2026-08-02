@@ -477,6 +477,139 @@ export class AutomationsHooksService {
     }
   }
 
+  /**
+   * Coupe-circuit budgétaire (lot A §2) — une enveloppe de coût agent vient
+   * d'être consommée EN COURS de tâche. Le cron horaire (règle 14) alerte déjà
+   * sur un pourcentage, mais avec jusqu'à une heure de retard : ici l'owner est
+   * prévenu à la seconde où le dépassement est déclaré, et il apprend si la
+   * tâche a été retirée à l'agent.
+   *
+   * Réutilise le kind `agent_budget` (déjà traduit ×4 + carte Teams) avec un
+   * qualifier distinct : c'est un événement, pas un seuil périodique — les deux
+   * cooldowns ne doivent pas s'annuler l'un l'autre.
+   */
+  async onAgentBudgetExceeded(
+    orgId: string,
+    x: {
+      agentId: string;
+      taskId: string | null;
+      projectId: string | null;
+      exceeded: string[];
+      envelopes: { scope: string; budget: number; spent: number }[];
+      taskReleased: boolean;
+    },
+  ): Promise<void> {
+    try {
+      const s = await this.enabledSettings(orgId);
+      if (!s) return; // kill switch automations
+      const agent = await this.prisma.user.findFirst({
+        where: { id: x.agentId, organizationId: orgId, kind: 'AGENT' },
+        select: { name: true, ownerId: true },
+      });
+      if (!agent) return;
+      const to = await this.recipients.agentSupervisors(orgId, agent.ownerId);
+      if (!to.length) return;
+
+      const currency = await this.settings.getCurrency(orgId).catch(() => 'EUR');
+      const money = (n: number): string => `${Math.round(n * 100) / 100} ${currency}`;
+      // On rapporte l'enveloppe la plus contraignante (celle qui a sauté) —
+      // pas une somme de périmètres hétérogènes.
+      const hit =
+        x.envelopes.find((e) => x.exceeded.includes(e.scope)) ?? x.envelopes[0] ?? null;
+
+      await this.actions.emit(orgId, {
+        kind: 'agent_budget',
+        entityId: x.taskId ?? x.agentId,
+        qualifier: `breaker:${x.exceeded.join('+') || 'none'}:${new Date().toISOString().slice(0, 10)}`,
+        recipients: to,
+        params: {
+          scope: `${agent.name ?? 'Agent'} (${x.exceeded.join(', ')}${x.taskReleased ? ' — tâche retirée' : ''})`,
+          pct: 100,
+          amount: hit ? money(hit.spent) : '—',
+          budget: hit ? money(hit.budget) : '—',
+        },
+        taskId: x.taskId ?? undefined,
+        projectId: x.projectId ?? undefined,
+        url: `${this.appBase()}/?view=agents`,
+      });
+    } catch (err) {
+      this.log.warn(`onAgentBudgetExceeded(${x.agentId}) failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Agent bloqué (lot B) — il vient de demander de l'aide sur la tâche qu'il
+   * tient. **Sans ça, l'appel au secours ne réveille personne** : le commentaire
+   * ne touche que les watchers, la mise en pause dépend d'un réglage de
+   * notification désactivé par défaut, et la demande de compétence n'existe que
+   * si une compétence a pu être résolue. Or c'est précisément le moment où un
+   * humain doit intervenir.
+   *
+   * Trois audiences, dédupliquées : le **PM du projet** (il débloque), l'**owner
+   * de l'agent** (il en répond) et les **co-assignés** de la tâche (ils
+   * travaillent dessus). L'agent lui-même est exclu — il ne s'auto-notifie pas.
+   */
+  async onAgentAssistanceRequested(
+    orgId: string,
+    x: {
+      agentId: string;
+      taskId: string;
+      projectId: string;
+      question: string;
+      paused: boolean;
+    },
+  ): Promise<number> {
+    try {
+      const s = await this.enabledSettings(orgId);
+      if (!s) return 0; // kill switch automations
+      const [agent, task] = await Promise.all([
+        this.prisma.user.findFirst({
+          where: { id: x.agentId, organizationId: orgId },
+          select: { name: true, ownerId: true },
+        }),
+        this.prisma.task.findFirst({
+          where: { id: x.taskId, organizationId: orgId },
+          select: { title: true, number: true, project: { select: { name: true } } },
+        }),
+      ]);
+      if (!task) return 0;
+
+      const [pms, owner, assignees] = await Promise.all([
+        this.recipients.projectPMs(x.projectId),
+        this.recipients.agentSupervisors(orgId, agent?.ownerId ?? null),
+        this.recipients.assigneesOf(x.taskId),
+      ]);
+      const byId = new Map<string, (typeof pms)[number]>();
+      for (const r of [...pms, ...owner, ...assignees]) {
+        if (r.id !== x.agentId) byId.set(r.id, r);
+      }
+      const to = [...byId.values()];
+      if (!to.length) return 0;
+
+      await this.actions.emit(orgId, {
+        kind: 'agent_blocked',
+        entityId: x.taskId,
+        // Un blocage par tâche et par jour : l'agent peut relancer sans spammer.
+        qualifier: new Date().toISOString().slice(0, 10),
+        recipients: to,
+        params: {
+          userName: agent?.name ?? 'Agent',
+          taskTitle: `#${task.number} ${task.title}`,
+          projectName: task.project?.name ?? undefined,
+          note: x.question.slice(0, 1000),
+          paused: x.paused ? 'yes' : 'no',
+        },
+        taskId: x.taskId,
+        projectId: x.projectId,
+        url: `${this.appBase()}/tasks/${x.taskId}`,
+      });
+      return to.length;
+    } catch (err) {
+      this.log.warn(`onAgentAssistanceRequested(${x.taskId}) failed: ${(err as Error).message}`);
+      return 0;
+    }
+  }
+
   /** `TasksService` en lazy (cf. commentaire de classe : cycle de modules). */
   private tasksService(): TasksService | null {
     try {

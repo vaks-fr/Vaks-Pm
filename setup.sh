@@ -98,6 +98,10 @@ check_env "$MODE"
 if [ "$MODE" = "single" ]; then
   IP="$(ask 'IP/hostname of the machine' "${VM_HOST1:-}")"
   BASE="$(ask 'Base domain ONLY (e.g. example.com — orgs are served at <slug>.<basedomain>, NOT the full host); blank for an IP/LAN test' '')"
+  MCP_JSON=""
+  MCPD="$(ask 'Public domain for a DMZ AI connector (MCP), e.g. mcp.example.com — blank for none / internal-only' '')"
+  [ -n "$MCPD" ] && MCP_JSON="
+  \"mcp\": { \"publicDomains\": [\"$MCPD\"] },"
   DBN="$(ask 'Database name' 'vakspm')"
   DM="$(ask 'deploymentMode (pooled|dedicated)' 'pooled')"
   # First organization — provisioned automatically at deploy (step 7), so no manual
@@ -125,7 +129,7 @@ if [ "$MODE" = "single" ]; then
   "imageSource": "$IMGSRC",
   $TLS_JSON
   "sshKey": "\${SSH_KEY}",
-  "hosts": [ { "name": "node1", "ip": "$IP", "sshUser": "\${VM_USER}", "roles": ["manager","db","etcd","cp","app"] } ],
+  "hosts": [ { "name": "node1", "ip": "$IP", "sshUser": "\${VM_USER}", "roles": ["manager","db","etcd","cp","app"] } ],$MCP_JSON
   "tenants": [$TEN_JSON
   ]
 }
@@ -141,6 +145,10 @@ fi
 # --- HA ---
 N="$(ask 'Number of hosts' '3')"
 BASE="$(ask 'Base domain ONLY (e.g. example.com — orgs are served at <slug>.<basedomain>, NOT the full host)' 'vaks-pm.com')"
+MCP_JSON=""
+MCPD="$(ask 'Public domain for a DMZ AI connector (MCP), e.g. mcp.example.com — blank for none / internal-only' '')"
+[ -n "$MCPD" ] && MCP_JSON="
+  \"mcp\": { \"publicDomains\": [\"$MCPD\"] },"
 DBN="$(ask 'Database name' 'vakspm')"
 echo ""
 echo "Tip: press Enter at any prompt to keep the value shown in [brackets]."
@@ -239,7 +247,7 @@ cat > infra/cluster.json <<JSON
   "hosts": [$HOSTS_JSON
   ],
   "controlPlane": { "vip": $([ -n "$VIP" ] && echo "\"$VIP\"" || echo null) },
-  "infraPlacement": { "redis": "$REDIS_H", "garage": [$GARAGE_JSON] },
+  "infraPlacement": { "redis": "$REDIS_H", "garage": [$GARAGE_JSON] },$MCP_JSON
   "tenants": [$TEN_JSON
   ]
 }

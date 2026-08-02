@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from './primitives';
 import { api } from '../api/client';
 import type { TeamReportDto, TeamKpiDto } from '@vaks-pm/shared';
-import { StackedColumns, TASK_STATUS_META, STATUS_ORDER } from './report-charts';
+import { StackedColumns, TASK_STATUS_META, STATUS_ORDER, foldedStatusCount } from './report-charts';
 import { HBars, palette } from './finance-charts';
 import './finances.css';
 
@@ -98,7 +98,7 @@ export function TeamReportView() {
   }));
   const statusCols = (data?.members ?? []).map((m) => ({
     label: m.name,
-    segments: STATUS_ORDER.map((s) => ({ key: s, label: t(TASK_STATUS_META[s].labelKey), color: TASK_STATUS_META[s].color, value: m.statusCounts[s as keyof typeof m.statusCounts] })),
+    segments: STATUS_ORDER.map((s) => ({ key: s, label: t(TASK_STATUS_META[s].labelKey), color: TASK_STATUS_META[s].color, value: foldedStatusCount(m.statusCounts, s) })),
   }));
 
   return (
@@ -210,9 +210,9 @@ export function TeamReportView() {
                     <span className="ar mono" style={{ color: m.utilizationPct != null && m.utilizationPct > 100 ? 'var(--c-over)' : undefined }}>{m.utilizationPct == null ? '—' : m.utilizationPct + '%'}</span>
                     <span className="ar mono" style={{ color: m.allocationPct != null && m.allocationPct > 100 ? 'var(--c-over)' : undefined }}>{m.allocationPct == null ? '—' : m.allocationPct + '%'}</span>
                     <span className="row" style={{ gap: 8, fontSize: 11.5, flexWrap: 'wrap' }}>
-                      {STATUS_ORDER.map((s) => m.statusCounts[s as keyof typeof m.statusCounts] > 0 ? (
+                      {STATUS_ORDER.map((s) => foldedStatusCount(m.statusCounts, s) > 0 ? (
                         <span key={s} className="mono" style={{ color: 'var(--text-3)' }}>
-                          <i className="finc-dot" style={{ background: TASK_STATUS_META[s].color, marginRight: 3 }} />{m.statusCounts[s as keyof typeof m.statusCounts]}
+                          <i className="finc-dot" style={{ background: TASK_STATUS_META[s].color, marginRight: 3 }} />{foldedStatusCount(m.statusCounts, s)}
                         </span>
                       ) : null)}
                     </span>

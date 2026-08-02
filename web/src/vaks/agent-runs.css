@@ -1,0 +1,135 @@
+/* ============================================================
+   Vaks — Agent Runs ("Usage & cost ledger") view styles
+   Same KPI-tile / card conventions as finances.css.
+   ============================================================ */
+
+.aruns { display: flex; flex-direction: column; gap: var(--s5); min-width: 0; }
+
+.aruns-desc { font-size: 13px; color: var(--text-3); line-height: 1.5; max-width: 720px; margin: 0; }
+
+/* ---------------------------------------------------------- KPI band */
+.aruns-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s4); }
+.aruns-kpi {
+  container-type: inline-size; /* pour la bascule valeur exacte ↔ compacte (aruns-kpi-val) */
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--s4) var(--s5) var(--s5);
+  display: flex; flex-direction: column; gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+.aruns-kpi:hover { border-color: var(--border-2); box-shadow: 0 2px 8px hsl(var(--shadow-color) / .08); }
+.aruns-kpi-cap {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  font-size: 11.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+  color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.aruns-kpi-val {
+  font-family: var(--font-mono); font-size: clamp(16px, 8cqi, 26px); font-weight: 700;
+  letter-spacing: -.02em; color: var(--text); line-height: 1.15;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+/* Valeur compacte (k/M) : cachée par défaut, prend le relais quand la carte
+   devient trop étroite pour la valeur exacte (jamais de dépassement de carte). */
+.aruns-kpi-val .aruns-val-compact { display: none; }
+@container (max-width: 190px) {
+  .aruns-kpi-val .aruns-val-full { display: none; }
+  .aruns-kpi-val .aruns-val-compact { display: inline; }
+}
+.aruns-kpi-sub { font-size: 12px; color: var(--text-3); line-height: 1.4; }
+.aruns-kpi-sub.is-warn { color: var(--c-over); }
+.aruns-kpi-sub.is-ok { color: var(--c-ok); }
+.aruns-kpi-warn { border-color: var(--c-over); }
+.aruns-kpi-warn .aruns-kpi-cap, .aruns-kpi-warn .aruns-kpi-val { color: var(--c-over); }
+
+@media (max-width: 980px) { .aruns-kpis { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .aruns-kpis { grid-template-columns: 1fr; } }
+
+/* ---------------------------------------------------------- toolbar */
+.aruns-toolbar {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s4);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+  padding: var(--s3) var(--s4);
+}
+.aruns-field { display: flex; flex-direction: column; gap: 4px; }
+.aruns-field-label {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--text-3);
+}
+.aruns-input {
+  padding: 7px 10px; border-radius: var(--r-sm); border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text); font-size: 13px;
+}
+.aruns-input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.aruns-toggle {
+  display: inline-flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--text-2);
+  cursor: pointer; user-select: none; padding-bottom: 7px;
+}
+.aruns-spacer { flex: 1 1 auto; }
+.aruns-actions { display: flex; align-items: center; gap: var(--s2); padding-bottom: 1px; }
+
+/* ---------------------------------------------------------- table
+   `table-layout: fixed` + colonnes en % : le tableau ne peut JAMAIS excéder
+   la largeur de sa carte, quelle que soit la largeur de fenêtre — le contenu
+   qui ne rentre pas est tronqué (ellipsis) plutôt que de forcer un scroll
+   horizontal. Chaque cellule à risque porte un `title` avec le texte complet. */
+.aruns-table-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }
+.aruns-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
+.aruns-col-date { width: 15%; }
+.aruns-col-agent { width: 15%; }
+.aruns-col-model { width: 12%; }
+.aruns-col-scope { width: 24%; }
+.aruns-col-tokens { width: 16%; }
+.aruns-col-cost { width: 10%; }
+.aruns-col-status { width: 8%; }
+.aruns-table thead th {
+  padding: 9px 10px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+  color: var(--text-3); background: var(--surface-2); border-bottom: 1px solid var(--border);
+}
+.aruns-table tbody td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; overflow: hidden; }
+.aruns-table tbody tr:last-child td { border-bottom: none; }
+.aruns-table tbody tr:hover { background: var(--surface-2); }
+.aruns-row-anomaly { box-shadow: inset 3px 0 0 var(--c-over); }
+.aruns-cell-dim { color: var(--text-3); }
+.aruns-cell-nowrap { white-space: nowrap; }
+.aruns-ellipsis { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aruns-task-sub { font-size: 10.5px; color: var(--text-3); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.aruns-pill {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .01em; padding: 3px 8px; border-radius: var(--r-pill);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.aruns-pill-model { font-family: var(--font-mono); font-weight: 600; background: var(--surface-2); border: 1px solid var(--border-2); color: var(--text-2); }
+.aruns-pill-model-missing { background: var(--c-warn-bg); color: var(--c-warn); }
+.aruns-pill-ok { background: var(--c-ok-bg); color: var(--c-ok); }
+.aruns-pill-review { background: var(--c-warn-bg); color: var(--c-warn); }
+.aruns-status-reason { display: block; font-size: 10px; color: var(--c-over); font-weight: 600; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.aruns-cost-declared { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aruns-cost-reference { font-size: 10.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.aruns-tokenbar { display: flex; height: 4px; width: 100%; max-width: 84px; border-radius: var(--r-pill); overflow: hidden; background: var(--surface-3); margin-top: 5px; }
+.aruns-tokenbar-in { background: var(--info); }
+.aruns-tokenbar-out { background: var(--accent); }
+
+.aruns-empty, .aruns-loading { padding: var(--s6); text-align: center; color: var(--text-3); font-size: 13px; }
+
+/* ---------------------------------------------------------- responsive */
+@media (max-width: 900px) {
+  .aruns-col-model, .aruns-table th:nth-child(3), .aruns-table td:nth-child(3) { display: none; }
+  .aruns-col-date { width: 16%; }
+  .aruns-col-agent { width: 17%; }
+  .aruns-col-scope { width: 27%; }
+  .aruns-col-tokens { width: 18%; }
+  .aruns-col-cost { width: 12%; }
+  .aruns-col-status { width: 10%; }
+}
+
+/* ---------------------------------------------------------- pagination */
+.aruns-pager { display: flex; align-items: center; justify-content: flex-end; gap: var(--s3); }
+.aruns-pager-info { font-size: 12.5px; color: var(--text-3); font-family: var(--font-mono); }

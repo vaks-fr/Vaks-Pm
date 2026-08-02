@@ -90,7 +90,7 @@ m.controlPlane = m.controlPlane || {};
 //   builder depuis les sources sur l'hôte de déploiement (air-gapped / sans egress).
 // imagePrefix/imageTag ne servent qu'en mode ghcr (surchargeables pour un miroir).
 const imageSource = m.imageSource === 'build' ? 'build' : 'ghcr';
-const imagePrefix = m.imagePrefix || 'ghcr.io/thomasvaxelaire-vaks/vakspm';
+const imagePrefix = m.imagePrefix || 'ghcr.io/vaks-fr/vakspm';
 const imageTag = m.imageTag || 'latest';
 const img = (svc) => (imageSource === 'build' ? `vaks-pm/${svc}:latest` : `${imagePrefix}-${svc}:${imageTag}`);
 
@@ -257,6 +257,34 @@ const dedicated = m.tenants.filter((t) => t.profile === 'dedicated');
 const slugUnderscore = (s) => s.replace(/-/g, '_');
 const ha = m.mode === 'ha';
 
+/**
+ * `TENANCY_CUSTOM_DOMAINS` — mappe un tenant servi sur un domaine qui ne suit PAS
+ * la forme canonique `<slug>.<baseDomain>`. Uniquement pour un `domain` de tenant
+ * atypique (domaine propre au client). Le cas MCP est traité à part, ci-dessous.
+ */
+const customDomainPairs = (() => {
+  const pairs = new Map();
+  for (const t of m.tenants) {
+    if (!t.slug) continue;
+    const canonical = m.baseDomain ? `${t.slug}.${m.baseDomain}`.toLowerCase() : null;
+    const h = String(t.domain || '').trim().toLowerCase();
+    if (h && h !== canonical) pairs.set(h, t.slug);
+  }
+  return [...pairs].map(([h, s]) => `${h}=${s}`).join(',');
+})();
+
+/**
+ * `TENANCY_MCP_DOMAINS` — domaines de base sous lesquels un serveur MCP publie
+ * TOUS les tenants (`<slug>.<mcpDomain>`). Déclaré une fois dans le manifeste
+ * (`mcp.publicDomains`), il couvre toutes les organisations : l'API résout le
+ * slug sur le premier label. Sert au MCP en DMZ dont le domaine public diffère
+ * du domaine interne — le MCP relaie le Host public tel quel, l'API le résout.
+ */
+const mcpPublicDomains = (Array.isArray(m.mcp?.publicDomains) ? m.mcp.publicDomains : [])
+  .map((d) => String(d).trim().toLowerCase())
+  .filter(Boolean)
+  .join(',');
+
 // --- secrets command block partagé (lecture /run/secrets → env) ---
 const secretExports = [
   'export JWT_ACCESS_SECRET=$$(cat /run/secrets/jwt_access_secret)',
@@ -280,6 +308,10 @@ function appEnv(extra = {}) {
     APP_URL: 'http://localhost',
     DEPLOYMENT_MODE: m.deploymentMode,
     TENANCY_BASE_DOMAIN: m.baseDomain,
+    // Tenant sur un domaine atypique (hors `<slug>.<baseDomain>`).
+    ...(customDomainPairs ? { TENANCY_CUSTOM_DOMAINS: `"${customDomainPairs}"` } : {}),
+    // Domaine(s) public(s) d'un serveur MCP (DMZ) — une valeur, tous les tenants.
+    ...(mcpPublicDomains ? { TENANCY_MCP_DOMAINS: `"${mcpPublicDomains}"` } : {}),
     // TLS interne (DORA) : app↔PostgreSQL chiffré. Activé en HA (Patroni écoute en
     // SSL via le bootstrap). En single, PostgreSQL tourne en conteneur SANS SSL →
     // PG_TLS="1" ferait crash-looper l'api ('server does not support SSL') → "0".
@@ -315,13 +347,35 @@ function appCommand(withDbPush) {
   return ['    command: >', '      sh -c "' + exps.join(' &&\n             ') + ' &&\n             ' + tail + '"'].join('\n');
 }
 
-function service(name, { env, secrets, command, deploy, configs }) {
-  const parts = [`  ${name}:`, `    image: ${img('api')}`, '    environment:', env];
+// `image` défaut img('api') : historiquement codé en dur, ce qui obligeait web et
+// worker à être émis en littéraux dupliqués plus bas. Le paramétrer permet de
+// passer par ce helper pour tout service applicatif.
+// `healthcheck` / `stopGrace` sont des clés de SERVICE (pas de `deploy:`), donc
+// deployBlock() ne peut pas les porter.
+function service(name, { env, secrets, command, deploy, configs, image, healthcheck, stopGrace }) {
+  const parts = [`  ${name}:`, `    image: ${image || img('api')}`, '    environment:', env];
   if (secrets) parts.push('    secrets:\n' + secrets.map((s) => `      - ${s}`).join('\n'));
   if (configs && configs.length) parts.push('    configs:\n' + configs.map((c) => `      - source: ${c.source}\n        target: ${c.target}`).join('\n'));
   if (command) parts.push(command);
+  if (healthcheck) parts.push(healthcheck);
+  if (stopGrace) parts.push(`    stop_grace_period: ${stopGrace}`);
   parts.push('    networks: [vakspm]', deploy);
   return parts.join('\n');
+}
+
+// Healthcheck HTTP standard (clé de service). Avec `order: start-first` et SANS
+// healthcheck, une tâche est réputée prête dès que le process démarre : le VIP
+// Swarm lui envoie du trafic avant que le serveur n'écoute, soit un 502 à chaque
+// rolling update. Timings calqués sur deploy/helm/vaks-pm/templates/api.yaml.
+function healthcheckBlock({ port, path = '/healthz' }) {
+  return [
+    '    healthcheck:',
+    `      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:${port}${path} >/dev/null 2>&1 || exit 1"]`,
+    '      interval: 10s',
+    '      timeout: 3s',
+    '      retries: 3',
+    '      start_period: 20s',
+  ].join('\n');
 }
 
 // ----- services data/control -----
@@ -402,6 +456,40 @@ for (const t of dedicated) {
       '    networks: [vakspm]',
       deployBlock({ replicas: reps, constraint, spread: t.ha, startFirst: false }),
     ].join('\n'),
+  );
+}
+
+// ----- mcp (connecteur IA) -----
+// Transport Streamable-HTTP **stateless** : chaque POST /mcp construit un
+// serveur jetable, rien n'est partagé entre requêtes ni entre réplicas — c'est
+// ce qui rend le multi-réplica sûr par construction. Ce service ne monte AUCUN
+// secret : il relaie le bearer et laisse l'API valider le jeton et appliquer le
+// RBAC (cf. mcp/src/main.ts).
+{
+  const mcpEnv = [
+    '      NODE_ENV: production',
+    '      PORT: "8080"',
+    '      VAKS_API_URL: http://api:3000',
+    '      VAKS_API_PREFIX: api/v1',
+    // Le serveur reconstruit ~95 tools validés par zod à CHAQUE requête.
+    '      NODE_OPTIONS: "--max-old-space-size=112"',
+    // ⚠ VAKS_TENANT_HOST et VAKS_AUTH_SERVER_MODE volontairement ABSENTS :
+    //  - sans VAKS_TENANT_HOST, le tenant vient du Host entrant → un seul
+    //    déploiement sert N tenants (pooled). Le définir épinglerait tout.
+    //  - sans VAKS_AUTH_SERVER_MODE, mode `self` ; en co-localisé `self` et
+    //    `tenant` résolvent le même host, le changer est du risque pur.
+  ].join('\n');
+  services.push(
+    service('mcp', {
+      image: img('mcp'),
+      env: mcpEnv,
+      healthcheck: healthcheckBlock({ port: 8080 }),
+      // > DRAIN_MS (25 s) > VAKS_API_TIMEOUT_MS (20 s) : un appel de tool
+      // légitime peut occuper 20 s, une grâce plus courte couperait exactement
+      // les appels lents qu'on cherche à protéger.
+      stopGrace: '30s',
+      deploy: deployBlock({ replicas: ha ? 2 : 1, constraint: appConstraint, spread: ha }),
+    }),
   );
 }
 
@@ -664,7 +752,37 @@ http:
       priority: 100
       middlewares: [security-headers, compress]
       tls: {}
-${celluleRouters ? celluleRouters + '\n' : ''}    api:
+${celluleRouters ? celluleRouters + '\n' : ''}    # --- Serveur MCP (connecteur IA) ---
+    # Priorité 150 EXPLICITE, ne pas la « simplifier » : la priorité par défaut
+    # de Traefik est la longueur de règle, or PathPrefix(\`/api\`) et
+    # PathPrefix(\`/mcp\`) font tous deux 18 caractères — l'ordre serait une
+    # égalité non déterministe qu'une édition de l'une des chaînes changerait
+    # silencieusement. 150 passe sous internal-deny (200) et au-dessus de api.
+    # ⚠ Les routers de cellule ci-dessus sont à 50 : si un jour on ajoute des
+    # cellules MCP par tenant, il leur faudra 160+ sinon leur /mcp serait
+    # capturé par le MCP pooled.
+    mcp:
+      rule: "PathPrefix(\`/mcp\`)"
+      entryPoints: [web, websecure]
+      service: mcp
+      priority: 150
+      middlewares: [security-headers]
+      tls: {}
+    mcp-meta:
+      rule: "PathPrefix(\`/.well-known/oauth-protected-resource\`)"
+      entryPoints: [web, websecure]
+      service: mcp
+      priority: 150
+      middlewares: [security-headers]
+      tls: {}
+    oauth-meta:
+      rule: "PathPrefix(\`/.well-known/oauth-authorization-server\`)"
+      entryPoints: [web, websecure]
+      service: controlplane
+      priority: 150
+      middlewares: [security-headers]
+      tls: {}
+    api:
       rule: "PathPrefix(\`/api\`)"
       entryPoints: [web, websecure]
       service: api
@@ -697,6 +815,14 @@ ${celluleServices ? celluleServices + '\n' : ''}    api:
       loadBalancer:
         servers:
           - url: "http://web:80"
+    # Un seul server entry : le VIP Swarm équilibre entre les réplicas mcp.
+    # D'où l'absence de loadBalancer.healthCheck — Traefik ne voit que le VIP,
+    # jamais les réplicas, donc une sonde ici ne pourrait que marquer le service
+    # entier up/down. La santé par réplica est gérée par le healthcheck Swarm.
+    mcp:
+      loadBalancer:
+        servers:
+          - url: "http://mcp:8080"
 
 tls:
   stores:
@@ -982,10 +1108,10 @@ echo "  Postgres password → .pg-creds (keep it: psql, backups, restore)"
 if ${imageSource === 'build' ? 'true' : 'false'}; then
 echo "=== 4) Images: build on the node ==="
 SSH "\$NODE_IP" "mkdir -p \$REMOTE/src"
-for d in package.json package-lock.json tsconfig.base.json packages api web worker; do
+for d in package.json package-lock.json tsconfig.base.json packages api web worker mcp; do
   [ -e "\$ROOT/\$d" ] && SCP "\$NODE_IP" "\$ROOT/\$d" "\$REMOTE/src/" || true
 done
-SUDO "\$NODE_IP" "cd \$REMOTE/src && for s in api web worker; do docker build -t vaks-pm/\\\$s:latest -f \\\$s/Dockerfile . ; done"
+SUDO "\$NODE_IP" "cd \$REMOTE/src && for s in api web worker mcp; do docker build -t vaks-pm/\\\$s:latest -f \\\$s/Dockerfile . ; done"
 else
 echo "=== 4) Images : pull ${imagePrefix}-{api,web,worker}:${imageTag} at deploy time (docker stack deploy) ==="
 echo "  (private/mirror registry: run 'docker login' + deploy with --with-registry-auth)"
@@ -1167,11 +1293,11 @@ echo "  S3 access key (stack + Garage) : \$S3_ACCESS"
 if ${imageSource === 'build' ? 'true' : 'false'}; then
 echo "=== 4) Images: build on the manager + distribute to the other nodes ==="
 SSH "\$MANAGER_IP" "mkdir -p \$REMOTE/src"
-for d in package.json package-lock.json tsconfig.base.json packages api web worker; do
+for d in package.json package-lock.json tsconfig.base.json packages api web worker mcp; do
   [ -e "\$ROOT/\$d" ] && SCP "\$MANAGER_IP" "\$ROOT/\$d" "\$REMOTE/src/" || true
 done
-SUDO "\$MANAGER_IP" "cd \$REMOTE/src && for s in api web worker; do docker build -t vaks-pm/\\\$s:latest -f \\\$s/Dockerfile . ; done"
-SUDO "\$MANAGER_IP" "docker save vaks-pm/api:latest vaks-pm/web:latest vaks-pm/worker:latest -o /tmp/vakspm-imgs.tar && chown \${VM_USER}:\${VM_USER} /tmp/vakspm-imgs.tar"
+SUDO "\$MANAGER_IP" "cd \$REMOTE/src && for s in api web worker mcp; do docker build -t vaks-pm/\\\$s:latest -f \\\$s/Dockerfile . ; done"
+SUDO "\$MANAGER_IP" "docker save vaks-pm/api:latest vaks-pm/web:latest vaks-pm/worker:latest vaks-pm/mcp:latest -o /tmp/vakspm-imgs.tar && chown \${VM_USER}:\${VM_USER} /tmp/vakspm-imgs.tar"
 TARTMP="\$(mktemp)"; scp \$SSHOPT "\${VM_USER}@\$MANAGER_IP:/tmp/vakspm-imgs.tar" "\$TARTMP"
 while IFS='|' read -r name ip isdb ismgr; do
   [ "\$ip" = "\$MANAGER_IP" ] && continue

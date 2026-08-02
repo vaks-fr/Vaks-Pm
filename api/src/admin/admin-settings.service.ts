@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { normalizeAgentPolicies } from '@vaks-pm/shared';
+import { normalizeAgentBrief } from '../agents/context/agent-brief';
 import type { LicenseFeature } from '@vaks-pm/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
@@ -290,6 +291,19 @@ export class AdminSettingsService {
         values['agents.policies'] = normalized as unknown;
       }
     }
+    if ('agents.briefDefault' in values) {
+      const raw = values['agents.briefDefault'];
+      if (raw != null && raw !== '') {
+        if (typeof raw !== 'object' || Array.isArray(raw)) {
+          throw new BadRequestException(
+            'agents.briefDefault doit être un objet { role, outputConventions, deliveryTarget, outOfScope }.',
+          );
+        }
+        // Persiste la version normalisée : clés inconnues jetées, champs trimés
+        // et capés. Un brief tout-vide devient `null` plutôt qu'un objet creux.
+        values['agents.briefDefault'] = normalizeAgentBrief(raw) as unknown;
+      }
+    }
     if (
       'agents.backpressure.maxPendingReviews' in values &&
       values['agents.backpressure.maxPendingReviews'] != null &&
@@ -302,6 +316,22 @@ export class AdminSettingsService {
         );
       }
       values['agents.backpressure.maxPendingReviews'] = n;
+    }
+    // Bail d'exécution (lot A) : minutes. `0` = désactivé (choix explicite) ;
+    // sinon borné [5, 1440] — un bail d'une minute faucherait un agent au
+    // travail, un bail d'une semaine ne libère jamais rien.
+    if (
+      'agents.executionLeaseMinutes' in values &&
+      values['agents.executionLeaseMinutes'] != null &&
+      values['agents.executionLeaseMinutes'] !== ''
+    ) {
+      const n = Number(values['agents.executionLeaseMinutes']);
+      if (!Number.isInteger(n) || n < 0 || n > 1440 || (n > 0 && n < 5)) {
+        throw new BadRequestException(
+          'agents.executionLeaseMinutes : 0 (désactivé) ou entier entre 5 et 1440 minutes.',
+        );
+      }
+      values['agents.executionLeaseMinutes'] = n;
     }
   }
 
@@ -626,6 +656,7 @@ export class AdminSettingsService {
     this.validateAuditSettings(values);
     this.validateTeamsProvisioningSettings(values);
     this.validateAgentSettings(values);
+    this.validateMcpSettings(values);
     validateAutomationSettings(values);
     this.validateCustomFieldSettings(values);
     await this.assertLicensedToggles(values);
@@ -785,6 +816,18 @@ export class AdminSettingsService {
     const v = await this.getValue(orgId, 'weekStart');
     if (typeof v === 'string' && v.toLowerCase() === 'sunday') return 'sunday';
     return 'monday';
+  }
+
+  /**
+   * Curseur de concentration de l'auto-plan (Lot 2.2, AUTOPLAN_IMPROVEMENTS.md
+   * §2.2) : défaut org, surchargeable par run (`AutoplanRequestDto.concentration`).
+   * Stocké sous la clé `autoplan.concentration`. Défaut `balanced` (comportement
+   * du lot 1b) si non initialisée.
+   */
+  async getAutoplanConcentration(orgId: string): Promise<'focus' | 'balanced' | 'spread'> {
+    const v = await this.getValue(orgId, 'autoplan.concentration');
+    if (v === 'focus' || v === 'balanced' || v === 'spread') return v;
+    return 'balanced';
   }
 
   /** Retourne 7 booléens [mon..sun]. Défaut Mon-Fri. */
@@ -1091,6 +1134,79 @@ export class AdminSettingsService {
     const v = await this.getValue(orgId, 'mcp.allowFinance');
     if (typeof v === 'boolean') return v;
     return v === 'true' || v === 1 || v === '1';
+  }
+
+  /**
+   * Politique de confirmation des actions MCP destructrices.
+   *
+   * ⚠️ Défaut **`destructive`**, et non `off` comme les autres réglages MCP
+   * (`mcp.enabled`, `mcp.allowWrites` sont en opt-in strict). La distinction est
+   * volontaire : ceux-là gatent une **capacité** — l'opt-in strict est le bon
+   * réflexe — tandis que celui-ci est un **garde-fou**, et un garde-fou livré
+   * éteint est un garde-fou que personne n'a. Le pire cas est un aller-retour
+   * supplémentaire et un message lisible, pas un échec.
+   */
+  async getMcpConfirmPolicy(orgId: string): Promise<'off' | 'destructive' | 'all_writes'> {
+    const v = await this.getValue(orgId, 'mcp.confirmPolicy');
+    return v === 'off' || v === 'destructive' || v === 'all_writes' ? v : 'destructive';
+  }
+
+  /**
+   * Quotas d'appel **par tool MCP**, en appels/minute : `{ "<tool>": n, "*": n }`.
+   * `*` sert de défaut pour les tools non listés. Vide = aucun plafond (seul le
+   * palier par jeton d'`ApiThrottlerGuard` s'applique alors).
+   */
+  async getMcpToolQuotas(orgId: string): Promise<Record<string, number>> {
+    const v = await this.getValue(orgId, 'mcp.toolQuotas');
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, raw] of Object.entries(v as Record<string, unknown>)) {
+      const n = Number(raw);
+      if (Number.isInteger(n) && n > 0) out[k] = n;
+    }
+    return out;
+  }
+
+  /**
+   * Validation des réglages `mcp.*`.
+   *
+   * ⚠️ `upsertMany` n'a **aucune allowlist de clés** : n'importe quelle clé
+   * postée est persistée. Ce validateur est donc la seule chose qui empêche un
+   * quota mal orthographié (`vaks_lst_projects`) d'être accepté sans rien
+   * borner — un plafond qu'on croit posé et qui ne s'applique jamais.
+   */
+  private validateMcpSettings(values: Record<string, unknown>) {
+    if ('mcp.confirmPolicy' in values && values['mcp.confirmPolicy'] != null) {
+      const p = values['mcp.confirmPolicy'];
+      if (p !== 'off' && p !== 'destructive' && p !== 'all_writes') {
+        throw new BadRequestException(
+          'mcp.confirmPolicy doit valoir "off", "destructive" ou "all_writes".',
+        );
+      }
+    }
+    if ('mcp.toolQuotas' in values && values['mcp.toolQuotas'] != null) {
+      const raw = values['mcp.toolQuotas'];
+      if (typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new BadRequestException('mcp.toolQuotas doit être un objet { "<tool>": nombre }.');
+      }
+      const normalized: Record<string, number> = {};
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        if (!/^(vaks_[a-z0-9_]{1,60}|\*)$/.test(k)) {
+          throw new BadRequestException(
+            `mcp.toolQuotas : clé invalide « ${k} » (attendu un nom de tool vaks_… ou « * »).`,
+          );
+        }
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 1 || n > 100000) {
+          throw new BadRequestException(
+            `mcp.toolQuotas : valeur invalide pour « ${k} » (entier attendu entre 1 et 100000).`,
+          );
+        }
+        normalized[k] = n;
+      }
+      // Persiste la forme normalisée (même parti pris que `agents.policies`).
+      values['mcp.toolQuotas'] = normalized;
+    }
   }
 
   private async getValue(orgId: string, key: string): Promise<unknown> {

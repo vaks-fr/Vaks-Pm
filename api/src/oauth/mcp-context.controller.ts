@@ -4,6 +4,7 @@ import type { Permission } from '@vaks-pm/shared';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PublicApi } from '../rbac/require-permissions.decorator';
 import { AuthUser, CurrentUser } from '../auth/current-user.decorator';
+import { PrismaService } from '../prisma/prisma.service';
 
 /**
  * Scopes d'écriture exposés via MCP (miroir de `OAuthService.WRITE_SCOPES`).
@@ -40,9 +41,11 @@ const MCP_WRITE_SCOPES: Permission[] = [
  *
  * NB RBAC : **pas** de `@RequirePermissions('mcp:access')` — `mcp:access` est un
  * *scope de jeton* (accordé au consentement), PAS une permission de rôle (elle
- * n'est dans aucun rôle tenant). L'exiger via `@RequirePermissions` la ferait
- * échouer pour tout non-admin (effectif PAT = rôle ∩ scopes). L'endpoint ne
- * révèle que la capacité du jeton appelant → `@PublicApi` suffit comme garde.
+ * n'est dans aucun rôle tenant) NI un gate vérifié au runtime (cf. commentaire
+ * `PERMISSIONS` côté shared : l'accès MCP est gouverné par licence + toggle +
+ * révocation de connexion, pas par ce scope). L'exiger via `@RequirePermissions`
+ * la ferait échouer pour tout non-admin (effectif PAT = rôle ∩ scopes).
+ * L'endpoint ne révèle que la capacité du jeton appelant → `@PublicApi` suffit.
  */
 @ApiTags('mcp')
 @ApiBearerAuth()
@@ -50,9 +53,26 @@ const MCP_WRITE_SCOPES: Permission[] = [
 @PublicApi('mcp:access')
 @Controller('me/mcp-context')
 export class McpContextController {
+  constructor(private readonly prisma: PrismaService) {}
+
   @Get()
-  context(@CurrentUser() user: AuthUser) {
+  async context(@CurrentUser() user: AuthUser) {
     const scopes = user.tokenScopes ?? [];
+    // Langue de l'utilisateur : le serveur MCP en a besoin pour servir les
+    // libellés de prompts et demander une réponse dans la bonne langue. Elle ne
+    // vit ni dans le JWT ni dans `AuthUser` → une lecture ciblée. `null` =
+    // l'utilisateur suit le défaut de l'org (le serveur MCP retombera sur EN).
+    // Best-effort : une langue manquante ne doit pas faire échouer le handshake.
+    let preferredLanguage: string | null = null;
+    try {
+      const row = await this.prisma.user.findUnique({
+        where: { id: user.userId },
+        select: { preferredLanguage: true },
+      });
+      preferredLanguage = row?.preferredLanguage ?? null;
+    } catch {
+      preferredLanguage = null;
+    }
     return {
       scopes,
       write: MCP_WRITE_SCOPES.some((s) => scopes.includes(s)),
@@ -60,6 +80,7 @@ export class McpContextController {
       // porté par un compte agent (kind=AGENT) — permet au serveur MCP et aux
       // clients d'adapter leur comportement (ex. exiger une justification).
       actorKind: user.actorKind ?? 'HUMAN',
+      preferredLanguage,
     };
   }
 }

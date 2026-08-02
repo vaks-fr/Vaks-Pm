@@ -5,7 +5,7 @@
   "baseDomain": "example.com",
   "dbName": "vakspm",
   "deploymentMode": "pooled",
-  "_imageSource": "ghcr = tirer les images publiques ghcr.io/thomasvaxelaire-vaks/vakspm-{api,web,worker}:latest (défaut) ; build = compiler depuis les sources sur les hôtes (air-gapped). Surcharger imagePrefix/imageTag pour un registre miroir.",
+  "_imageSource": "ghcr = tirer les images publiques ghcr.io/vaks-fr/vakspm-{api,web,worker}:latest (défaut) ; build = compiler depuis les sources sur les hôtes (air-gapped). Surcharger imagePrefix/imageTag pour un registre miroir.",
   "imageSource": "ghcr",
   "sshKey": "${SSH_KEY}",
 
@@ -17,6 +17,9 @@
 
   "controlPlane": { "vip": null },
   "infraPlacement": { "redis": "host1", "garage": ["host1", "host2", "host3"] },
+
+  "_mcp": "Facultatif. Domaine(s) public(s) d'un serveur MCP en DMZ (connecteur IA), servant <slug>.<domaine>. Une seule valeur couvre tous les tenants. À renseigner UNIQUEMENT si le domaine public du MCP diffère du domaine interne (ex. app sur vaks.local, MCP sur <slug>.mcp.vaks.fr). Un MCP interne sur le même domaine ne nécessite rien.",
+  "mcp": { "publicDomains": [] },
 
   "tenants": [
     { "slug": "acme", "domain": "acme.example.com", "profile": "dedicated", "ha": true, "placement": "auto" },

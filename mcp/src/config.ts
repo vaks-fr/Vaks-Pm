@@ -16,19 +16,17 @@ export interface McpConfig {
   /** Préfixe global de l'API NestJS. */
   apiPrefix: string;
   /**
-   * Label `mcp` injecté dans le host public du serveur MCP, retiré pour
-   * reconstituer le Host tenant attendu par l'API. Géré en **préfixe** OU en
-   * **infixe** :
-   *   - préfixe  : `mcp.<slug>.<base>` → `<slug>.<base>`
-   *   - infixe   : `<slug>.mcp.<base>` → `<slug>.<base>`   (recommandé : un seul
-   *     wildcard `*.mcp.<base>` couvre tous les tenants en DMZ).
-   * L'API résout le tenant depuis ce Host (mode pooled). En mode dedicated
-   * c'est sans effet (l'API vise la base globale).
+   * @deprecated Plus utilisé pour la résolution du tenant. Le serveur MCP relaie
+   * désormais le **Host public tel quel** ; c'est l'API qui résout le tenant
+   * (sous-domaine canonique, domaine custom, ou `TENANCY_MCP_DOMAINS` pour un MCP
+   * en DMZ sur un domaine distinct). Champ conservé pour ne pas casser un
+   * environnement qui le définit encore.
    */
   mcpLabel: string;
   /**
    * Host tenant forcé (optionnel). S'il est défini, on l'utilise tel quel et on
-   * ignore le Host entrant — utile pour un déploiement dedicated/simple.
+   * ignore le Host entrant — utile pour un déploiement **mono-tenant** où aucun
+   * sous-domaine par tenant n'existe.
    */
   forcedTenantHost: string | null;
   /** Timeout des appels vers l'API (ms). */
@@ -68,28 +66,23 @@ export function loadConfig(): McpConfig {
 }
 
 /**
- * Reconstitue le Host tenant attendu par l'API à partir du Host entrant, en
- * retirant le label `mcp` qu'il soit en **préfixe** (`mcp.demo.vaks-pm.com`) ou
- * en **infixe** (`demo.mcp.vaks-pm.com`) → `demo.vaks-pm.com`. Si
- * `forcedTenantHost` est posé, il l'emporte. Renvoie `undefined` si aucun Host
- * exploitable (l'API tombera sur la base globale en dedicated, rejettera en
- * pooled).
+ * Host à présenter à l'API pour que celle-ci résolve le tenant.
+ *
+ * **Pass-through** : on relaie le Host public **tel quel**. C'est l'API qui
+ * connaît la topologie et résout le tenant depuis ce Host — sous-domaine
+ * canonique `<slug>.<base>`, domaine custom, ou domaine MCP public déclaré dans
+ * `TENANCY_MCP_DOMAINS` (cas du MCP en DMZ sur un domaine distinct de l'interne).
+ * Le serveur MCP n'a donc plus rien à reconstituer ni à deviner.
+ *
+ * `forcedTenantHost` (env `VAKS_TENANT_HOST`) l'emporte : pour un déploiement
+ * **mono-tenant** sans sous-domaine par tenant, on épingle le Host tenant.
+ * Renvoie `undefined` si aucun Host exploitable.
  */
 export function resolveTenantHost(cfg: McpConfig, incomingHost?: string): string | undefined {
   if (cfg.forcedTenantHost) return cfg.forcedTenantHost;
   if (!incomingHost) return undefined;
   const host = incomingHost.toLowerCase().split(':')[0].trim();
-  if (!host) return undefined;
-  const label = cfg.mcpLabel;
-  if (!label) return host;
-  const parts = host.split('.');
-  // Préfixe : `mcp.<slug>.<base>`.
-  if (parts[0] === label && parts.length > 1) return parts.slice(1).join('.');
-  // Infixe : `<slug>.mcp.<base>` (retire le 2e label).
-  if (parts.length > 2 && parts[1] === label) {
-    return [parts[0], ...parts.slice(2)].join('.');
-  }
-  return host;
+  return host || undefined;
 }
 
 /**
@@ -108,8 +101,8 @@ export function resourceOrigin(incomingHost?: string): string {
  *   - `self`  : CE serveur MCP (host entrant). Le client fait tout le flux OAuth
  *     contre le host MCP, qui forwarde `/oauth`, `/login`, le discovery… vers
  *     l'API on-premise (déploiement DMZ — l'API n'est jamais exposée en direct).
- *   - `tenant`: le host tenant (label `mcp` retiré). Le client tape directement
- *     le domaine tenant (déploiement co-localisé, domaine tenant internet-facing).
+ *   - `tenant`: le host tenant. En pass-through, c'est le host entrant — pertinent
+ *     en co-localisé où le domaine tenant est lui-même internet-facing.
  */
 export function authorizationServer(cfg: McpConfig, incomingHost?: string): string {
   if (cfg.authServerMode === 'tenant') {

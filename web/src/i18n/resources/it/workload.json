@@ -95,6 +95,12 @@
     },
     "timeOffButton": "Assenza",
     "timeOffButtonTitle": "Aggiungi / importa giorni di assenza",
+    "replanUser": "Ripianifica {{name}}",
+    "releaseDay": "Libera la giornata di {{name}} — sposta il residuo di oggi a domani",
+    "rowActions": "Azioni",
+    "menuReplan": "Ripianifica questa persona",
+    "menuReleaseDay": "Libera oggi",
+    "releaseDayApplied": "Giornata di {{name}} liberata: {{added}} aggiunte, {{removed}} rimosse.",
     "preserveTitle": "Ciò che l'auto-plan preserva. Il passato e oggi sono sempre congelati; l'auto-plan ripianifica solo a partire da domani.",
     "autoplanProjectTitle": "Piano automatico per il progetto selezionato (da domani — il passato è congelato)",
     "autoplanGlobalTitle": "Piano automatico su tutti i progetti (da domani — il passato è congelato)",
@@ -138,7 +144,15 @@
       "personal": "PERSONAL",
       "generic": "OFF"
     },
-    "chipTitle": "{{project}} · {{task}} — {{hours}}h (doppio clic per aprire)"
+    "chipTitle": "{{project}} · {{task}} — {{hours}}h (doppio clic per aprire)",
+    "legend": {
+      "autoAlloc": "Auto-plan (tratteggiato)",
+      "manualAlloc": "Manuale (pieno)"
+    },
+    "planStale": {
+      "text": "Le attività sono cambiate dall'ultimo auto-plan — il piano mostrato potrebbe non essere aggiornato.",
+      "action": "Rilancia l'auto-plan"
+    }
   },
   "preserve": {
     "manual_autosplit": "Preserva manuale + auto-split",
@@ -171,6 +185,34 @@
       "suggest": "Propone la persona più adatta (competenza + capacità); puoi modificare nell'anteprima prima di applicare.",
       "auto": "Assegna la persona più adatta senza chiedere; confermi all'applicazione."
     },
+    "strategyLabel": "Strategia di posizionamento",
+    "strategy": {
+      "asap": "Il prima possibile",
+      "deadline_aware": "Sensibile alle scadenze"
+    },
+    "strategyDesc": {
+      "asap": "Posiziona ogni attività il prima possibile, arbitrata da priorità/urgenza/competenza.",
+      "deadline_aware": "Aggiunge un passaggio correttivo che tenta di spostare margine a bassa priorità per liberare le attività che mancano la scadenza. Mantenuto solo se riduce strettamente il ritardo totale — altrimenti si conserva il piano \"il prima possibile\"."
+    },
+    "concentrationLabel": "Concentrazione",
+    "concentration": {
+      "focus": "Focus",
+      "balanced": "Bilanciato",
+      "spread": "Disperso"
+    },
+    "concentrationDesc": {
+      "focus": "Favorisce fortemente il riutilizzo delle stesse persone sulle attività di un progetto — meno passaggi di consegna.",
+      "balanced": "Predefinito: raggruppa le attività per competenza/parent condivisi e allarga il nucleo solo se la copertura è insufficiente.",
+      "spread": "Valvola di sicurezza: valuta ogni attività da sola, senza raggruppamento — ripristina il comportamento storico."
+    },
+    "horizonLabel": "Orizzonte di pianificazione",
+    "horizon": {
+      "3m": "3 mesi",
+      "6m": "6 mesi",
+      "1y": "1 anno",
+      "all": "Tutto il progetto"
+    },
+    "scopeUser": "{{name}} — da domani (il passato è congelato).",
     "run": "Avvia anteprima"
   },
   "overtimeModal": {
@@ -197,6 +239,7 @@
     "subtitle_changes_one": "{{proposed}} allocazioni proposte · {{changes}} modifiche che interessano {{count}} persona",
     "subtitle_changes_other": "{{proposed}} allocazioni proposte · {{changes}} modifiche che interessano {{count}} persone",
     "frozenNote": "Pianifica a partire da domani — il passato e oggi sono congelati.",
+    "unfreezeNote": "Oggi è eccezionalmente liberato per {{name}} — il resto del passato resta congelato.",
     "warnings_one": "{{count}} avviso",
     "warnings_other": "{{count}} avvisi",
     "outOfView_one": "<0>{{count}}</0> allocazione fuori dalla vista attuale ({{from}} → {{to}}). Il piano copre l'intero progetto ({{min}} → {{max}}) — navighi nel calendario per vederle.",
@@ -209,9 +252,21 @@
     "reassignTag": "Riassegna",
     "reassignHintTip": "Già assegnata — mantenuta sull'assegnatario attuale per impostazione predefinita. Scegli un'altra persona per riassegnarla.",
     "skillLegend": "⚠ = la persona non ha la competenza richiesta per questo task",
+    "unavailableLegend": "🚫 = non disponibile sulla finestra (assenza lunga) — reintegrato solo se nessun altro candidato qualificato era disponibile",
     "assignWarn_no_qualified": "Nessun candidato qualificato",
     "assignWarn_no_candidates": "Nessun membro del progetto",
     "assignWarn_capacity_short": "Capacità insufficiente",
+    "warnType": {
+      "missing_estimate": "Stima mancante",
+      "deadline_overflow": "Superamento scadenza",
+      "user_saturated": "Persona satura",
+      "unassigned": "Non assegnata",
+      "outside_window": "Fuori finestra",
+      "dependency_cycle": "Ciclo di dipendenze",
+      "agent_assigned": "Assegnata a un agente IA",
+      "all_candidates_unavailable": "Nessun candidato disponibile"
+    },
+    "warnOpenTaskTitle": "Apri il task",
     "hide": "Nascondi",
     "show": "Mostra",
     "noChange": "Il piano attuale corrisponde già all'auto-plan. Niente da applicare.",
@@ -223,7 +278,35 @@
     "applying": "Applicazione…",
     "nothingToApply": "Niente da applicare",
     "apply_one": "Applica {{count}} modifica",
-    "apply_other": "Applica {{count}} modifiche"
+    "apply_other": "Applica {{count}} modifiche",
+    "applySelectionEmpty": "Seleziona almeno una persona",
+    "applySelection_one": "Applica selezione ({{count}} modifica)",
+    "applySelection_other": "Applica selezione ({{count}} modifiche)"
+  },
+  "agents": {
+    "title": "Agenti IA ({{count}})",
+    "concurrency": "Attività simultanee vs il limite dell'agente",
+    "concurrencyOf": "{{active}}/{{max}} attività",
+    "reviewQueue": "Deliverable in attesa di revisione umana — il vero collo di bottiglia",
+    "reviewQueuePending": "{{count}} in attesa di revisione",
+    "budgetScopeDaily": "Giornaliero",
+    "budgetScopeMonthly": "Mensile",
+    "budgetScopeProject": "Progetto",
+    "budgetScopeTask": "Attività",
+    "budgetRemaining": "{{amount}} € rimanenti",
+    "trust": {
+      "DRAFT_ONLY": "Solo bozza",
+      "SUPERVISED": "Supervisionato",
+      "AUTONOMOUS": "Autonomo"
+    }
+  },
+  "assign": {
+    "agentBadge": "Agente IA",
+    "agentBadgeTip": "Il candidato suggerito è un agente IA — mai assegnato senza accettazione umana esplicita.",
+    "agentNeedsValidation": "solo suggerimento — accettalo per assegnare davvero l'agente",
+    "swapAgent": "Assegna a (agente)",
+    "acceptAgent": "Assegna l'agente",
+    "acceptAgentTip": "Accetta questo suggerimento — assegna l'agente IA all'attività (non viene creata alcuna allocazione oraria)."
   },
   "kind": {
     "added": "Aggiunto",

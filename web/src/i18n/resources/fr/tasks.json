@@ -285,9 +285,13 @@
     "task": "Tâche",
     "color": "Couleur",
     "parentGroup": "Groupe parent",
+
+    "parentTask": "Tâche parente",
+
+    "breakdown": "Découpage",
     "noneRoot": "Aucun (racine)",
     "noneRootDash": "— Aucun (racine) —",
-    "noGroupAvailable": "Aucun groupe disponible",
+    "noGroupAvailable": "Aucune tâche disponible",
     "milestone": "Jalon",
     "clickToToggle": "Cliquez pour basculer",
     "yes": "Oui",
@@ -448,13 +452,15 @@
   },
   "dep": {
     "conflictTitle": "Conflit de dépendance",
-    "conflictTooltip": "La start date est antérieure à la due date d'une tâche prédécesseur",
+    "conflictTooltip": "La start date viole une dépendance avec une tâche prédécesseur",
     "endsOn": "se termine le",
+    "startsOn": "commence le",
     "lag": "(lag {{lag}}j)",
     "expectedStart": "→ début attendu au plus tôt le {{date}}.",
     "lateStartTitle": "Démarrage en retard",
-    "lateStartTooltip": "La tâche commence plus tard que la fin de son prédécesseur",
+    "lateStartTooltip": "La tâche commence plus tard qu'exigé par une dépendance",
     "startsAfter": "Commence {{days}}j après la fin de {{title}}",
+    "startsAfterStart": "Commence {{days}}j après le début de {{title}}",
     "holidayTooltip": "Jour férié — l'assigné(e) ne travaillera probablement pas ce jour-là.",
     "holiday": "Férié : {{holidays}}"
   },

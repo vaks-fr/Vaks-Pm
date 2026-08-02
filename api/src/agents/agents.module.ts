@@ -7,6 +7,7 @@ import { EntraAgentProvider } from './providers/entra-agent.provider';
 import { AgentsAdminController, AgentConnectorsAdminController } from './agents-admin.controller';
 import { AgentsPublicController, AgentsMeController } from './agents-public.controller';
 import { PolicyEngineService } from './policy-engine.service';
+import { AgentBudgetService } from './agent-budget.service';
 
 /**
  * Agents IA — chantiers 1 & 3 (AGENTS_ARCHITECTURE.md) : identités
@@ -24,8 +25,9 @@ import { PolicyEngineService } from './policy-engine.service';
     AgentProviderRegistry,
     EntraAgentProvider,
     PolicyEngineService,
+    AgentBudgetService,
   ],
   controllers: [AgentsAdminController, AgentConnectorsAdminController, AgentsPublicController, AgentsMeController],
-  exports: [AgentsService, PolicyEngineService],
+  exports: [AgentsService, PolicyEngineService, AgentBudgetService],
 })
 export class AgentsModule {}

@@ -66,6 +66,11 @@
   "shell.demoResetTitle": "Demo auf den ursprünglichen Datensatz zurücksetzen",
   "shell.demoResetConfirm": "Demo zurücksetzen? Alle Ihre Änderungen gehen verloren.",
   "shell.demoReset": "Zurücksetzen",
+  "shell.demoWelcomeEyebrow": "Demo",
+  "shell.demoWelcomeTitle": "Sie erkunden eine Demo, die in Ihrem Browser läuft",
+  "shell.demoWelcomeBody": "Diese Version läuft vollständig in Ihrem Browser, um Ihnen einen Eindruck von der Oberfläche und den Möglichkeiten von VAKS PM zu geben. Sie ist mit keiner echten Instanz verbunden und spiegelt nicht unbedingt alle neuesten Funktionen wider. Manches Verhalten mag ungewohnt oder unvollständig wirken — fragen Sie uns gerne nach einer Demo für weitere Details.",
+  "shell.demoWelcomeCta": "Demo anfragen",
+  "shell.demoWelcomeDismiss": "Verstanden",
   "shell.everyone": "Alle",
   "shell.taskCount": "{{count}} Aufgaben",
   "shell.createFirstProject": "Erstellen Sie Ihr erstes Projekt",
@@ -207,5 +212,15 @@
   "noSeat.title": "Kein Lizenzplatz",
   "noSeat.body": "Ihr Konto hat noch keinen Lizenzplatz, daher können Sie nicht auf die App zugreifen. Bitten Sie einen Administrator, Ihnen einen Platz zuzuweisen.",
   "noSeat.signedInAs": "Angemeldet als {{email}}",
-  "nav.agents": "KI-Agenten"
+  "nav.agents": "KI-Agenten",
+  "depType.pickerLabel": "Abhängigkeitstyp",
+  "depType.changeLabel": "Abhängigkeitstyp ändern",
+  "depType.FS.label": "Ende → Anfang",
+  "depType.FS.help": "Der Nachfolger kann erst starten, wenn der Vorgänger abgeschlossen ist.",
+  "depType.SS.label": "Anfang → Anfang",
+  "depType.SS.help": "Der Nachfolger kann erst starten, wenn der Vorgänger gestartet ist (beide können parallel laufen).",
+  "depType.FF.label": "Ende → Ende",
+  "depType.FF.help": "Der Nachfolger kann erst enden, wenn der Vorgänger abgeschlossen ist — beide enden zusammen.",
+  "depType.SF.label": "Anfang → Ende",
+  "depType.SF.help": "Der Nachfolger kann erst enden, wenn der Vorgänger gestartet ist — selten, begrenzt eine Übergabe."
 }

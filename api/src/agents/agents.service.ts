@@ -26,6 +26,7 @@ import { RolesService } from '../admin/roles.service';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
 import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { LicenseService } from '../licensing/license.service';
 import { RemoteAgent } from './agent-directory.types';
 
 /** Acteur d'une mutation (audit). */
@@ -76,6 +77,7 @@ export class AgentsService {
     private readonly roles: RolesService,
     private readonly apiTokens: ApiTokensService,
     private readonly audit: AuditLogService,
+    private readonly licenses: LicenseService,
   ) {}
 
   // ---------- Helpers ----------
@@ -534,6 +536,9 @@ export class AgentsService {
     const name = dto.name?.trim();
     if (!name) throw new BadRequestException('Nom requis');
     if (!dto.ownerId) throw new BadRequestException('ownerId requis (owner humain obligatoire)');
+    // Quota freemium : borne le NOMBRE d'identités agents (5 gratuites, illimité
+    // sous licence `agents`). Ne touche pas l'opération des agents existants.
+    await this.licenses.assertAgentSlotAvailable(orgId, 1);
     await this.assertOwner(orgId, dto.ownerId);
     const capabilities = this.sanitizeCapabilities(dto.capabilities) ?? [];
     const trustLevel = this.sanitizeTrust(dto.trustLevel) ?? 'DRAFT_ONLY';
@@ -751,6 +756,9 @@ export class AgentsService {
       return { agent: out, created: false };
     }
 
+    // Branche INSERT uniquement (un upsert qui met à jour n'ajoute pas de slot) :
+    // le quota freemium borne la création d'une nouvelle identité agent.
+    await this.licenses.assertAgentSlotAvailable(orgId, 1);
     const role = await this.roles.findByKey(orgId, 'ORG_MEMBER').catch(() => null);
     const email = await this.uniqueAgentEmail(orgId, name);
     const created = await this.prisma.user.create({
@@ -900,9 +908,14 @@ export class AgentsService {
     remote: RemoteAgent[],
     defaultOwnerId: string | null,
     actor: AgentMutationActor,
-  ): Promise<{ created: number; updated: number; suspended: number; skipped: number }> {
-    let created = 0, updated = 0, suspended = 0, skipped = 0;
+  ): Promise<{ created: number; updated: number; suspended: number; skipped: number; skippedOverLimit: number }> {
+    let created = 0, updated = 0, suspended = 0, skipped = 0, skippedOverLimit = 0;
     const role = await this.roles.findByKey(orgId, 'ORG_MEMBER').catch(() => null);
+    // Quota freemium : on borne la CRÉATION de nouvelles identités, mais un sync
+    // ne doit jamais échouer en bloc — au-delà du plafond, on compte les agents
+    // non créés dans `skippedOverLimit` (miroir souple du seat-pending SCIM).
+    const cap = await this.licenses.agentLimit(); // null = illimité
+    let used = cap == null ? 0 : await this.licenses.agentsUsed(orgId);
 
     for (const r of remote) {
       // Owner : natif d'abord, sinon défaut connecteur.
@@ -946,6 +959,8 @@ export class AgentsService {
         else updated++;
         continue;
       }
+      // Création d'une NOUVELLE identité : refusée en douceur au-delà du plafond.
+      if (cap != null && used >= cap) { skippedOverLimit++; continue; }
       const email = await this.uniqueAgentEmail(orgId, r.displayName);
       await this.prisma.user.create({
         data: {
@@ -971,6 +986,7 @@ export class AgentsService {
         },
       });
       created++;
+      used++;
     }
 
     void this.audit.logCritical({
@@ -981,11 +997,11 @@ export class AgentsService {
       actorLabel: actor.email ?? null,
       resourceType: 'agentConnector',
       resourceLabel: provider,
-      detail: { provider, created, updated, suspended, skipped },
+      detail: { provider, created, updated, suspended, skipped, skippedOverLimit },
     });
     this.log.log(
-      `[agents] sync ${provider} (org=${orgId}): created=${created} updated=${updated} suspended=${suspended} skipped=${skipped}`,
+      `[agents] sync ${provider} (org=${orgId}): created=${created} updated=${updated} suspended=${suspended} skipped=${skipped} skippedOverLimit=${skippedOverLimit}`,
     );
-    return { created, updated, suspended, skipped };
+    return { created, updated, suspended, skipped, skippedOverLimit };
   }
 }

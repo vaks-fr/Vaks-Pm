@@ -226,7 +226,10 @@ export function toVaksColumn(c: BoardColumnDto): Column {
   return {
     id: c.id,
     name: c.name,
-    status: STATUS_LABEL[c.status],
+    // Fallback 'todo' si un statut inconnu apparaît (nouveau statut backend non
+    // encore mappé) → la tâche reste visible sur le board au lieu de disparaître
+    // silencieusement (audit frontend 2026-08-02 ; cf. piège status maps).
+    status: STATUS_LABEL[c.status] ?? 'todo',
     wip: c.wipLimit,
   };
 }

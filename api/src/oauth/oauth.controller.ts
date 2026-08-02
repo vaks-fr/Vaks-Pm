@@ -47,7 +47,9 @@ export class OAuthController {
   // ---- DCR (RFC 7591) ----
   @Post('auth/oauth/register')
   @Throttle({ default: { ttl: 60_000, limit: 20 } })
-  register(@Body() body: { redirect_uris?: unknown; client_name?: unknown }) {
+  register(
+    @Body() body: { redirect_uris?: unknown; client_name?: unknown; application_type?: unknown },
+  ) {
     return this.oauth.registerClient(body);
   }
 

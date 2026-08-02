@@ -32,6 +32,7 @@ export class AdminSettingsController {
       skillsLevelScale,
       skillsLevelInputMode,
       fiscalYearStartMonth,
+      autoplanConcentration,
     ] = await Promise.all([
       this.svc.getDefaultLocale(user.orgId),
       this.svc.getDefaultLanguage(user.orgId),
@@ -43,6 +44,7 @@ export class AdminSettingsController {
       this.svc.getSkillsLevelScale(user.orgId),
       this.svc.getSkillsLevelInputMode(user.orgId),
       this.svc.getFiscalYearStartMonth(user.orgId),
+      this.svc.getAutoplanConcentration(user.orgId),
     ]);
     return {
       locale,
@@ -55,6 +57,7 @@ export class AdminSettingsController {
       skillsLevelScale,
       skillsLevelInputMode,
       fiscalYearStartMonth,
+      autoplanConcentration,
     };
   }
 

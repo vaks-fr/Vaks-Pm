@@ -45,6 +45,7 @@ import SsoSection from './SsoSection';
 import TicketingConnectorsSection from './TicketingConnectorsSection';
 import AgentsSection from './AgentsSection';
 import AgentPoliciesSection from './AgentPoliciesSection';
+import AgentRunsSection from './AgentRunsSection';
 import AgentConnectorsSection from './AgentConnectorsSection';
 import CiConnectorsSection from './CiConnectorsSection';
 import AgentTrustIssuersSection from './AgentTrustIssuersSection';
@@ -77,6 +78,7 @@ const SETTING_KEY: Record<string, string> = {
   hoursPerDay: 'hoursPerDay',
   defaultWorkDays: 'defaultWorkDays',
   weekStart: 'weekStart',
+  'autoplan.concentration': 'autoplanConcentration',
   'holidays.defaultCountry': 'holidayCountry',
   'finance.fiscalYearStartMonth': 'fiscalYearStart',
   aiEnabled: 'aiEnabled',
@@ -198,6 +200,8 @@ const SETTING_KEY: Record<string, string> = {
   'automations.projectInactive.days': 'autoProjectInactiveDays',
   'automations.autoplanOverflow.enabled': 'autoAutoplanOverflowEnabled',
   'automations.timeOffConflict.enabled': 'autoTimeOffConflictEnabled',
+  'automations.allocationWindowMissed.enabled': 'autoAllocationWindowMissedEnabled',
+  'automations.allocationWindowMissed.graceDays': 'autoAllocationWindowMissedGraceDays',
   'automations.skillGapOnCreate.enabled': 'autoSkillGapEnabled',
   'automations.agentBudget.enabled': 'autoAgentBudgetEnabled',
   'automations.agentBudget.thresholdPct': 'autoAgentBudgetThreshold',
@@ -206,6 +210,7 @@ const SETTING_KEY: Record<string, string> = {
 };
 const GROUP_KEY: Record<string, string> = {
   identity: 'identity',
+  aiAgentManagement: 'aiAgentManagement',
   org: 'org',
   integrations: 'integrations',
   security: 'security',
@@ -220,7 +225,8 @@ const SECTION_KEY: Record<string, string> = {
   Accounts: 'accounts',
   Users: 'users',
   Agents: 'agents',
-  'Agent policies': 'agentPolicies',
+  Policies: 'agentPolicies',
+  'Usage & cost ledger': 'agentRuns',
   Teams: 'teams',
   Roles: 'roles',
   'Single sign-on': 'sso',
@@ -3972,7 +3978,7 @@ export interface AdminPanelProps {
 }
 
 /** Sections réservées à l'« AI administrator » (mode restreint). */
-const AGENT_SECTION_KINDS = new Set(['agentlist', 'agentconnectors', 'agentpolicies', 'ciconnectors', 'agenttrustissuers']);
+const AGENT_SECTION_KINDS = new Set(['agentlist', 'agentconnectors', 'agentpolicies', 'agentruns', 'ciconnectors', 'agenttrustissuers']);
 
 export function AdminPanel({ onExit, lockedNoSeat, agentAdminOnly }: AdminPanelProps) {
   const { t } = useTranslation('admin');
@@ -4578,6 +4584,7 @@ export function AdminPanel({ onExit, lockedNoSeat, agentAdminOnly }: AdminPanelP
     if (sec.kind === 'ticketingconnectors') return <TicketingConnectorsSection flash={flash} />;
     if (sec.kind === 'agentlist') return <AgentsSection flash={flash} />;
     if (sec.kind === 'agentpolicies') return <AgentPoliciesSection flash={flash} />;
+    if (sec.kind === 'agentruns') return <AgentRunsSection flash={flash} />;
     if (sec.kind === 'agentconnectors') return <AgentConnectorsSection flash={flash} />;
     if (sec.kind === 'ciconnectors') return <CiConnectorsSection flash={flash} />;
     if (sec.kind === 'agenttrustissuers') return <AgentTrustIssuersSection flash={flash} />;
@@ -4768,7 +4775,9 @@ export function AdminPanel({ onExit, lockedNoSeat, agentAdminOnly }: AdminPanelP
               'awrap' +
               (!results &&
               activeSection &&
-              activeGroup.sections.find((s) => s.title === activeSection)?.kind === 'userlist'
+              ['userlist', 'agentruns'].includes(
+                activeGroup.sections.find((s) => s.title === activeSection)?.kind ?? '',
+              )
                 ? ' awrap--wide'
                 : '')
             }

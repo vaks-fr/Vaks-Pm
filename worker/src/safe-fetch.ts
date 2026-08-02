@@ -1,5 +1,7 @@
 import { isIP } from 'node:net';
 import { lookup as dnsLookup } from 'node:dns/promises';
+import { lookup as dnsLookupCb, LookupAddress, LookupAllOptions, LookupOneOptions } from 'node:dns';
+import { Agent } from 'undici';
 
 /**
  * Garde anti-SSRF autonome (le worker est un package séparé, sans accès à
@@ -7,6 +9,15 @@ import { lookup as dnsLookup } from 'node:dns/promises';
  * résout le DNS, et suit les redirects manuellement en re-validant chaque saut.
  * Indispensable côté worker : c'est lui qui POST réellement les webhooks vers
  * des URLs choisies par le tenant.
+ *
+ * Anti DNS-rebinding : `assertSafe` valide le DNS AVANT chaque saut, mais
+ * `fetch` (undici) re-résout l'hôte indépendamment à la connexion — fenêtre
+ * TOCTOU où un tenant qui contrôle le DNS de sa cible peut servir une IP
+ * publique à la validation puis une IP privée/metadata au connect. On ferme
+ * cette fenêtre avec un `Agent` undici dont le `connect.lookup` applique les
+ * MÊMES prédicats et renvoie l'IP validée à la connexion — validation et
+ * connexion utilisent donc la même résolution DNS. Le Host/SNI reste
+ * l'hostname (undici s'en charge), on ne réécrit jamais l'URL en https://<ip>.
  */
 
 function isPrivateV4(ip: string): boolean {
@@ -77,9 +88,61 @@ async function assertSafe(raw: string): Promise<URL> {
   return u;
 }
 
+type NodeLookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address: string | LookupAddress[],
+  family?: number,
+) => void;
+
+/**
+ * `dns.lookup`-compatible, épinglé anti-SSRF : résout l'hôte, rejette si UNE
+ * des adresses (A/AAAA) est privée/bloquée (même sémantique que `assertSafe`),
+ * sinon renvoie l'adresse validée à l'appelant (ici : l'`Agent` undici au
+ * moment du `connect`). C'est cette résolution — pas celle d'`assertSafe` —
+ * qui ferme réellement la fenêtre TOCTOU du DNS-rebinding.
+ */
+function pinnedLookup(
+  hostname: string,
+  options: LookupOneOptions | LookupAllOptions | NodeLookupCallback,
+  callback?: NodeLookupCallback,
+): void {
+  const cb = typeof options === 'function' ? options : (callback as NodeLookupCallback);
+  const opts = typeof options === 'function' ? {} : options;
+  dnsLookupCb(hostname, { all: true }, (err, addresses) => {
+    if (err) {
+      cb(err, '');
+      return;
+    }
+    const all = addresses as unknown as LookupAddress[];
+    if (all.length === 0) {
+      cb(new Error('Hôte introuvable (DNS).'), '');
+      return;
+    }
+    if (all.some((a) => isPrivateIp(a.address))) {
+      cb(new Error('Cible interne/privée interdite (anti-SSRF, DNS).'), '');
+      return;
+    }
+    if ((opts as LookupAllOptions).all) {
+      cb(null, all);
+      return;
+    }
+    const first = all[0];
+    cb(null, first.address, first.family);
+  });
+}
+
+/**
+ * `Agent` undici dédié : sockets connectés exclusivement via `pinnedLookup`.
+ * Module-level (réutilisé/keep-alive entre requêtes) — un socket réutilisé
+ * reste sur l'IP déjà validée, aucune re-résolution tant qu'il vit.
+ */
+const ssrfDispatcher = new Agent({ connect: { lookup: pinnedLookup } });
+
 /**
  * `fetch` durci anti-SSRF : valide+résout la cible avant chaque saut et suit les
- * redirects manuellement en re-validant le `Location`.
+ * redirects manuellement en re-validant le `Location`. La connexion elle-même
+ * passe par `ssrfDispatcher`, qui re-valide l'IP au `connect` — anti
+ * DNS-rebinding (cf. commentaire d'en-tête).
  */
 export async function safeFetch(
   raw: string,
@@ -89,7 +152,11 @@ export async function safeFetch(
   let url = raw;
   for (let hop = 0; hop <= maxRedirects; hop++) {
     await assertSafe(url);
-    const res = await fetch(url, { ...rest, redirect: 'manual' });
+    const res = await fetch(url, {
+      ...rest,
+      redirect: 'manual',
+      dispatcher: ssrfDispatcher,
+    } as unknown as RequestInit);
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get('location');
       if (!loc) return res;

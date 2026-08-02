@@ -159,6 +159,21 @@ export function ProjectDocumentsTab({ projectId, pushToast }: Props) {
     }
   };
 
+  /**
+   * Marque/démarque un DOSSIER comme « contexte IA ». L'exposition effective de
+   * son contenu est recalculée côté serveur (héritage descendant), d'où le
+   * `reload()` plutôt qu'une mise à jour optimiste locale : les documents et
+   * sous-dossiers changent d'état en même temps.
+   */
+  const toggleFolderAi = async (f: ProjectDocumentFolderDto) => {
+    try {
+      await api.updateProjectFolder(projectId, f.id, { aiContext: !f.aiContext });
+      reload();
+    } catch (e) {
+      pushToast((e as Error).message, true);
+    }
+  };
+
   const toggleAi = async (d: ProjectDocumentDto) => {
     // Optimiste.
     setDocs((cur) => cur.map((x) => (x.id === d.id ? { ...x, aiContext: !x.aiContext } : x)));
@@ -280,8 +295,29 @@ export function ProjectDocumentsTab({ projectId, pushToast }: Props) {
                 </button>
               )}
               <span className="doc-meta mono">{t('documents.folder')}</span>
-              <span className="doc-meta" />
+              <span className="doc-meta truncate">
+                {f.aiContextEffective && !f.aiContext
+                  ? t('documents.aiFolderInherited', { defaultValue: 'AI context (inherited)' })
+                  : f.aiContext
+                    ? t('documents.aiFolderOn', { defaultValue: 'AI context' })
+                    : ''}
+              </span>
               <div className="doc-actions">
+                {/* Marquer le DOSSIER : tout son contenu (et ses sous-dossiers)
+                    devient contexte agent, sans cocher fichier par fichier. */}
+                <button
+                  className="icon-btn"
+                  title={
+                    f.aiContext
+                      ? t('documents.aiFolderOffAction', { defaultValue: 'Stop exposing this folder to agents' })
+                      : t('documents.aiFolderOnAction', { defaultValue: 'Expose this folder to agents' })
+                  }
+                  aria-pressed={!!f.aiContext}
+                  onClick={() => toggleFolderAi(f)}
+                  style={f.aiContextEffective ? { color: 'var(--accent)' } : undefined}
+                >
+                  <Icon name="zap" size={13} />
+                </button>
                 <button
                   className="icon-btn"
                   title={t('documents.rename')}
@@ -312,12 +348,27 @@ export function ProjectDocumentsTab({ projectId, pushToast }: Props) {
                 {d.uploadedBy ? ` · ${d.uploadedBy.name}` : ''}
               </span>
               <div className="doc-actions">
+                {/* Exposé par HÉRITAGE (dossier) : on grise le toggle — le
+                    retirer suppose de sortir le document du dossier. */}
                 <button
                   className="icon-btn"
-                  title={d.aiContext ? t('documents.aiOn') : t('documents.aiOff')}
-                  aria-pressed={d.aiContext}
-                  onClick={() => toggleAi(d)}
-                  style={d.aiContext ? { color: 'var(--accent)' } : undefined}
+                  disabled={d.aiContextSource === 'folder'}
+                  title={
+                    d.aiContextSource === 'folder'
+                      ? t('documents.aiInheritedHint', {
+                          defaultValue: 'Exposed through its folder — move it out to stop this.',
+                        })
+                      : d.aiContext
+                        ? t('documents.aiOn')
+                        : t('documents.aiOff')
+                  }
+                  aria-pressed={d.aiContextEffective ?? d.aiContext}
+                  onClick={() => d.aiContextSource !== 'folder' && toggleAi(d)}
+                  style={
+                    d.aiContextEffective ?? d.aiContext
+                      ? { color: 'var(--accent)', opacity: d.aiContextSource === 'folder' ? 0.55 : 1 }
+                      : undefined
+                  }
                 >
                   <Icon name="zap" size={14} />
                 </button>

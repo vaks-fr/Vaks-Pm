@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { ApiClient, VaksApiError } from './api-client.js';
+import { ApiClient, VaksApiError, withCallContext } from './api-client.js';
+import { CONFIRM_TOOLS } from './confirm-tools.js';
 
 /**
  * Tools MCP de l'incrément 1 — **lecture seule**. Chacun n'est qu'un appel à un
@@ -17,12 +18,46 @@ async function run(fn: () => Promise<unknown>) {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
   } catch (e) {
+    if (e instanceof VaksApiError) {
+      const challenge = confirmationChallenge(e);
+      if (challenge) return challenge;
+    }
     const msg = e instanceof VaksApiError ? e.message : (e as Error).message;
     return {
       isError: true,
       content: [{ type: 'text' as const, text: msg }],
     };
   }
+}
+
+/**
+ * Rend un défi de confirmation (409 `CONFIRMATION_REQUIRED`) comme un résultat
+ * **normal**, et non comme une erreur.
+ *
+ * Ce n'est pas cosmétique : un agent qui reçoit `isError: true` s'excuse très
+ * souvent et s'arrête là, alors qu'un résultat ordinaire énonçant l'étape
+ * suivante est suivi. Le but du garde-fou est que l'action soit re-formulée,
+ * pas qu'elle soit abandonnée.
+ */
+function confirmationChallenge(e: VaksApiError) {
+  const body = e.body as
+    | { code?: string; confirmToken?: string; impact?: Record<string, unknown>; expiresInSec?: number }
+    | undefined;
+  if (e.status !== 409 || body?.code !== 'CONFIRMATION_REQUIRED' || !body.confirmToken) return null;
+  const t = body.impact?.target as { type?: string; id?: string; label?: string } | undefined;
+  const cible = t?.label ?? (t?.type && t?.id ? `${t.type} ${t.id}` : 'la ressource visée');
+  const lines = [
+    `⚠️ Cette action demande une confirmation explicite avant d'être exécutée.`,
+    ``,
+    `Action  : ${String(body.impact?.tool ?? 'inconnue')}`,
+    `Cible   : ${cible}`,
+    `Validité: ${body.expiresInSec ?? 600} secondes`,
+    ``,
+    `Présentez ceci à l'utilisateur. S'il confirme, rappelez EXACTEMENT le même`,
+    `tool avec les mêmes arguments plus : confirmToken: "${body.confirmToken}"`,
+    `(les arguments doivent être identiques, sinon le jeton est refusé).`,
+  ];
+  return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
 }
 
 /**
@@ -65,6 +100,20 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
             .describe(
               "Pourquoi cette action est effectuée (une phrase). Tracé dans le journal d'audit — fortement recommandé pour les agents.",
             ),
+          // Seulement sur les tools susceptibles d'être challengés : l'ajouter
+          // partout coûterait ~2-3 k tokens de description à chaque tools/list.
+          ...(CONFIRM_TOOLS.has(name)
+            ? {
+                confirmToken: z
+                  .string()
+                  .max(200)
+                  .optional()
+                  .describe(
+                    "À NE PAS inventer. Si un premier appel renvoie une demande de confirmation, " +
+                      "rappeler ce tool avec les MÊMES arguments plus le jeton fourni.",
+                  ),
+              }
+            : {}),
         }
       : def.inputSchema;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -73,12 +122,21 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       { ...def, inputSchema },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async (args: any, extra: any) => {
-        const { justification, ...rest } = (args ?? {}) as Record<string, unknown>;
-        api.setCallContext({
-          tool: name,
-          justification: typeof justification === 'string' && justification.trim() ? justification : undefined,
-        });
-        return handler(rest, extra);
+        const { justification, confirmToken, ...rest } = (args ?? {}) as Record<string, unknown>;
+        // `withCallContext` et non `setCallContext` : un batch JSON-RPC fait
+        // tourner plusieurs handlers en concurrence sur le même `api`, et un
+        // champ mutable ferait attribuer la justification au mauvais tool dans
+        // le journal d'audit (cf. `callContextStore` dans api-client.ts).
+        return withCallContext(
+          {
+            tool: name,
+            justification:
+              typeof justification === 'string' && justification.trim() ? justification : undefined,
+            confirmToken:
+              typeof confirmToken === 'string' && confirmToken.trim() ? confirmToken.trim() : undefined,
+          },
+          () => handler(rest, extra),
+        );
       },
     );
   };
@@ -205,10 +263,22 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
     {
       title: 'Contexte de travail complet d\'une tâche',
       description:
-        "TOUT ce qu'il faut pour bien réaliser une tâche, en UN seul appel : le brief du projet, " +
-        "les garde-fous (ce qu'il ne faut PAS faire, au niveau projet ET tâche), les critères " +
-        "d'acceptation (checklist de revue), le détail de la tâche, le journal des livrables " +
-        "APPROUVÉS des tâches précédentes (continuité), et les commentaires récents. " +
+        "TOUT ce qu'il faut pour bien réaliser une tâche, en UN seul appel : le brief du projet " +
+        "(`project.brief`, markdown composé = rôle/mission, conventions de sortie, où déposer les " +
+        "livrables, hors-périmètre, PLUS les faits que l'application connaît déjà — reviewer, mode " +
+        "de vérification, enjeu, langue — et les notes libres du PM en dernier), le `charter` du " +
+        "projet (périmètre inclus/exclu, livrables, contraintes, critères de succès), les " +
+        "garde-fous (projet ET tâche), les critères d'acceptation (checklist de revue), le détail " +
+        "de la tâche, le journal des livrables APPROUVÉS précédents (continuité), les documents de " +
+        "contexte (`projectDocuments` ; `projectDocumentsMeta.truncated:true` = tout n'est pas " +
+        "listé) et les commentaires récents. " +
+        "Porte AUSSI `upstreamOutputs` : les paires clé/valeur produites par les tâches AMONT " +
+        "(prédécesseurs et sous-tâches) dont le livrable a été APPROUVÉ — endpoint, version, " +
+        "identifiants. Les lire de là plutôt que de les chercher dans le texte des livrables amont. " +
+        "Deux autres blocs décisifs : `reviewFeedback` (si un livrable a été rejeté — la note " +
+        "EXACTE du valideur et l'historique des versions : commencez par là, c'est votre consigne de " +
+        "reprise) et `limits` (bail d'exécution, nombre de rejets restants avant escalade humaine, " +
+        "enveloppes de budget € restantes — si `limits.budget.stop` est vrai, ne produisez plus). " +
         "À APPELER APRÈS avoir revendiqué une tâche, AVANT de produire quoi que ce soit. " +
         "Si un critère est ambigu ou du contexte manque, poser une question via `vaks_post_comment` " +
         "plutôt que de deviner.",
@@ -417,6 +487,23 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   // les usages courants — ceux-ci couvrent le reste.
 
   register(
+    'vaks_export_status',
+    {
+      title: "État d'un export asynchrone",
+      description:
+        "Interroge un export lancé par `vaks_export_start`. Statuts : QUEUED, RUNNING, DONE, " +
+        "FAILED, STALE. Quand DONE, `downloadUrl` donne le lien de téléchargement — il reste " +
+        "soumis au contrôle d'accès, il n'est pas public. Réinterroger toutes les quelques " +
+        "secondes plutôt qu'en boucle serrée.",
+      inputSchema: {
+        jobId: z.string().describe("Identifiant du job renvoyé par `vaks_export_start`."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ jobId }) => run(() => api.get(`exports/${encodeURIComponent(jobId)}`)),
+  );
+
+  register(
     'vaks_list_readable_endpoints',
     {
       title: 'Découvrir les endpoints de lecture disponibles',
@@ -458,8 +545,11 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
         "/api/v1, sans le préfixe). Borné par les droits de l'utilisateur (RBAC) → 403 si non " +
         "autorisé ; lecture seule. Découvrir les chemins via `vaks_list_readable_endpoints`. " +
         "Exemples : « clients », « clients/<id>/contacts », « projects/<id>/gantt », " +
-        "« projects/<id>/dependencies », « timesheet » (params from/to), « projects/<id>/budget ». " +
-        "Préférer les tools dédiés quand ils existent.",
+        "« projects/<id>/dependencies », « timesheet » (params from/to), « users » (annuaire), " +
+        "« me/pending-reviews » (livrables en attente de revue), « projects/<id>/budget-summary » " +
+        "et « projects/<id>/evm » (finance — soumis au toggle org `mcp.allowFinance`, sinon 403). " +
+        "⚠️ « projects/<id>/budget » n'existe qu'en écriture (PUT) : en lecture, utiliser " +
+        "« budget-summary ». Préférer les tools dédiés quand ils existent.",
       inputSchema: {
         path: z.string().min(1).describe('Chemin relatif sous /api/v1 (sans préfixe).'),
         query: z
@@ -542,6 +632,28 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   if (!allowWrite) return;
 
   register(
+    'vaks_export_start',
+    {
+      title: 'Lancer un export asynchrone',
+      description:
+        "Lance un export long et renvoie IMMÉDIATEMENT un identifiant de job — le fichier n'est " +
+        "pas produit dans cet appel. Suivre l'avancement avec `vaks_export_status`, qui donnera " +
+        "un lien de téléchargement une fois DONE. À utiliser quand un export synchrone risque " +
+        "d'être trop long (gros volume). Type disponible : `me_data_json` (toutes vos données " +
+        "personnelles — portabilité RGPD).",
+      inputSchema: {
+        kind: z
+          .enum(['me_data_json'])
+          .describe("Type d'export. `me_data_json` = données personnelles de l'utilisateur."),
+      },
+      // Écriture au sens « consomme des ressources et crée un artefact », d'où
+      // l'héritage automatique du paramètre `justification`.
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async ({ kind }) => run(() => api.post('exports', { kind })),
+  );
+
+  register(
     'vaks_claim_task',
     {
       title: 'Revendiquer une tâche',
@@ -549,7 +661,10 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
         "Revendique une tâche libre (statut TODO) : elle passe en CLAIMED et vous est assignée. " +
         "Opération atomique — si un autre acteur la revendique en même temps, l'un des deux reçoit " +
         "une erreur de conflit. Respecte les budgets de l'agent (tâches simultanées, revendications/jour). " +
-        "Enchaîner ensuite avec une mise à jour de statut vers IN_PROGRESS, puis le travail.",
+        "Enchaîner ensuite avec une mise à jour de statut vers IN_PROGRESS, puis le travail. " +
+        "⚠️ La revendication ouvre un BAIL D'EXÉCUTION à durée limitée : appelez " +
+        "`vaks_execution_heartbeat` régulièrement pendant un travail long, sinon la tâche vous est " +
+        "reprise et remise dans le vivier (`leaseExpiresAt` dans le contexte de travail).",
       inputSchema: {
         taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche à revendiquer.'),
       },
@@ -589,6 +704,145 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ taskId }) => run(() => api.post(`tasks/${taskId}/release`, {})),
+  );
+
+  register(
+    'vaks_request_assistance',
+    {
+      title: "Demander de l'aide sur la tâche en cours",
+      description:
+        "Signale un blocage sur la tâche que vous détenez et **alerte quelqu'un de nommément " +
+        "concerné**, contrairement à un simple commentaire. Trois effets : votre question est postée " +
+        "sur la tâche, une demande de compétence part vers le lead de l'équipe qui couvre la " +
+        "compétence manquante (l'équipe est choisie par le serveur — vous ne désignez personne), et " +
+        "si `pause` est vrai la tâche passe en pause avec votre question pour motif (elle reste à " +
+        "vous, personne ne la reprend, elle attend une réponse humaine). " +
+        "À préférer au fait de deviner : un livrable produit sur une hypothèse fausse coûte un cycle " +
+        "de revue à tout le monde.",
+      inputSchema: {
+        taskId: z.string().uuid().describe('Tâche que vous détenez.'),
+        question: z
+          .string()
+          .min(1)
+          .describe('Ce qui vous bloque, précisément. Sera lu par un humain — soyez concret.'),
+        skillId: z
+          .string()
+          .uuid()
+          .optional()
+          .describe('Compétence manquante (cf. `vaks_list_skills`). Défaut : celle requise par la tâche.'),
+        proposedSkillName: z
+          .string()
+          .optional()
+          .describe("Compétence absente du catalogue, si aucune ne correspond."),
+        pause: z
+          .boolean()
+          .optional()
+          .describe('Mettre la tâche en pause en attendant la réponse (recommandé si vous êtes vraiment bloqué).'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ taskId, question, skillId, proposedSkillName, pause }) =>
+      run(() =>
+        api.post(`tasks/${taskId}/assistance`, { question, skillId, proposedSkillName, pause }),
+      ),
+  );
+
+  register(
+    'vaks_create_subtask',
+    {
+      title: 'Découper la tâche en cours en sous-tâches',
+      description:
+        "Crée une SOUS-TÂCHE de la tâche que vous détenez, quand le travail s'avère trop vaste ou " +
+        "demande une compétence que vous n'avez pas. Contraintes serveur : le parent doit être une " +
+        "tâche que vous avez revendiquée (409/403 sinon), la sous-tâche vit dans le même projet, et " +
+        "on ne descend que d'UN niveau (une sous-tâche ne se redécoupe pas — signalez le besoin en " +
+        "commentaire). Vous ne pouvez pas lui fixer de budget, d'enjeu ni de critères d'acceptation : " +
+        "ce sont des décisions humaines. La sous-tâche naît en TODO et peut être tirée par un autre " +
+        "acteur (`vaks_next_task`) — précisez `requiredSkillId` si elle demande une compétence " +
+        "particulière. Le budget agent du parent COUVRE ses sous-tâches : découper n'ouvre pas " +
+        "d'enveloppe supplémentaire. " +
+        "⚠️ Une sous-tâche est un PASSAGE DE RELAIS : vous savez pourquoi vous découpez, celui qui la " +
+        "reprendra ne le saura pas. La `description` est donc obligatoire et doit suffire à travailler " +
+        "sans vous. Les livrables des sous-tâches comptent pour le parent : celui-ci ne pourra passer " +
+        "en revue que si TOUTES ses sous-tâches sont closes et prouvées au niveau exigé.",
+      inputSchema: {
+        parentTaskId: z.string().uuid().describe('Tâche que vous détenez et qui est découpée.'),
+        title: z.string().min(1).describe('Titre de la sous-tâche.'),
+        description: z
+          .string()
+          .min(60)
+          .describe(
+            "OBLIGATOIRE : ce qu'il y a précisément à faire, ce qui est déjà connu ou décidé, et à " +
+              "quoi ressemble le résultat attendu. Écrivez-la pour quelqu'un qui n'a pas votre contexte.",
+          ),
+        estimateHours: z.number().positive().optional().describe('Charge estimée en heures.'),
+        requiredSkillId: z
+          .string()
+          .uuid()
+          .optional()
+          .describe('Compétence requise (cf. `vaks_list_skills`) — sert au dispatch.'),
+        requiredSkillLevel: z.number().int().min(1).optional().describe('Niveau visé sur cette compétence.'),
+        dueDate: z.string().optional().describe('Échéance (YYYY-MM-DD).'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ parentTaskId, title, description, estimateHours, requiredSkillId, requiredSkillLevel, dueDate }) =>
+      run(async () => {
+        // Le projet n'est pas demandé à l'appelant : il est déduit du parent —
+        // un agent ne choisit pas dans quel projet il ouvre du travail.
+        const parent = (await api.get(`tasks/${parentTaskId}`)) as { projectId?: string };
+        if (!parent?.projectId) throw new Error('Tâche parente introuvable.');
+        return api.post(`projects/${parent.projectId}/tasks`, {
+          parentTaskId,
+          title,
+          description,
+          estimateHours,
+          requiredSkillId,
+          requiredSkillLevel,
+          dueDate,
+        });
+      }),
+  );
+
+  register(
+    'vaks_get_subtasks_summary',
+    {
+      title: 'Synthèse des sous-tâches',
+      description:
+        "État de toutes les sous-tâches d'une tâche + les SORTIES STRUCTURÉES de leurs livrables " +
+        "approuvés, en un appel. À lire AVANT de consolider votre livrable final : `allDone` dit si " +
+        "tout est terminé, `pending` liste les numéros des sous-tâches qui manquent encore. " +
+        "Le bloc `verification` donne le plancher de preuve du parent et le maillon le plus faible de " +
+        "l'arbre : `below` (sous-tâches sous le plancher) et `missing` (sans livrable approuvé) " +
+        "empêcheront la soumission en revue. " +
+        "Consolider trop tôt est le meilleur moyen de se faire renvoyer en corrections.",
+      inputSchema: {
+        taskId: z.string().uuid().describe('Tâche parente (celle que vous détenez).'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ taskId }) => run(() => api.get(`tasks/${taskId}/subtasks`)),
+  );
+
+  register(
+    'vaks_execution_heartbeat',
+    {
+      title: "Prolonger le bail d'exécution",
+      description:
+        "Prolonge le bail de la tâche que vous exécutez — à appeler périodiquement pendant un travail " +
+        "long (traitement de plusieurs minutes, longue chaîne de raisonnement). Sans battement, le bail " +
+        "expire et la tâche est automatiquement rendue au vivier (statut TODO) : un autre acteur la " +
+        "reprendra et votre travail sera perdu. Échoue avec `LEASE_LOST` si vous ne détenez plus la " +
+        "tâche — dans ce cas ARRÊTEZ ce travail au lieu de continuer. " +
+        "La réponse renvoie aussi vos LIMITES courantes (`limits`) : budget restant par enveloppe et " +
+        "nombre de rejets de revue. Si `limits.budget.stop` est vrai, arrêtez de produire et soumettez " +
+        "immédiatement ce que vous avez.",
+      inputSchema: {
+        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche en cours.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ taskId }) => run(() => api.post(`tasks/${taskId}/heartbeat`, {})),
   );
 
   register(
@@ -632,6 +886,18 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
               '`ci_signed` : vaks-pm apparie le résultat CI SIGNÉ reçu par webhook à ce SHA — ' +
               "le `status` que vous déclarez pour `ci_signed` est ignoré au profit du verdict CI réel.",
           ),
+        structuredOutputs: z
+          .record(z.union([z.string(), z.number(), z.boolean(), z.null()]))
+          .optional()
+          .describe(
+            "Sorties STRUCTURÉES du livrable : dictionnaire PLAT clé → valeur scalaire " +
+              '(ex. {"api_endpoint":"https://dev.api/v1","artifact_version":"2.4.0"}). Les tâches ' +
+              "qui dépendent de celle-ci les reliront telles quelles dans leur contexte de travail " +
+              "(`upstreamOutputs`) au lieu de chercher ces valeurs dans votre texte — c'est là que " +
+              "naissent les erreurs. Y mettre les FAITS réutilisables (URL, version, nom de schéma, " +
+              "identifiant), jamais le contenu du document. Propagé en aval seulement si le livrable " +
+              'est APPROUVÉ.',
+          ),
         verification: z
           .object({
             method: z
@@ -649,7 +915,7 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async ({ taskId, title, content, filename, url, summary, commitSha, verification }) =>
+    async ({ taskId, title, content, filename, url, summary, commitSha, verification, structuredOutputs }) =>
       run(() =>
         api.post(`tasks/${taskId}/deliverables`, {
           title,
@@ -659,6 +925,7 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
           justification: summary,
           commitSha,
           verification,
+          structuredOutputs,
         }),
       ),
   );
@@ -746,7 +1013,12 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
         "(concurrence, budget jour/mois, coût max par tâche). Rattacher au `taskId` ET au " +
         "`deliverableId` produit (requis pour passer la tâche en revue si l'org exige la déclaration). " +
         "Fournir un `runKey` stable rend l'appel idempotent : un réessai avec la même clé met à jour le " +
-        "run au lieu de compter le coût deux fois. Vous ne déclarez que vos propres runs.",
+        "run au lieu de compter le coût deux fois. Vous ne déclarez que vos propres runs. " +
+        "⚠️ La réponse porte l'état des enveloppes de coût (`budget`) : si `budget.stop` est vrai, une " +
+        "enveloppe est épuisée — arrêtez de produire, soumettez ce que vous avez et ne revendiquez plus " +
+        "rien. Si `taskReleased` est vrai, la tâche vous a été RETIRÉE (reprise humaine) : cessez " +
+        "immédiatement. Déclarez vos runs au fil de l'eau plutôt qu'à la toute fin — c'est ce qui permet " +
+        "au serveur de vous arrêter avant que la facture ne dérape.",
       inputSchema: {
         taskId: z.string().uuid().optional().describe('Tâche travaillée (optionnel).'),
         deliverableId: z.string().uuid().optional().describe('Livrable produit (à rattacher).'),
@@ -980,8 +1252,12 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       title: 'Mettre à jour une tâche',
       description:
         "Modifie une tâche : statut (faire avancer le travail), titre, description, priorité, " +
-        "estimé, dates. Statuts usuels : TODO, IN_PROGRESS, DONE, ON_HOLD (motif via statusReason). " +
-        "Le serveur valide les transitions de statut autorisées.",
+        "estimé, dates, étiquettes — ET la configuration agent d'une tâche (garde-fous, critères " +
+        "d'acceptation, budget agent). Statuts usuels : TODO, IN_PROGRESS, DONE, ON_HOLD (motif via " +
+        "statusReason). Le serveur valide les transitions de statut autorisées. " +
+        "⚠️ Les champs de gouvernance (`agentGuardrails`, `acceptanceCriteria`, `agentCostBudget`) " +
+        "sont refusés à un jeton d'AGENT — un agent ne fixe pas la barre sur laquelle il est jugé. " +
+        "Ils sont destinés à un humain qui prépare la tâche.",
       inputSchema: {
         taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
         status: z
@@ -1002,6 +1278,29 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
           .array(z.string().uuid())
           .optional()
           .describe('Remplace les étiquettes de la tâche (UUID, cf. `vaks_list_labels`) — optionnel.'),
+        agentGuardrails: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("Garde-fous spécifiques à la tâche pour un agent (complète ceux du projet). Humain seulement."),
+        acceptanceCriteria: z
+          .array(
+            z.object({
+              text: z.string().min(1).max(500).describe("Un critère de « fait »."),
+              done: z.boolean().optional().describe('Coché ou non (défaut false).'),
+            }),
+          )
+          .optional()
+          .describe(
+            'Checklist de revue de la tâche (REMPLACE la liste entière). Sert de grille au reviewer et ' +
+              "cadre l'agent en entrée. Humain seulement.",
+          ),
+        agentCostBudget: z
+          .number()
+          .min(0)
+          .nullable()
+          .optional()
+          .describe('Enveloppe de coût agent (€) de cette tâche. null = pas de plafond. Humain seulement.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -1603,6 +1902,92 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
     async ({ projectId, userId }) => run(() => api.delete(`projects/${projectId}/rates/${userId}`)),
   );
   register(
+    'vaks_add_project_context',
+    {
+      title: 'Créer ou mettre à jour une note de contexte IA sur un projet',
+      description:
+        "Dépose un document TEXTE dans l'espace documents du projet et le marque « contexte IA » : il " +
+        "devient lisible par les agents sur toutes les tâches du projet (compte rendu, décisions " +
+        "d'architecture, glossaire, consignes de style…). Le contenu est passé en clair et le fichier " +
+        "est fabriqué côté serveur. Extensions autorisées via le nom : .md, .txt, .csv, .json, .yaml, " +
+        ".html — un binaire ne peut PAS être créé par ce chemin. Plafond 1 Mo.\n\n" +
+        "**Écriture par NOM, sans identifiant** : si une note textuelle du même nom existe déjà dans " +
+        "le dossier cible, son contenu est REMPLACÉ (la réponse porte `replaced:true`). Plus besoin " +
+        "de récupérer un `docId` au préalable : réappeler ce tool avec le même nom met simplement la " +
+        "note à jour, sans empiler d'homonyme. Pour forcer un second document, passer " +
+        "`onDuplicate:\"create\"`.\n\n" +
+        "Sans `folderId`, la note atterrit dans le dossier « contexte IA » racine du projet s'il en " +
+        "existe un seul, sinon à la racine.",
+      inputSchema: {
+        projectId: z.string().uuid(),
+        name: z
+          .string()
+          .min(1)
+          .max(200)
+          .describe('Nom du fichier, extension comprise (ex. « decisions-archi.md »).'),
+        content: z.string().min(1).describe('Contenu texte de la note de contexte.'),
+        folderId: z
+          .string()
+          .uuid()
+          .optional()
+          .describe('Dossier cible (défaut : dossier « contexte IA » racine, sinon racine).'),
+        aiContext: z
+          .boolean()
+          .optional()
+          .describe('false pour déposer sans exposer aux agents (défaut : true).'),
+        onDuplicate: z
+          .enum(['replace', 'create'])
+          .optional()
+          .describe(
+            "Homonyme dans le dossier cible : « replace » (défaut) met à jour la note existante, " +
+              '« create » force un second document.',
+          ),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ projectId, ...body }) =>
+      run(() => api.post(`projects/${projectId}/documents/text`, body)),
+  );
+  register(
+    'vaks_update_project_context',
+    {
+      title: 'Mettre à jour une note de contexte IA',
+      description:
+        "Remplace le CONTENU d'une note de contexte existante (même document, même id — les agents " +
+        "voient la version à jour), et/ou la déplace, et/ou l'exclut du contexte IA. Refuse les " +
+        "documents non textuels : on ne remplace pas un PDF par du texte. Fournir `content` pour " +
+        "réécrire, `folderId` pour ranger (null = racine), `aiContext: false` pour détacher sans " +
+        "supprimer. Récupérer le `docId` via `vaks_read` sur `projects/<id>/documents`.",
+      inputSchema: {
+        projectId: z.string().uuid(),
+        docId: z.string().uuid(),
+        content: z.string().min(1).optional().describe('Nouveau contenu texte (remplace intégralement).'),
+        folderId: z.string().uuid().nullable().optional(),
+        aiContext: z.boolean().optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ projectId, docId, content, ...rest }) =>
+      run(async () => {
+        // Deux mutations distinctes côté API : le contenu vit dans S3, les
+        // métadonnées en base. On réécrit d'abord, on range ensuite — ainsi un
+        // échec de rangement ne laisse pas un contenu périmé derrière lui.
+        const meta = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
+        if (content === undefined && !Object.keys(meta).length) {
+          throw new Error('Rien à mettre à jour : fournir `content`, `folderId` ou `aiContext`.');
+        }
+        // Toujours renvoyer LE DOCUMENT, jamais la liste : les deux routes
+        // sérialisent le document, on garde donc la dernière écriture faite.
+        const afterText =
+          content !== undefined
+            ? await api.put(`projects/${projectId}/documents/${docId}/text`, { content })
+            : null;
+        return Object.keys(meta).length
+          ? api.patch(`projects/${projectId}/documents/${docId}`, meta)
+          : afterText;
+      }),
+  );
+  register(
     'vaks_set_project_budget',
     {
       title: 'Définir le budget / taux par défaut d\'un projet',
@@ -1625,9 +2010,16 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_update_project',
     {
-      title: 'Modifier un projet (métadonnées)',
+      title: 'Modifier un projet (métadonnées + configuration agents IA)',
       description:
-        'Met à jour nom, description, dates ou client d\'un projet. Pour le STATUT (cycle de vie), utiliser `vaks_set_project_status`.',
+        'Met à jour un projet : métadonnées (nom, description, dates, client) ET toute la ' +
+        "configuration des agents IA (activation, brief, garde-fous, budget, exigence de " +
+        "vérification). Sert typiquement à PRÉPARER un projet pour les agents dans la foulée de sa " +
+        "création. Pour le STATUT (cycle de vie), utiliser `vaks_set_project_status` ; pour le budget " +
+        "financier humain, `vaks_set_project_budget`. " +
+        "⚠️ Activer les agents (`agentsEnabled:true`) EXIGE un brief non vide (`agentContext` ou " +
+        "`agentBrief`) — le serveur refuse sinon. Réservé aux humains : les jetons d'agent n'ont pas " +
+        "la permission de modifier un projet.",
       inputSchema: {
         projectId: z.string().uuid(),
         name: z.string().min(1).optional(),
@@ -1635,6 +2027,56 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
         startDate: z.string().nullable().optional().describe('YYYY-MM-DD ou null pour effacer.'),
         dueDate: z.string().nullable().optional().describe('YYYY-MM-DD ou null pour effacer.'),
         clientId: z.string().uuid().nullable().optional().describe('Rattacher à un client, ou null pour détacher.'),
+        agentsEnabled: z
+          .boolean()
+          .optional()
+          .describe('Ouvrir le projet aux agents IA. Exige un brief (agentContext/agentBrief) non vide.'),
+        agentContext: z
+          .string()
+          .nullable()
+          .optional()
+          .describe('Brief libre (markdown) : rôle des agents, conventions de sortie, où déposer, hors-périmètre.'),
+        agentBrief: z
+          .object({
+            role: z.string().nullable().optional().describe("Rôle et mission de l'agent sur ce projet."),
+            outputConventions: z.string().nullable().optional().describe('Format, style, langue, structure attendue.'),
+            deliveryTarget: z.string().nullable().optional().describe('Où déposer les livrables.'),
+            outOfScope: z.string().nullable().optional().describe("Ce que l'agent ne doit surtout pas faire."),
+          })
+          .nullable()
+          .optional()
+          .describe('Brief STRUCTURÉ (alternative à agentContext) — quatre champs courts.'),
+        agentGuardrails: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("Garde-fous au niveau projet : ce qu'aucun agent ne doit faire ici."),
+        agentAutoCloseOnApproval: z
+          .boolean()
+          .nullable()
+          .optional()
+          .describe('Clôturer automatiquement une tâche à l\'approbation. null = hériter du réglage org.'),
+        agentCostBudget: z
+          .number()
+          .min(0)
+          .nullable()
+          .optional()
+          .describe('Enveloppe totale de coût agent (€) du projet. null = pas de plafond.'),
+        stakes: z
+          .enum(['low', 'medium', 'high', 'critical'])
+          .nullable()
+          .optional()
+          .describe("Enjeu du projet : dérive le niveau de preuve exigé des livrables d'agents."),
+        verificationCapabilities: z
+          .array(z.enum(['tool_output', 'agent_validator', 'ci_signed']))
+          .nullable()
+          .optional()
+          .describe('Méthodes de vérification mécaniques disponibles sur ce projet.'),
+        verificationMode: z
+          .enum(['report_only', 'enforce'])
+          .nullable()
+          .optional()
+          .describe('report_only = journalise ; enforce = bloque sous le plancher. null = hérite de l\'org.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },

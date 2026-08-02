@@ -53,7 +53,10 @@ export class DiagnosticsService {
       generatedAt: new Date().toISOString(),
       generatedBy: ctx.requestedBy ?? null,
       app: {
-        version: process.env.npm_package_version || process.env.APP_VERSION || '0.1',
+        // Version de PUSH (convention `yyyy-mm-dd-nbpushtoday`) injectée au build
+        // via `APP_VERSION` (ARG Dockerfile). Prioritaire sur `npm_package_version`
+        // (non défini quand le conteneur démarre en `node dist/main.js`, pas `npm`).
+        version: process.env.APP_VERSION || process.env.npm_package_version || '0.1',
         commit: process.env.GIT_COMMIT || process.env.APP_COMMIT || null,
         nodeVersion: process.version,
         platform: `${process.platform}/${process.arch}`,

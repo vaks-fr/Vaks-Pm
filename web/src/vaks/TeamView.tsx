@@ -1495,7 +1495,11 @@ export function UserSkillsDialog({
         background: 'rgba(15,16,28,0.5)',
         display: 'grid',
         placeItems: 'center',
-        zIndex: 1000,
+        // Aligné sur la couche modale standard (.md-overlay = 7000) : rendu
+        // après l'overlay parent (frère suivant), il passe devant à z-index
+        // égal. À 1000 il tombait DERRIÈRE une modale qui l'ouvrait (ex. la
+        // fiche agent du dashboard → « Gérer les compétences »).
+        zIndex: 7000,
       }}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();

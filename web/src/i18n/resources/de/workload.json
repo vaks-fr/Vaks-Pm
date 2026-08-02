@@ -95,6 +95,12 @@
     },
     "timeOffButton": "Abwesenheit",
     "timeOffButtonTitle": "Abwesenheitstage hinzufügen / importieren",
+    "replanUser": "{{name}} neu planen",
+    "releaseDay": "{{name}}s Tag freigeben — heutige Restarbeit auf morgen verschieben",
+    "rowActions": "Aktionen",
+    "menuReplan": "Diese Person neu planen",
+    "menuReleaseDay": "Heute freigeben",
+    "releaseDayApplied": "Tag von {{name}} freigegeben: {{added}} hinzugefügt, {{removed}} entfernt.",
     "preserveTitle": "Was der Auto-Plan beibehält. Vergangenheit und heute sind immer eingefroren; der Auto-Plan plant erst ab morgen neu.",
     "autoplanProjectTitle": "Automatischer Plan für das ausgewählte Projekt (ab morgen — die Vergangenheit ist eingefroren)",
     "autoplanGlobalTitle": "Automatischer Plan über alle Projekte (ab morgen — die Vergangenheit ist eingefroren)",
@@ -138,7 +144,15 @@
       "personal": "PERSONAL",
       "generic": "OFF"
     },
-    "chipTitle": "{{project}} · {{task}} — {{hours}}h (Doppelklick zum Öffnen)"
+    "chipTitle": "{{project}} · {{task}} — {{hours}}h (Doppelklick zum Öffnen)",
+    "legend": {
+      "autoAlloc": "Auto-Plan (gestrichelt)",
+      "manualAlloc": "Manuell (durchgezogen)"
+    },
+    "planStale": {
+      "text": "Aufgaben haben sich seit dem letzten Auto-Plan geändert — der angezeigte Plan könnte veraltet sein.",
+      "action": "Auto-Plan erneut ausführen"
+    }
   },
   "preserve": {
     "manual_autosplit": "Manuell + Auto-Split beibehalten",
@@ -171,6 +185,34 @@
       "suggest": "Schlägt die am besten geeignete Person vor (Kompetenz + Kapazität); in der Vorschau vor dem Anwenden änderbar.",
       "auto": "Weist die am besten geeignete Person ohne Rückfrage zu; Bestätigung beim Anwenden."
     },
+    "strategyLabel": "Platzierungsstrategie",
+    "strategy": {
+      "asap": "So früh wie möglich",
+      "deadline_aware": "Terminbewusst"
+    },
+    "strategyDesc": {
+      "asap": "Platziert jede Aufgabe frühestmöglich, arbitriert durch Priorität/Dringlichkeit/Kompetenz.",
+      "deadline_aware": "Fügt einen Korrekturdurchlauf hinzu, der versucht, Puffer niedrigerer Priorität zu verschieben, um Aufgaben freizugeben, die ihren Termin verpassen. Wird nur übernommen, wenn er die Gesamtverspätung strikt verringert — sonst bleibt der \"so früh wie möglich\"-Plan bestehen."
+    },
+    "concentrationLabel": "Konzentration",
+    "concentration": {
+      "focus": "Fokus",
+      "balanced": "Ausgewogen",
+      "spread": "Verteilt"
+    },
+    "concentrationDesc": {
+      "focus": "Bevorzugt stark die Wiederverwendung derselben Personen über die Aufgaben eines Projekts hinweg — weniger Übergaben.",
+      "balanced": "Standard: gruppiert Aufgaben nach gemeinsamer Kompetenz/übergeordneter Aufgabe und erweitert den Kernkreis nur, wenn die Abdeckung unzureichend ist.",
+      "spread": "Sicherheitsventil: bewertet jede Aufgabe einzeln, ohne Gruppierung — stellt das bisherige Verhalten wieder her."
+    },
+    "horizonLabel": "Planungshorizont",
+    "horizon": {
+      "3m": "3 Monate",
+      "6m": "6 Monate",
+      "1y": "1 Jahr",
+      "all": "Gesamtes Projekt"
+    },
+    "scopeUser": "{{name}} — ab morgen (die Vergangenheit ist eingefroren).",
     "run": "Vorschau starten"
   },
   "overtimeModal": {
@@ -197,6 +239,7 @@
     "subtitle_changes_one": "{{proposed}} Zuteilungen vorgeschlagen · {{changes}} Änderungen betreffen {{count}} Person",
     "subtitle_changes_other": "{{proposed}} Zuteilungen vorgeschlagen · {{changes}} Änderungen betreffen {{count}} Personen",
     "frozenNote": "Plant ab morgen — Vergangenheit und heute sind eingefroren.",
+    "unfreezeNote": "Heute ist für {{name}} ausnahmsweise freigegeben — der Rest der Vergangenheit bleibt eingefroren.",
     "warnings_one": "{{count}} Warnung",
     "warnings_other": "{{count}} Warnungen",
     "outOfView_one": "<0>{{count}}</0> Zuteilung außerhalb der aktuellen Ansicht ({{from}} → {{to}}). Der Plan umfasst das gesamte Projekt ({{min}} → {{max}}) — navigieren Sie im Kalender, um sie zu sehen.",
@@ -209,9 +252,21 @@
     "reassignTag": "Neu zuweisen",
     "reassignHintTip": "Bereits zugewiesen — standardmäßig beim aktuellen Bearbeiter belassen. Wählen Sie eine andere Person, um sie neu zuzuweisen.",
     "skillLegend": "⚠ = Person hat die erforderliche Kompetenz für diese Aufgabe nicht",
+    "unavailableLegend": "🚫 = im Zeitfenster nicht verfügbar (langer Urlaub) — nur wieder aufgenommen, wenn kein anderer qualifizierter Kandidat verfügbar war",
     "assignWarn_no_qualified": "Kein qualifizierter Kandidat",
     "assignWarn_no_candidates": "Kein Projektmitglied",
     "assignWarn_capacity_short": "Nicht genügend Kapazität",
+    "warnType": {
+      "missing_estimate": "Schätzung fehlt",
+      "deadline_overflow": "Terminüberschreitung",
+      "user_saturated": "Person ausgelastet",
+      "unassigned": "Nicht zugewiesen",
+      "outside_window": "Außerhalb des Zeitfensters",
+      "dependency_cycle": "Abhängigkeitszyklus",
+      "agent_assigned": "Einem KI-Agenten zugewiesen",
+      "all_candidates_unavailable": "Kein Kandidat verfügbar"
+    },
+    "warnOpenTaskTitle": "Aufgabe öffnen",
     "hide": "Ausblenden",
     "show": "Anzeigen",
     "noChange": "Der aktuelle Plan stimmt bereits mit dem Auto-Plan überein. Nichts anzuwenden.",
@@ -223,7 +278,35 @@
     "applying": "Wird angewendet…",
     "nothingToApply": "Nichts anzuwenden",
     "apply_one": "{{count}} Änderung anwenden",
-    "apply_other": "{{count}} Änderungen anwenden"
+    "apply_other": "{{count}} Änderungen anwenden",
+    "applySelectionEmpty": "Mindestens eine Person auswählen",
+    "applySelection_one": "Auswahl anwenden ({{count}} Änderung)",
+    "applySelection_other": "Auswahl anwenden ({{count}} Änderungen)"
+  },
+  "agents": {
+    "title": "KI-Agenten ({{count}})",
+    "concurrency": "Gleichzeitige Aufgaben vs. das Limit des Agenten",
+    "concurrencyOf": "{{active}}/{{max}} Aufgaben",
+    "reviewQueue": "Ergebnisse, die auf menschliche Prüfung warten — der eigentliche Engpass",
+    "reviewQueuePending": "{{count}} zur Prüfung ausstehend",
+    "budgetScopeDaily": "Täglich",
+    "budgetScopeMonthly": "Monatlich",
+    "budgetScopeProject": "Projekt",
+    "budgetScopeTask": "Aufgabe",
+    "budgetRemaining": "{{amount}} € verbleibend",
+    "trust": {
+      "DRAFT_ONLY": "Nur Entwurf",
+      "SUPERVISED": "Überwacht",
+      "AUTONOMOUS": "Autonom"
+    }
+  },
+  "assign": {
+    "agentBadge": "KI-Agent",
+    "agentBadgeTip": "Der vorgeschlagene Kandidat ist ein KI-Agent — wird nie ohne ausdrückliche menschliche Zustimmung zugewiesen.",
+    "agentNeedsValidation": "nur Vorschlag — akzeptieren, um den Agenten wirklich zuzuweisen",
+    "swapAgent": "Zuweisen an (Agent)",
+    "acceptAgent": "Agent zuweisen",
+    "acceptAgentTip": "Diesen Vorschlag annehmen — weist die Aufgabe dem KI-Agenten zu (es wird keine Stundenzuteilung erstellt)."
   },
   "kind": {
     "added": "Hinzugefügt",

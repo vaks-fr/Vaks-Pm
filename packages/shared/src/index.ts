@@ -60,12 +60,19 @@ export const PERMISSIONS = [
   // que l'IdP (Entra) utilise comme bearer sur `/scim/v2/*`. N'ouvre QUE la
   // surface SCIM (pas l'app privée ni l'API publique).
   'scim:provision',
-  // Accès à la passerelle MCP/IA (phase 11). Le serveur MCP relaie le jeton
-  // présenté à l'API ; ce scope conditionne le DROIT D'EMPRUNTER la surface MCP.
-  // Les opérations elles-mêmes restent gated par les permissions métier
-  // habituelles (project:view, task:view, report:view…) ∩ scopes du jeton.
-  // Pas un rôle : l'IA agit via un jeton lié à un user (RBAC du user) ou une
-  // clé org (scopes explicites).
+  // Marqueur de jeton MCP (phase 11). ⚠️ **N'est PAS un gate d'accès et n'est
+  // dans AUCUN rôle tenant.** Historiquement pensé pour « conditionner le droit
+  // d'emprunter la surface MCP », mais rien ne le vérifie au runtime :
+  // `@PublicApi(scope)` ne lit que le booléen « route publique », pas le scope,
+  // et `me/mcp-context` n'a pas de PermissionsGuard. Il est simplement accordé
+  // par défaut à tout jeton OAuth MCP (`OAuthService.DEFAULT_SCOPES`) et annoncé
+  // dans `scopes_supported` — un signal d'origine, pas une autorisation.
+  // Ce qui gouverne RÉELLEMENT l'accès MCP : la licence `mcp` + le toggle
+  // `mcp.enabled` (vérifiés à l'ÉMISSION du jeton) + la révocation de connexion
+  // (Sécurité → Connexions IA) ; et chaque opération reste bornée par
+  // RBAC(user) ∩ scopes(jeton) ∩ capabilities(agent). Retirer ce scope d'un
+  // rôle est donc sans effet (il n'y est pas) : le laisser ici ne sert que le
+  // vocabulaire OAuth, pas le RBAC.
   'mcp:access',
   // Gestion des agents IA (chantier agents 1) : CRUD des identités agents,
   // mint/revoke de leurs jetons, connecteurs d'annuaire, et enregistrement
@@ -118,10 +125,26 @@ export const AGENT_CAPABILITIES = {
   'tasks:execute': ['task:view', 'task:update'],
   /** Poster des commentaires (questions, comptes rendus d'avancement). */
   'comments:post': ['task:view', 'comment:create'],
+  /**
+   * Décomposer une tâche trop vaste en sous-tâches (lot B). Mappe `task:create`,
+   * mais le POUVOIR est **restreint à l'action** côté serveur : un agent ne peut
+   * créer que des **enfants de la tâche qu'il tient**, dans le même projet, sans
+   * poser lui-même de champ de gouvernance (budget/enjeu/critères), et sans
+   * descendre au-delà d'un niveau. Sans cette restriction, `task:create` serait
+   * une porte de sortie : un agent plafonné sur une tâche s'ouvrirait une tâche
+   * neuve, hors enveloppe et hors périmètre.
+   */
+  'tasks:decompose': ['task:view', 'task:create'],
   /** Contribuer à la documentation : commentaires + pièces jointes. */
   'docs:contribute': ['task:view', 'comment:create', 'attachment:manage'],
-  /** Soumettre des livrables (PJ ; endpoints Deliverable au chantier 2). */
-  'deliverables:submit': ['task:view', 'attachment:manage'],
+  /**
+   * Soumettre des livrables (PJ ; endpoints Deliverable au chantier 2).
+   * `task:update` est requis : `POST /tasks/:taskId/deliverables` exige cette
+   * permission côté contrôleur — sans elle un agent porteur de la seule capability
+   * `deliverables:submit` recevait 403 et ne pouvait jamais soumettre (audit sécu
+   * 2026-08-01, finding #5).
+   */
+  'deliverables:submit': ['task:view', 'task:update', 'attachment:manage'],
   /**
    * Valider les livrables d'AUTRES agents (phase D `agent_validator`). Ne mappe
    * QUE `task:view` (lecture) — le POUVOIR de valider n'est PAS une permission
@@ -1201,6 +1224,9 @@ export interface AgentSyncResultDto {
   created: number;
   updated: number;
   suspended: number;
+  /** Nouvelles identités NON créées faute de place sous le plafond d'agents
+   *  (freemium). Le sync ne 403 pas en bloc — il rapporte le débordement. */
+  skippedOverLimit?: number;
   error?: string;
 }
 
@@ -1306,8 +1332,12 @@ export interface ProjectDto {
   // ---------- Agents IA (chantier 2 — contexte de travail) ----------
   /** Case « Agents autorisés » : si false, aucun agent n'est assignable/claimable. */
   agentsEnabled?: boolean;
-  /** Brief permanent lu par les agents avant de travailler (markdown). Requis si `agentsEnabled`. */
+  /** Notes libres lues par les agents (markdown). Rendues EN DERNIER dans le
+   *  brief composé. `agentBrief` OU ce champ suffit quand `agentsEnabled`. */
   agentContext?: string | null;
+  /** Brief STRUCTURÉ (4 champs) — le serveur le compose avec les faits qu'il
+   *  connaît déjà. Hérite du défaut org champ par champ. */
+  agentBrief?: AgentBriefDto | null;
   /** Garde-fous / hors-périmètre projet (contexte négatif) pour les agents. */
   agentGuardrails?: string | null;
   /** Enveloppe totale de coût agent (€) pour le projet (finance agents). */
@@ -1326,6 +1356,9 @@ export interface ProjectDto {
    *  (gate bloque + auto-transition agent_validator échantillonnée) /
    *  `report_only` / `null` = hérite de l'org. */
   verificationMode?: string | null;
+  /** Dépôt(s) CI autorisé(s) (ex. `["owner/repo"]`) — lie la preuve `ci_signed`
+   *  d'un livrable à ce dépôt (anti-réutilisation cross-dépôt). Vide = org-wide. */
+  ciRepos?: string[];
   /** Matrice d'événements notifiés aux sponsors (null = défauts). */
   sponsorNotify?: SponsorNotifyDto | null;
 }
@@ -1371,6 +1404,83 @@ export interface CreateProjectDto {
 export interface ProjectCreationCapabilitiesDto {
   canBillable: boolean;
   canNonBillable: boolean;
+}
+
+// ---------- Contexte IA d'un projet (brief structuré + prévisualisation) ----------
+
+/**
+ * Brief agent STRUCTURÉ. Remplace le pavé libre où chaque PM réinventait sa
+ * structure. Le serveur y ajoute les FAITS qu'il connaît déjà (reviewer, mode
+ * de vérification, enjeu, langue) — plus besoin de les retaper.
+ */
+export interface AgentBriefDto {
+  /** Qui est l'agent sur ce projet et ce qu'il doit accomplir. */
+  role?: string | null;
+  /** Format, style, langue, structure attendue des livrables. */
+  outputConventions?: string | null;
+  /** Où déposer les livrables (chemin SharePoint, dossier, dépôt…). */
+  deliveryTarget?: string | null;
+  /** Ce sur quoi l'agent n'intervient pas. */
+  outOfScope?: string | null;
+}
+
+/** Rubriques du charter exposées aux agents (allowlist ; le reste est refusé). */
+export interface AgentCharterViewDto {
+  projectPurpose: string | null;
+  objectives: string | null;
+  scopeIn: string | null;
+  scopeOut: string | null;
+  deliverables: string | null;
+  constraints: string | null;
+  successCriteria: string | null;
+}
+
+/**
+ * « Ce que voient les agents » — le pack de contexte assemblé, rendu à
+ * l'identique pour l'humain et pour l'agent (MÊME code de composition, sinon
+ * l'écran mentirait). Réponse de `GET /projects/:id/agent-context-preview`.
+ */
+export interface AgentContextPreviewDto {
+  agentsEnabled: boolean;
+  brief: {
+    /** Le markdown RÉELLEMENT servi aux agents. */
+    composed: string;
+    /** Les 4 champs après fusion avec le défaut org. */
+    structured: AgentBriefDto | null;
+    /** Champs venus du défaut organisation (et non du projet). */
+    orgDefaultApplied: string[];
+    /** Notes libres (`agentContext`), rendues en dernier dans `composed`. */
+    freeNotes: string | null;
+  };
+  facts: {
+    reviewers: { id: string; name: string }[];
+    verificationMode: string;
+    verificationModeSource: 'project' | 'org';
+    stakes: string;
+    verificationCapabilities: string[];
+    locale: string | null;
+    /** Budget QUALITATIF — jamais de montant (le chiffré reste `finance:view`). */
+    costBudget: { set: boolean; spentPct: number | null };
+  };
+  guardrails: { project: string | null };
+  charter: AgentCharterViewDto | null;
+  documents: {
+    items: {
+      id: string;
+      filename: string;
+      mimeType: string;
+      sizeBytes: number;
+      /** Fraîcheur réelle : réécriture du contenu sinon dépôt initial. */
+      freshAt: string;
+      source: 'own' | 'folder';
+    }[];
+    total: number;
+    returned: number;
+    /** `true` = des documents de contexte ne sont PAS remontés aux agents. */
+    truncated: boolean;
+  };
+  contextSources: { source: string; label: string; available: boolean; reason?: string }[];
+  journalPreview: { title: string; summary: string | null; at: string }[];
 }
 
 // ---------- Project charter (PMBOK-style) ----------
@@ -1471,6 +1581,9 @@ export interface UpdateProjectDto {
   stakes?: string | null;
   /** Mode de vérification (phase D) : `report_only`/`enforce`/`null` (hérite org). */
   verificationMode?: string | null;
+  /** Dépôt(s) CI autorisé(s) (ex. `["owner/repo"]`) — lie la preuve `ci_signed` au
+   *  bon dépôt. `[]`/absent = comportement org-wide historique. */
+  ciRepos?: string[];
   /** Matrice d'événements sponsors (whitelist serveur ; null = revenir aux défauts). */
   sponsorNotify?: SponsorNotifyDto | null;
 }
@@ -2023,12 +2136,18 @@ export interface ProjectDocumentDto {
   kind: ProjectDocumentKind;
   /** Dossier de l'espace documents (null = racine). */
   folderId: string | null;
-  /** Marqué « Contexte IA » : exposé au work-context des agents du projet. */
+  /** Drapeau PROPRE du document (ce que le toggle par fichier écrit). */
   aiContext: boolean;
+  /** Exposition RÉELLE aux agents : drapeau propre OU dossier « contexte IA ». */
+  aiContextEffective?: boolean;
+  /** D'où vient l'exposition — `folder` ⇒ badge « hérité », toggle désactivé. */
+  aiContextSource?: 'own' | 'folder' | null;
   filename: string;
   mimeType: string;
   sizeBytes: number;
   uploadedAt: string;
+  /** Dernière réécriture du CONTENU (null = jamais → fraîcheur = uploadedAt). */
+  contentUpdatedAt?: string | null;
   uploadedBy: { id: string; name: string } | null;
 }
 
@@ -2037,6 +2156,11 @@ export interface ProjectDocumentFolderDto {
   id: string;
   parentId: string | null;
   name: string;
+  /** Dossier « Contexte IA » : son contenu ET celui de ses sous-dossiers est
+   *  exposé aux agents, sans cocher fichier par fichier. */
+  aiContext?: boolean;
+  /** Marqué OU descendant d'un dossier marqué (héritage calculé à la lecture). */
+  aiContextEffective?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -3174,6 +3298,22 @@ export interface AutoplanRequestDto {
   reassignAssigned?: boolean;
   /** Overrides PM du choix automatique d'assignees, par tâche. */
   assignmentOverrides?: { taskId: string; userIds: string[] }[];
+  /** Stratégie de placement (Lot 2.1). `asap` (défaut) = comportement du lot
+   *  1a. `deadline_aware` = seconde passe corrective (cf. autoplan.dto.ts),
+   *  ne remplace le plan `asap` que si elle l'améliore strictement. */
+  placementStrategy?: 'asap' | 'deadline_aware';
+  /** Curseur de concentration (Lot 2.2) module l'affectation assistée
+   *  (`autoAssign`) : `focus` favorise le moins de personnes possible,
+   *  `spread` revient au comportement historique (une personne par tâche).
+   *  Défaut : setting org `autoplan.concentration` (fallback `balanced`). */
+  concentration?: 'focus' | 'balanced' | 'spread';
+  /** Application partielle (Lot 2.5) : restreint la PERSISTANCE (pas
+   *  l'aperçu) à ces users/tâches. */
+  applyOnly?: { userIds?: string[]; taskIds?: string[] };
+  /** Levée CIBLÉE du gel du passé (Lot 4.2, « Libérer cette journée ») — un
+   *  seul user, un seul jour (aujourd'hui). N'a d'effet qu'avec `scope='user'`
+   *  et `userId` identique ; toute autre combinaison est rejetée (400). */
+  unfreezeUserDay?: { userId: string; date: string };
 }
 
 export interface ProposedAllocationDto {
@@ -3206,7 +3346,15 @@ export interface EnrichedAllocationDto {
 export interface AutoplanWarningDto {
   taskId: string;
   taskTitle?: string;
-  type: 'missing_estimate' | 'deadline_overflow' | 'user_saturated' | 'unassigned';
+  type:
+    | 'missing_estimate'
+    | 'deadline_overflow'
+    | 'user_saturated'
+    | 'unassigned'
+    | 'outside_window'
+    | 'dependency_cycle'
+    | 'agent_assigned'
+    | 'all_candidates_unavailable';
   message: string;
   missingHours?: number;
 }
@@ -3219,6 +3367,15 @@ export interface AssigneeCandidateDto {
   meetsRequired: boolean;
   freeHours: number;
   score: number;
+  /** Écarté du noyau par le filtre d'absence (Lot 1b.1) — sans capacité ou en
+   *  absence longue durée sur la fenêtre. Reste swappable en `alternatives`. */
+  unavailable?: boolean;
+  /** Vrai si ce candidat est un agent IA (Lot 5, §5.2) — l'UI n'affiche pas
+   *  `freeHours` (la capacité d'un agent n'est jamais des heures) mais un
+   *  badge « Agent IA » + `trustLevel`. */
+  isAgent?: boolean;
+  /** Niveau de confiance de l'agent (candidats agent uniquement). */
+  trustLevel?: AgentTrustLevel | null;
 }
 
 /** Affectation proposée pour une tâche sans assigné (feature autoAssign). */
@@ -3229,7 +3386,10 @@ export interface ProposedAssignmentDto {
   projectKey?: string;
   chosen: AssigneeCandidateDto[];
   alternatives: AssigneeCandidateDto[];
-  source: 'auto' | 'override';
+  /** `agent_suggested` (Lot 5, §5.2) : un agent IA éligible a été proposé —
+   *  MODE SUGGESTION UNIQUEMENT, il ne persiste jamais sans acceptation
+   *  explicite du PM (override → `source` devient alors `override`). */
+  source: 'auto' | 'override' | 'agent_suggested';
   warning?: 'no_candidates' | 'no_qualified' | 'capacity_short';
   /** Vrai si la tâche était DÉJÀ assignée (proposition de réassignation) ;
    *  faux/absent pour une tâche initialement sans assigné. */
@@ -3270,6 +3430,11 @@ export interface WorkloadCellDto {
     /** Couleur effective héritée du groupe parent le plus proche (hex `#rrggbb`), ou null. */
     color?: string | null;
     hours: number;
+    /** true = saisie manuellement par le PM (drag-drop, +Allocate). Optionnel : la sandbox
+     * démo statique ne porte pas la distinction (le service réel les fournit toujours). */
+    isManual?: boolean;
+    /** true = posée par l'auto-plan projet (Lot 3.2, AUTOPLAN_IMPROVEMENTS.md §3.2). */
+    isAutoPlan?: boolean;
   }>;
 }
 
@@ -3278,6 +3443,19 @@ export interface WorkloadUserRowDto {
   name: string;
   email: string;
   cells: WorkloadCellDto[];
+}
+
+/** Fraîcheur du dernier auto-plan appliqué sur un projet (Lot 3.3,
+ *  AUTOPLAN_IMPROVEMENTS.md §3.3) — comparaison synchrone, pas de job. */
+export interface PlanStatusDto {
+  /** true si des tâches du projet ont bougé après la dernière application
+   *  de l'auto-plan (le plan affiché ne reflète plus l'état des tâches). */
+  stale: boolean;
+  /** false si le projet n'a jamais reçu d'auto-plan appliqué — `stale` est
+   *  alors toujours false (rien à comparer). */
+  hasAutoPlan: boolean;
+  maxTaskUpdatedAt: string | null;
+  maxAutoAllocCreatedAt: string | null;
 }
 
 export interface WorkloadGridDto {
@@ -3527,6 +3705,103 @@ export interface AgentRunDto {
   runKey: string | null;
   note: string | null;
   createdAt: string;
+  /**
+   * État des enveloppes de coût APRÈS ce run (coupe-circuit lot A). Présent
+   * seulement pour un agent : c'est par ce canal qu'il apprend qu'il doit
+   * s'arrêter, au moment exact où il déclare sa consommation.
+   */
+  budget?: AgentBudgetStatusDto;
+  /**
+   * `true` = l'enveloppe était dépassée ET le coupe-circuit
+   * (`agents.budgetBreaker`) est actif : la tâche a été retirée à l'agent, qui
+   * doit cesser immédiatement (elle attend une reprise humaine).
+   */
+  taskReleased?: boolean;
+}
+
+/** Périmètre d'une enveloppe de coût agent (€). */
+export type AgentBudgetScope = 'agent_daily' | 'agent_monthly' | 'project' | 'task';
+
+/** Une enveloppe de coût agent et sa consommation. */
+export interface AgentBudgetEnvelopeDto {
+  scope: AgentBudgetScope;
+  budget: number;
+  spent: number;
+  remaining: number;
+  exceeded: boolean;
+}
+
+/** Photographie des enveloppes applicables + verdict d'arrêt. */
+export interface AgentBudgetStatusDto {
+  envelopes: AgentBudgetEnvelopeDto[];
+  exceeded: AgentBudgetScope[];
+  /** `true` = au moins une enveloppe consommée : arrêter et soumettre l'existant. */
+  stop: boolean;
+}
+
+// ---------- Workload — vue agrégée des agents IA (Lot 5, §5.1) ----------
+//
+// VISIBILITÉ, pas allocation : un agent n'a jamais d'heures — concurrence +
+// budgets runs/€ + file de revue (le vrai goulot). Distincte de la grille
+// people×jours (qui n'a aucun sens pour un agent).
+
+/**
+ * Une ligne d'agent dans la vue workload agrégée (`GET /workload/agents`).
+ * Le bloc `budget` (montants €) est **OMIS** — jamais un placeholder — quand
+ * l'appelant n'a pas `finance:view` (même discipline que les paliers budget
+ * sponsors qualitatifs) : un PM sans droit finance voit la concurrence et la
+ * file de revue, rien de plus, jamais une erreur.
+ */
+export interface AgentWorkloadItemDto {
+  agentId: string;
+  name: string;
+  trustLevel: AgentTrustLevel | null;
+  /** Tâches CLAIMED/IN_PROGRESS/CHANGES_REQUESTED assignées à cet agent —
+   *  même ensemble que le refus 409 `BUDGET_CONCURRENCY` au claim. */
+  activeTasks: number;
+  maxConcurrentTasks: number | null;
+  /** Livrables produits par cet agent en attente de revue humaine. */
+  reviewQueuePending: number;
+  /** Enveloppes de coût (agent×jour, agent×mois, projet, tâche) — présent
+   *  SEULEMENT si `AgentWorkloadDto.canViewFinance`. */
+  budget?: AgentBudgetStatusDto;
+}
+
+export interface AgentWorkloadDto {
+  /** `false` si le scope demandé n'a aucun projet `agentsEnabled` — la vue
+   *  N'EXISTE PAS (`agents` alors vide), même pattern que `agents-report`. */
+  enabled: boolean;
+  from: string;
+  to: string;
+  /** Vrai si l'appelant peut voir les montants € (`budget` alors présent
+   *  sur chaque agent qui a des enveloppes définies). */
+  canViewFinance: boolean;
+  agents: AgentWorkloadItemDto[];
+}
+
+/**
+ * Une ligne du journal transverse des runs d'agent (Admin > Agent runs) :
+ * le run brut + les libellés résolus + le verdict d'anomalie recalculé à la
+ * lecture (la règle peut évoluer sans migration de données).
+ */
+export interface AgentRunListItemDto extends AgentRunDto {
+  agentName: string | null;
+  projectName: string | null;
+  taskTitle: string | null;
+  taskNumber: number | null;
+  anomaly: 'no_tokens' | 'zero_cost' | 'below_reference' | null;
+}
+
+/** Page du journal + totaux sur le PÉRIMÈTRE FILTRÉ (pas sur la page). */
+export interface AgentRunsPageDto {
+  items: AgentRunListItemDto[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totals: { cost: number; tokensIn: number; tokensOut: number; derivedCost: number };
+  /** Nombre de runs signalés anomalie sur le périmètre filtré (agent/projet/période),
+   *  INDÉPENDANT du toggle `anomaliesOnly` — sert le compteur KPI. */
+  anomalyCount: number;
 }
 
 /** Un run d'agent tel qu'affiché dans l'onglet AI d'une tâche. */
@@ -3967,11 +4242,18 @@ export const LICENSE_FEATURES = [
   'siem-export', // Forwarder syslog RFC 5424 / export CEF SIEM
   'audit-advanced', // Ancre d'intégrité, archivage froid, alerting brute-force
   'teams-provisioning', // Provisioning Microsoft Teams (Graph) à l'activation projet
-  'mcp', // Connecteur IA (MCP) — exposer l'org à Claude/ChatGPT/Copilot Studio
-  // Fédération d'identité des agents (RFC 8693) : les agents s'authentifient
-  // avec le jeton de leur plateforme, plus aucun secret distribué. Le mint de
-  // PAT par un admin reste disponible sans licence — la fédération est le
-  // confort d'échelle, jamais un prérequis pour faire tourner des agents.
+  'ci-verification', // Preuve CI signée des livrables d'agents (webhook entrant HMAC + connecteurs GitHub/generic)
+  // Agents IA « workforce » : lève le plafond gratuit de FREE_AGENT_LIMIT agents
+  // (offre « illimité ») ET débloque la fédération d'identité des agents (RFC 8693,
+  // auth keyless à l'échelle). En dessous du plafond, les agents tournent sans
+  // licence avec des PAT mintés par un admin (freemium quota, cf. LicenseService).
+  'agents',
+  // ⚠️ DÉPRÉCIÉES — conservées uniquement pour que d'anciens tokens qui les portent
+  // restent valides. Plus enforced nulle part :
+  //  - `mcp` : le connecteur MCP conversationnel humain est désormais **core/gratuit**
+  //    (piloté par le seul toggle admin `mcp.enabled`).
+  //  - `agent-federation` : repliée dans `agents`.
+  'mcp',
   'agent-federation',
 ] as const;
 
@@ -3993,6 +4275,8 @@ export const LICENSE_FEATURE_LABELS: Record<LicenseFeature, string> = {
   'siem-export': 'Export SIEM (syslog / CEF)',
   'audit-advanced': "Audit avancé (intégrité, archivage, alerting)",
   'teams-provisioning': 'Provisioning Microsoft Teams (Graph)',
+  'ci-verification': 'Vérification CI signée (livrables agents)',
+  agents: 'Agents IA illimités (+ fédération)',
   mcp: 'Connecteur IA (MCP)',
   'agent-federation': "Fédération d'identité des agents IA",
 };
@@ -4042,6 +4326,14 @@ export interface LicenseStatusDto {
   /** Nombre de sièges **occupés** (utilisateurs `licensed=true` non supprimés).
    *  Permet à l'UI admin d'afficher « X / maxUsers ». null si indéterminable. */
   seatsUsed?: number | null;
+  /** Plafond **effectif** de sièges humains (licence `maxUsers` si active, sinon
+   *  plafond gratuit `FREE_SEAT_LIMIT`). null = illimité (licence sans plafond). */
+  seatLimit?: number | null;
+  /** Nombre d'identités agents actives (kind=AGENT, non supprimées/suspendues). */
+  agentsUsed?: number | null;
+  /** Plafond **effectif** d'agents (feature `agents` = illimité → null ; sinon
+   *  `maxAgents` métré ou le plafond gratuit `FREE_AGENT_LIMIT`). */
+  agentLimit?: number | null;
 }
 
 /**
@@ -4071,7 +4363,12 @@ export interface LicensePayload {
   issuedAt: string;
   expiresAt: string;
   features: string[];
-  limits?: { maxUsers?: number | null };
+  limits?: {
+    maxUsers?: number | null;
+    /** Plafond d'identités agents (null/absent = pas de palier métré ; la feature
+     *  `agents` accorde l'illimité). Sans licence, le plafond gratuit s'applique. */
+    maxAgents?: number | null;
+  };
   online?: LicenseOnlinePolicy;
   notes?: string;
 }

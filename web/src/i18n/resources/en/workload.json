@@ -95,6 +95,12 @@
     },
     "timeOffButton": "Time off",
     "timeOffButtonTitle": "Add / import time off days",
+    "replanUser": "Replan {{name}}",
+    "releaseDay": "Release {{name}}'s day — push today's remaining work to tomorrow",
+    "rowActions": "Actions",
+    "menuReplan": "Reschedule this person",
+    "menuReleaseDay": "Free up today",
+    "releaseDayApplied": "{{name}}'s day released: {{added}} added, {{removed}} removed.",
     "preserveTitle": "What the auto-plan preserves. The past and today are always frozen; the auto-plan only reschedules from tomorrow on.",
     "autoplanProjectTitle": "Automatic plan for the selected project (from tomorrow — the past is frozen)",
     "autoplanGlobalTitle": "Automatic plan across all projects (from tomorrow — the past is frozen)",
@@ -138,7 +144,15 @@
       "personal": "PERSONAL",
       "generic": "OFF"
     },
-    "chipTitle": "{{project}} · {{task}} — {{hours}}h (double-click to open)"
+    "chipTitle": "{{project}} · {{task}} — {{hours}}h (double-click to open)",
+    "legend": {
+      "autoAlloc": "Auto-plan (dashed)",
+      "manualAlloc": "Manual (solid)"
+    },
+    "planStale": {
+      "text": "Tasks have changed since the last auto-plan — the plan shown may be out of date.",
+      "action": "Re-run auto-plan"
+    }
   },
   "preserve": {
     "manual_autosplit": "Preserve manual + auto-split",
@@ -171,6 +185,34 @@
       "suggest": "Proposes the best-fit person (skill + capacity); you can change it in the preview before applying.",
       "auto": "Assigns the best-fit person without asking; you confirm on apply."
     },
+    "strategyLabel": "Placement strategy",
+    "strategy": {
+      "asap": "As soon as possible",
+      "deadline_aware": "Deadline-aware"
+    },
+    "strategyDesc": {
+      "asap": "Places every task at the earliest slot, arbitrated by priority/urgency/skill.",
+      "deadline_aware": "Adds a corrective pass that tries to shift lower-priority slack ahead of tasks missing their deadline. Only kept if it strictly reduces total lateness — otherwise the as-soon-as-possible plan is used."
+    },
+    "concentrationLabel": "Concentration",
+    "concentration": {
+      "focus": "Focus",
+      "balanced": "Balanced",
+      "spread": "Spread"
+    },
+    "concentrationDesc": {
+      "focus": "Strongly favors reusing the same people across a project's tasks — fewer hand-offs.",
+      "balanced": "Default: groups tasks by shared skill/parent and widens the core team only when coverage is insufficient.",
+      "spread": "Safety valve: evaluates every task on its own, no grouping — restores the historical behavior."
+    },
+    "horizonLabel": "Planning horizon",
+    "horizon": {
+      "3m": "3 months",
+      "6m": "6 months",
+      "1y": "1 year",
+      "all": "Whole project"
+    },
+    "scopeUser": "{{name}} — from tomorrow (the past is frozen).",
     "run": "Run preview"
   },
   "overtimeModal": {
@@ -197,6 +239,7 @@
     "subtitle_changes_one": "{{proposed}} allocations proposed · {{changes}} changes affecting {{count}} person",
     "subtitle_changes_other": "{{proposed}} allocations proposed · {{changes}} changes affecting {{count}} people",
     "frozenNote": "Plans from tomorrow — the past and today are frozen.",
+    "unfreezeNote": "Today is exceptionally released for {{name}} — the rest of the past stays frozen.",
     "warnings_one": "{{count}} warning",
     "warnings_other": "{{count}} warnings",
     "outOfView_one": "<0>{{count}}</0> allocation outside the current view ({{from}} → {{to}}). The plan covers the whole project ({{min}} → {{max}}) — navigate the calendar to see them.",
@@ -209,9 +252,21 @@
     "reassignTag": "Reassign",
     "reassignHintTip": "Already assigned — kept on the current owner by default. Pick someone else to reassign it.",
     "skillLegend": "⚠ = person does not hold the required skill for this task",
+    "unavailableLegend": "🚫 = unavailable over the window (long leave) — reinstated only when no other qualified candidate was available",
     "assignWarn_no_qualified": "No qualified candidate",
     "assignWarn_no_candidates": "No project member",
     "assignWarn_capacity_short": "Not enough capacity",
+    "warnType": {
+      "missing_estimate": "Missing estimate",
+      "deadline_overflow": "Deadline overflow",
+      "user_saturated": "Person saturated",
+      "unassigned": "Unassigned",
+      "outside_window": "Outside window",
+      "dependency_cycle": "Dependency cycle",
+      "agent_assigned": "Assigned to an AI agent",
+      "all_candidates_unavailable": "No candidate available"
+    },
+    "warnOpenTaskTitle": "Open task",
     "hide": "Hide",
     "show": "Show",
     "noChange": "The current plan already matches the auto-plan. Nothing to apply.",
@@ -223,7 +278,35 @@
     "applying": "Applying…",
     "nothingToApply": "Nothing to apply",
     "apply_one": "Apply {{count}} change",
-    "apply_other": "Apply {{count}} changes"
+    "apply_other": "Apply {{count}} changes",
+    "applySelectionEmpty": "Select at least one person",
+    "applySelection_one": "Apply selection ({{count}} change)",
+    "applySelection_other": "Apply selection ({{count}} changes)"
+  },
+  "agents": {
+    "title": "AI agents ({{count}})",
+    "concurrency": "Concurrent tasks vs the agent's limit",
+    "concurrencyOf": "{{active}}/{{max}} tasks",
+    "reviewQueue": "Deliverables awaiting human review — the real bottleneck",
+    "reviewQueuePending": "{{count}} awaiting review",
+    "budgetScopeDaily": "Daily",
+    "budgetScopeMonthly": "Monthly",
+    "budgetScopeProject": "Project",
+    "budgetScopeTask": "Task",
+    "budgetRemaining": "{{amount}}€ left",
+    "trust": {
+      "DRAFT_ONLY": "Draft only",
+      "SUPERVISED": "Supervised",
+      "AUTONOMOUS": "Autonomous"
+    }
+  },
+  "assign": {
+    "agentBadge": "AI agent",
+    "agentBadgeTip": "Suggested candidate is an AI agent — never assigned without explicit human acceptance.",
+    "agentNeedsValidation": "suggestion only — accept it to actually assign the agent",
+    "swapAgent": "Assign to (agent)",
+    "acceptAgent": "Assign the agent",
+    "acceptAgentTip": "Accept this suggestion — assigns the AI agent to the task (no hourly allocation is created)."
   },
   "kind": {
     "added": "Added",

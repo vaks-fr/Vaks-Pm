@@ -44,8 +44,32 @@ const AGENT_HEADER = 'x-vaks-agent';
 const JUSTIFICATION_HEADER = 'x-vaks-justification';
 /** Nom du tool MCP à l'origine de l'appel (contexte d'audit). */
 const MCP_TOOL_HEADER = 'x-vaks-mcp-tool';
+/**
+ * Client IA d'origine (Claude Desktop, Copilot Studio, ChatGPT…), relayé par le
+ * serveur MCP depuis le `User-Agent` entrant. Comble le dernier trou de la
+ * chaîne de traçabilité : on savait déjà QUEL agent, POUR QUI et POURQUOI, mais
+ * pas DEPUIS QUOI.
+ *
+ * ⚠️ Déclaratif, comme `justification` : c'est le client qui s'annonce, rien ne
+ * l'authentifie. Utile pour comprendre et corréler, jamais comme contrôle.
+ */
+const MCP_CLIENT_HEADER = 'x-vaks-mcp-client';
 /** Taille max de la justification conservée dans `detail` (anti-abus). */
 const JUSTIFICATION_MAX = 1000;
+
+/**
+ * Vrai si l'erreur est un défi du garde-fou de confirmation MCP (409 avec un
+ * `code` `CONFIRMATION_*`). Ces cas sont déjà tracés explicitement par le
+ * `McpConfirmInterceptor` (`mcp.confirm_challenged`/`_rejected`) — on évite ici
+ * de les re-journaliser en mutation échouée.
+ */
+function isConfirmationChallenge(err: unknown): boolean {
+  const e = err as { getStatus?: () => number; getResponse?: () => unknown };
+  if (typeof e?.getStatus !== 'function' || e.getStatus() !== 409) return false;
+  const body = typeof e.getResponse === 'function' ? e.getResponse() : undefined;
+  const code = (body as { code?: unknown })?.code;
+  return code === 'CONFIRMATION_REQUIRED' || code === 'CONFIRMATION_INVALID';
+}
 
 interface ReqUser {
   userId?: string;
@@ -135,12 +159,19 @@ export class AuditLogInterceptor implements NestInterceptor {
                 typeof (err as { getStatus?: () => number }).getStatus === 'function'
                   ? (err as { getStatus: () => number }).getStatus()
                   : 500;
-              this.audit.log({
-                ...base,
-                outcome: 'FAILURE',
-                statusCode: status,
-                severity: status === 401 || status === 403 ? 'WARNING' : base.severity,
-              });
+              // Le défi du garde-fou de confirmation MCP (409 CONFIRMATION_*) est
+              // déjà tracé explicitement (`mcp.confirm_challenged`/`_rejected`).
+              // Ne pas le re-journaliser ici en « mutation échouée » : ce n'est
+              // pas un échec de l'action, juste sa mise en attente de confirmation
+              // — sinon un simple delete produit deux lignes trompeuses.
+              if (!isConfirmationChallenge(err)) {
+                this.audit.log({
+                  ...base,
+                  outcome: 'FAILURE',
+                  statusCode: status,
+                  severity: status === 401 || status === 403 ? 'WARNING' : base.severity,
+                });
+              }
               return throwError(() => err);
             }),
           )
@@ -198,11 +229,13 @@ export class AuditLogInterceptor implements NestInterceptor {
     if (actorType === 'AGENT') {
       const justification = firstHeader(req.headers[JUSTIFICATION_HEADER]);
       const mcpTool = firstHeader(req.headers[MCP_TOOL_HEADER]);
+      const mcpClient = firstHeader(req.headers[MCP_CLIENT_HEADER]);
       detail = {
         ...(detail ?? {}),
         ...(user.agentOwnerId ? { ownerId: user.agentOwnerId } : {}),
         ...(justification ? { justification: justification.slice(0, JUSTIFICATION_MAX) } : {}),
         ...(mcpTool ? { mcpTool: mcpTool.slice(0, 200) } : {}),
+        ...(mcpClient ? { mcpClient: mcpClient.slice(0, 200) } : {}),
       };
       if (Object.keys(detail).length === 0) detail = undefined;
     }

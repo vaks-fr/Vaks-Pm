@@ -95,6 +95,12 @@
     },
     "timeOffButton": "Time off",
     "timeOffButtonTitle": "Ajouter / importer des jours de congés",
+    "replanUser": "Replanifier {{name}}",
+    "releaseDay": "Libérer la journée de {{name}} — décale le reliquat du jour vers demain",
+    "rowActions": "Actions",
+    "menuReplan": "Replanifier cette personne",
+    "menuReleaseDay": "Libérer aujourd'hui",
+    "releaseDayApplied": "Journée de {{name}} libérée : {{added}} ajoutée(s), {{removed}} retirée(s).",
     "preserveTitle": "Ce que l'auto-plan préserve. Le passé et aujourd'hui sont toujours gelés ; l'auto-plan ne replanifie qu'à partir de demain.",
     "autoplanProjectTitle": "Plan automatique pour le projet sélectionné (à partir de demain — le passé est gelé)",
     "autoplanGlobalTitle": "Plan automatique sur tous les projets (à partir de demain — le passé est gelé)",
@@ -138,7 +144,15 @@
       "personal": "PERSONAL",
       "generic": "OFF"
     },
-    "chipTitle": "{{project}} · {{task}} — {{hours}}h (double-cliquez pour ouvrir)"
+    "chipTitle": "{{project}} · {{task}} — {{hours}}h (double-cliquez pour ouvrir)",
+    "legend": {
+      "autoAlloc": "Auto-plan (pointillé)",
+      "manualAlloc": "Manuel (plein)"
+    },
+    "planStale": {
+      "text": "Des tâches ont changé depuis le dernier auto-plan — le plan affiché est peut-être obsolète.",
+      "action": "Relancer l'auto-plan"
+    }
   },
   "preserve": {
     "manual_autosplit": "Préserver manuel + auto-split",
@@ -171,6 +185,34 @@
       "suggest": "Propose le meilleur candidat (compétence + capacité) ; vous pouvez changer dans l'aperçu avant d'appliquer.",
       "auto": "Affecte le meilleur candidat sans demander ; vous validez à l'application."
     },
+    "strategyLabel": "Stratégie de placement",
+    "strategy": {
+      "asap": "Au plus tôt",
+      "deadline_aware": "Sensible aux échéances"
+    },
+    "strategyDesc": {
+      "asap": "Place chaque tâche au plus tôt, arbitrée par priorité/urgence/compétence.",
+      "deadline_aware": "Ajoute une passe corrective qui tente de décaler du mou de moindre priorité pour libérer les tâches qui manquent leur échéance. Retenue seulement si elle réduit strictement le retard total — sinon le plan « au plus tôt » est conservé."
+    },
+    "concentrationLabel": "Concentration",
+    "concentration": {
+      "focus": "Focus",
+      "balanced": "Équilibré",
+      "spread": "Dispersé"
+    },
+    "concentrationDesc": {
+      "focus": "Favorise fortement la réutilisation des mêmes personnes sur les tâches d'un projet — moins de passations.",
+      "balanced": "Défaut : regroupe les tâches par compétence/parent partagé et n'élargit le noyau que si la couverture est insuffisante.",
+      "spread": "Soupape de secours : évalue chaque tâche seule, sans regroupement — rétablit le comportement historique."
+    },
+    "horizonLabel": "Horizon de planification",
+    "horizon": {
+      "3m": "3 mois",
+      "6m": "6 mois",
+      "1y": "1 an",
+      "all": "Tout le projet"
+    },
+    "scopeUser": "{{name}} — à partir de demain (le passé est gelé).",
     "run": "Lancer l'aperçu"
   },
   "overtimeModal": {
@@ -197,6 +239,7 @@
     "subtitle_changes_one": "{{proposed}} allocations proposées · {{changes}} changements affectant {{count}} personne",
     "subtitle_changes_other": "{{proposed}} allocations proposées · {{changes}} changements affectant {{count}} personnes",
     "frozenNote": "Planifie à partir de demain — le passé et aujourd'hui sont gelés.",
+    "unfreezeNote": "Aujourd'hui est exceptionnellement libéré pour {{name}} — le reste du passé reste gelé.",
     "warnings_one": "{{count}} avertissement",
     "warnings_other": "{{count}} avertissements",
     "outOfView_one": "<0>{{count}}</0> allocation hors de la vue actuelle ({{from}} → {{to}}). Le plan couvre tout le projet ({{min}} → {{max}}) — naviguez dans le calendrier pour les voir.",
@@ -209,9 +252,21 @@
     "reassignTag": "Réassigner",
     "reassignHintTip": "Déjà assignée — conservée sur l'assigné actuel par défaut. Choisissez quelqu'un d'autre pour la réassigner.",
     "skillLegend": "⚠ = la personne n'a pas la compétence requise pour cette tâche",
+    "unavailableLegend": "🚫 = indisponible sur la fenêtre (congé long) — réintégré seulement si aucun autre candidat qualifié n'était disponible",
     "assignWarn_no_qualified": "Aucun candidat qualifié",
     "assignWarn_no_candidates": "Aucun membre dans le projet",
     "assignWarn_capacity_short": "Capacité insuffisante",
+    "warnType": {
+      "missing_estimate": "Estimation manquante",
+      "deadline_overflow": "Dépassement d'échéance",
+      "user_saturated": "Personne saturée",
+      "unassigned": "Non assignée",
+      "outside_window": "Hors fenêtre",
+      "dependency_cycle": "Cycle de dépendances",
+      "agent_assigned": "Confiée à un agent IA",
+      "all_candidates_unavailable": "Aucun candidat disponible"
+    },
+    "warnOpenTaskTitle": "Ouvrir la tâche",
     "hide": "Masquer",
     "show": "Afficher",
     "noChange": "Le plan actuel correspond déjà à l'auto-plan. Rien à appliquer.",
@@ -223,7 +278,35 @@
     "applying": "Application…",
     "nothingToApply": "Rien à appliquer",
     "apply_one": "Appliquer {{count}} changement",
-    "apply_other": "Appliquer {{count}} changements"
+    "apply_other": "Appliquer {{count}} changements",
+    "applySelectionEmpty": "Sélectionnez au moins une personne",
+    "applySelection_one": "Appliquer la sélection ({{count}} changement)",
+    "applySelection_other": "Appliquer la sélection ({{count}} changements)"
+  },
+  "agents": {
+    "title": "Agents IA ({{count}})",
+    "concurrency": "Tâches simultanées vs la limite de l'agent",
+    "concurrencyOf": "{{active}}/{{max}} tâches",
+    "reviewQueue": "Livrables en attente de revue humaine — le vrai goulot",
+    "reviewQueuePending": "{{count}} en attente de revue",
+    "budgetScopeDaily": "Quotidien",
+    "budgetScopeMonthly": "Mensuel",
+    "budgetScopeProject": "Projet",
+    "budgetScopeTask": "Tâche",
+    "budgetRemaining": "{{amount}} € restants",
+    "trust": {
+      "DRAFT_ONLY": "Brouillon seulement",
+      "SUPERVISED": "Supervisé",
+      "AUTONOMOUS": "Autonome"
+    }
+  },
+  "assign": {
+    "agentBadge": "Agent IA",
+    "agentBadgeTip": "Le candidat suggéré est un agent IA — jamais affecté sans acceptation humaine explicite.",
+    "agentNeedsValidation": "suggestion seulement — acceptez-la pour affecter réellement l'agent",
+    "swapAgent": "Affecter à (agent)",
+    "acceptAgent": "Affecter l'agent",
+    "acceptAgentTip": "Accepter cette suggestion — affecte l'agent IA à la tâche (aucune allocation horaire n'est créée)."
   },
   "kind": {
     "added": "Ajouté",

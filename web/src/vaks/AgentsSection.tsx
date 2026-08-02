@@ -9,13 +9,17 @@ import type {
   UserDto,
   UserSkillDto,
 } from '@vaks-pm/shared';
-import { AGENT_TRUST_LEVELS, KNOWN_AGENT_MODELS } from '@vaks-pm/shared';
+import { AGENT_TRUST_LEVELS, KNOWN_AGENT_MODELS, permissionsForCapabilities } from '@vaks-pm/shared';
 import { api } from '../api/client';
 import { Icon } from './primitives';
 import { useConfirm } from './confirm';
+import { useAuth } from '../auth/AuthContext';
 import { UserSkillsDialog } from './TeamView';
 
 type Flash = (msg: string) => void;
+
+/** Portail d'essai (marketing) — pré-rempli du licenseId. */
+const TRIAL_URL = 'https://vaks-pm.com/trial';
 
 // ---------------------------------------------------------------------------
 // Section principale : liste compacte (recherche + onglets + pagination),
@@ -26,6 +30,7 @@ const AGENTS_PAGE_SIZE = 20;
 
 export default function AgentsSection({ flash }: { flash: Flash }) {
   const { t } = useTranslation('admin');
+  const { license, refreshLicense } = useAuth();
   const [agents, setAgents] = useState<AgentDto[]>([]);
   const [capabilities, setCapabilities] = useState<string[]>([]);
   const [users, setUsers] = useState<UserDto[]>([]);
@@ -53,12 +58,14 @@ export default function AgentsSection({ flash }: { flash: Flash }) {
       // la section reste utilisable, seul le sélecteur d'owner est vide.
       const allUsers = await api.listUsers({ includeAgents: false }).catch(() => []);
       setUsers(allUsers);
+      // Rafraîchit le quota (agentsUsed/agentLimit) après toute mutation d'agent.
+      void refreshLicense();
     } catch (e) {
       flash(t('agents.loadFailed', { message: (e as Error).message }));
     } finally {
       setLoading(false);
     }
-  }, [flash, t]);
+  }, [flash, t, refreshLicense]);
 
   useEffect(() => {
     void load();
@@ -93,10 +100,47 @@ export default function AgentsSection({ flash }: { flash: Flash }) {
   const from = filtered.length === 0 ? 0 : (page - 1) * AGENTS_PAGE_SIZE + 1;
   const to = Math.min(page * AGENTS_PAGE_SIZE, filtered.length);
 
+  // Quota freemium : plafond effectif depuis la licence (null = illimité).
+  // `used` = agents vivants (non suspendus) = onglet Actif. Le serveur reste
+  // l'autorité (403 AGENT_LIMIT_REACHED) ; l'UI n'anticipe que le blocage.
+  const agentLimit = license?.agentLimit ?? null;
+  const agentsUsed = counts.active;
+  const atCap = agentLimit != null && agentsUsed >= agentLimit;
+  const trialHref = license?.organizationId
+    ? `${TRIAL_URL}?licenseId=${encodeURIComponent(license.organizationId)}`
+    : TRIAL_URL;
+
   return (
     <div>
       <div style={{ fontSize: 12.5, color: 'var(--text-3)', lineHeight: 1.5, marginBottom: 12 }}>
         {t('agents.intro')}
+      </div>
+
+      {/* Bandeau quota (freemium) */}
+      <div
+        style={{
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+          margin: '0 0 12px', padding: '8px 12px', borderRadius: 8,
+          border: '1px solid var(--border)',
+          background: atCap ? 'color-mix(in oklch, var(--accent) 8%, var(--surface))' : 'var(--surface)',
+          fontSize: 13,
+        }}
+      >
+        <span style={{ color: atCap ? 'var(--accent)' : 'var(--text-2)' }}>
+          {agentLimit == null
+            ? t('agents.quotaUnlimited', { defaultValue: 'AI agents: {{used}} (unlimited)', used: agentsUsed })
+            : t('agents.quotaUsage', { defaultValue: 'AI agents: {{used}} / {{limit}} (free plan)', used: agentsUsed, limit: agentLimit })}
+        </span>
+        {atCap && (
+          <a
+            href={trialHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ marginLeft: 'auto', color: 'var(--accent)', textDecoration: 'none', fontWeight: 600 }}
+          >
+            {t('agents.quotaCta', { defaultValue: 'Unlock unlimited agents + keyless federation — free trial →' })}
+          </a>
+        )}
       </div>
 
       {/* Barre de recherche + total + bouton créer */}
@@ -113,6 +157,8 @@ export default function AgentsSection({ flash }: { flash: Flash }) {
         <button
           className="btn btn-accent btn-sm"
           style={{ marginLeft: 8, whiteSpace: 'nowrap' }}
+          disabled={atCap}
+          title={atCap ? t('agents.quotaReachedHint', { defaultValue: 'Free agent limit reached — upgrade to add more.' }) : undefined}
           onClick={() => setEditing('new')}
         >
           <Icon name="plus" size={14} /> {t('agents.addButton')}
@@ -621,6 +667,26 @@ function AgentEditorModal({
               <button className="btn btn-line btn-sm" style={{ marginLeft: 'auto' }} disabled={busy} onClick={issueToken}>
                 <Icon name="plus" size={13} /> {t('agents.mintToken')}
               </button>
+            </div>
+            {/* Le lien capacités → droits du jeton n'était écrit nulle part :
+                on cherchait un sélecteur de scopes qui n'existe pas, et on
+                minte un jeton trop pauvre sans comprendre pourquoi. */}
+            <div style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.5 }}>
+              {t('agents.mintScopesHint', {
+                defaultValue:
+                  'A token carries exactly the rights of the capabilities ticked above, frozen at issue time. Change the capabilities and the existing tokens do NOT follow: tick first, save, then issue a new token.',
+              })}
+              {caps.length > 0 && (
+                <>
+                  {' '}
+                  <span style={{ color: 'var(--text-2)' }}>
+                    {t('agents.mintScopesPreview', { defaultValue: 'This agent would get:' })}{' '}
+                    <code style={{ fontFamily: 'var(--mono, monospace)' }}>
+                      {permissionsForCapabilities(caps).join(', ') || '—'}
+                    </code>
+                  </span>
+                </>
+              )}
             </div>
             {tokens.length === 0 ? (
               <div style={{ fontSize: 12, color: 'var(--text-3)' }}>{t('agents.noTokens')}</div>

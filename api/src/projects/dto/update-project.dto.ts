@@ -55,11 +55,30 @@ export class UpdateProjectDto {
   @Length(0, 20000)
   agentContext?: string | null;
 
+  /**
+   * Brief STRUCTURÉ (`{ role, outputConventions, deliveryTarget, outOfScope }`).
+   * La validation fine (clés connues, types, caps) est faite par
+   * `normalizeAgentBrief` côté service — même traitement que
+   * `verificationCapabilities`. `null` explicite = effacer.
+   */
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsObject()
+  agentBrief?: Record<string, unknown> | null;
+
   @IsOptional()
   @ValidateIf((_, v) => v !== null)
   @IsString()
   @Length(0, 8000)
   agentGuardrails?: string | null;
+
+  /** Dépôt(s) CI autorisé(s) (ex. `["owner/repo"]`) — lie la preuve `ci_signed`
+   *  au bon dépôt (anti-réutilisation cross-dépôt). Vide = comportement org-wide. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @Length(1, 200, { each: true })
+  ciRepos?: string[];
 
   /** Override projet de l'auto-clôture APPROVED→DONE (chantier 2c). `null` =
    *  hériter du réglage org `agents.autoCloseOnApproval`. */

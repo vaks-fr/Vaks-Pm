@@ -1,5 +1,8 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { toCsv, sendCsv } from '../common/csv.util';
+import { ListAgentRunsDto } from './dto/list-agent-runs.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../rbac/permissions.guard';
 import { RequirePermissions, PublicApi } from '../rbac/require-permissions.decorator';
@@ -36,5 +39,58 @@ export class AgentRunsController {
   @RequirePermissions('agent:manage')
   summary(@CurrentUser() user: AuthUser, @Param('agentId', ParseUUIDPipe) agentId: string) {
     return this.runs.summaryForAgent(user.orgId, agentId);
+  }
+
+  /**
+   * Journal transverse des runs d'agent (app-privé, `agent:manage` → accessible
+   * à l'« AI administrator » sans être admin global). Filtres cumulatifs +
+   * totaux sur le périmètre filtré. Pendant du journal d'audit, côté coût IA.
+   */
+  @Get('admin/agent-runs')
+  @RequirePermissions('agent:manage')
+  list(@CurrentUser() user: AuthUser, @Query() q: ListAgentRunsDto) {
+    return this.runs.list(user.orgId, {
+      ...q,
+      anomaliesOnly: String(q.anomaliesOnly) === 'true',
+    });
+  }
+
+  /** Même périmètre, en CSV (analyse hors ligne / refacturation). */
+  @Get('admin/agent-runs.csv')
+  @RequirePermissions('agent:manage')
+  async listCsv(
+    @CurrentUser() user: AuthUser,
+    @Query() q: ListAgentRunsDto,
+    @Res() res: Response,
+  ) {
+    // Export borné comme la vue : on ne streame pas des millions de lignes pour
+    // un journal qui se compte en milliers.
+    const r = await this.runs.list(user.orgId, {
+      ...q,
+      anomaliesOnly: String(q.anomaliesOnly) === 'true',
+      page: 1,
+      pageSize: 5000,
+    });
+    const rows = r.items.map((i) => [
+      i.createdAt,
+      i.agentName ?? i.agentId,
+      i.model ?? '',
+      i.projectName ?? '',
+      i.taskNumber != null ? `#${i.taskNumber} ${i.taskTitle ?? ''}` : '',
+      i.tokensIn ?? '',
+      i.tokensOut ?? '',
+      i.cost ?? '',
+      i.derivedCost ?? '',
+      i.anomaly ?? '',
+      i.note ?? '',
+    ]);
+    sendCsv(
+      res,
+      'agent-runs.csv',
+      toCsv(
+        ['date', 'agent', 'model', 'project', 'task', 'tokensIn', 'tokensOut', 'cost', 'derivedCost', 'anomaly', 'note'],
+        rows,
+      ),
+    );
   }
 }

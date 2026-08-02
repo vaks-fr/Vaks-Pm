@@ -8,6 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { decodeJwt } from 'jose';
+import { createHash } from 'node:crypto';
 import { permissionsForCapabilities, type Permission } from '@vaks-pm/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TenantContext } from '../../tenancy/tenant-context.service';
@@ -186,9 +187,10 @@ export class AgentFederationService implements OnModuleDestroy {
 
     // Gating open-core. Vérifié APRÈS la résolution de l'émetteur (il faut
     // l'orgId) mais AVANT toute crypto : inutile de vérifier une signature pour
-    // refuser ensuite. Sans licence, les agents continuent de fonctionner avec
-    // des PAT mintés par un admin — la fédération est un confort d'échelle.
-    if (!(await this.licenses.hasFeature('agent-federation'))) {
+    // refuser ensuite. Sans licence, les agents (jusqu'au plafond gratuit)
+    // continuent de fonctionner avec des PAT mintés par un admin — la fédération
+    // keyless est repliée dans le palier payant `agents`.
+    if (!(await this.licenses.hasFeature('agents'))) {
       await this.denied(issuer.organizationId, iss, 'license_missing');
       throw new UnauthorizedException({
         error: 'invalid_client',
@@ -422,11 +424,18 @@ export class AgentFederationService implements OnModuleDestroy {
     });
     if (!owner) return;
     const name = `${issuer.label} — ${externalId.slice(0, 24)}`;
+    // Email dérivé du hash de l'externalId COMPLET (pas d'un préfixe tronqué) :
+    // deux externalId distincts qui partageraient leurs 20 premiers caractères
+    // collisionnaient silencieusement sur la contrainte unique (organizationId,
+    // email) — le second `create` échouait, tombait dans le catch générique qui
+    // suppose à tort une course sur (org,idpSource,externalId), et l'agent n'était
+    // JAMAIS déclaré (audit sécu 2026-08-01, finding #6).
+    const emailHash = createHash('sha256').update(externalId).digest('hex').slice(0, 12);
     try {
       await this.prisma.user.create({
         data: {
           organizationId: orgId,
-          email: `agent-fed-${externalId.slice(0, 20).toLowerCase()}@agents.invalid`,
+          email: `agent-fed-${emailHash}@agents.invalid`,
           name,
           kind: 'AGENT',
           trustLevel: 'DRAFT_ONLY',

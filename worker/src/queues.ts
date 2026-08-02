@@ -5,7 +5,29 @@ export const QUEUES = {
   WORKLOAD_RECALC: 'workload-recalc',
   AUDIT_SYSLOG: 'audit-syslog',
   TEAMS: 'teams',
+  EXPORT: 'export',
 } as const;
+
+/**
+ * Job d'export long (rapport PDF, classeur XLSX, export RGPD…).
+ *
+ * Le worker ne **rend rien** : le rendu a besoin de la base et des utilitaires
+ * `pdf.util`/`xlsx.util` de l'API, or le worker est sans DB par contrat (cf.
+ * `TeamsJob`). Il se contente de déclencher `POST /internal/exports/run` avec un
+ * timeout long ; c'est la route API qui calcule, écrit l'artefact dans Garage et
+ * met à jour l'état du job.
+ *
+ * Ce que ça achète : les retries et la backpressure de BullMQ, et surtout la
+ * sortie du rendu long du chemin de requête (donc du timeout Traefik). Ce que ça
+ * n'achète **pas** : le CPU reste sur l'API — l'isoler demanderait une image de
+ * rendu séparée avec accès DB, non rentable sur ce cluster.
+ */
+export interface ExportJob {
+  jobId: string;
+  organizationId: string;
+  /** Slug tenant (pooled) → header `X-Tenant-Slug` sur l'appel interne. */
+  tenantSlug?: string | null;
+}
 
 /**
  * Job de provisioning Microsoft Teams. Stateless : le worker ne lit aucune conf

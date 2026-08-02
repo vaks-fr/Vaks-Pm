@@ -163,6 +163,9 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
   const [refreshTick, setRefreshTick] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [linkSource, setLinkSource] = useState<string | null>(null);
+  /** Type du lien en cours de création (Lot 1c.3) — choisi dans la bannière
+   *  affichée pendant `linkSource`, consommé par `handleCreateLink`. */
+  const [linkType, setLinkType] = useState<DependencyType>(DependencyType.FS);
   const [mode, setMode] = useState<Mode>('grouped');
 
   // Mode d'affichage du calendrier :
@@ -231,22 +234,29 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
   // sur toute la colonne (concerne tout le monde par défaut).
   const [orgHolidays, setOrgHolidays] = useState<Map<string, string>>(new Map());
   /** Conflit de dépendance détecté : la nouvelle date viole une contrainte
-   *  par rapport à une tâche prédécesseur. */
+   *  par rapport à une tâche prédécesseur — généralisé aux 4 types (Lot 1c.3).
+   *  `predEnd` porte l'ANCRE du prédécesseur pertinente pour ce type (sa fin
+   *  pour FS/FF, son début pour SS/SF — `anchorIsStart` distingue les deux
+   *  pour l'affichage). `minStart` reste toujours un plancher de START pour le
+   *  successeur (FF/SF sont convertis via sa propre durée), donc comparable
+   *  uniformément à la nouvelle date de début proposée. */
   interface DependencyConflict {
     predTitle: string;
-    predEnd: string; // YYYY-MM-DD
-    minStart: string; // borne minimale calculée (pred.end + lagDays)
+    predEnd: string; // YYYY-MM-DD — ancre du prédécesseur (fin ou début selon le type)
+    minStart: string; // borne minimale calculée pour le START du successeur
     lagDays: number;
-    type: 'FS'; // pour l'instant on ne signale que les FS (cas le plus courant)
+    type: DependencyType;
+    anchorIsStart: boolean;
   }
   /** Info gap : la tâche commence plus tard que ce qui serait optimal vis-à-vis
-   *  de sa dépendance FS. Pas une violation, juste un avertissement informatif. */
+   *  de sa dépendance. Pas une violation, juste un avertissement informatif. */
   interface DependencyGap {
     predTitle: string;
     predEnd: string;
     minStart: string;
     lagDays: number;
     gapDays: number;
+    anchorIsStart: boolean;
   }
   /** Déplacement en attente de confirmation après drag-drop d'une barre. */
   const [pendingMove, setPendingMove] = useState<{
@@ -604,13 +614,23 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
       await api.createDependency({
         predecessorId: linkSource,
         successorId: succId,
-        type: DependencyType.FS,
+        type: linkType,
       });
       setLinkSource(null);
+      setLinkType(DependencyType.FS);
       reload();
     } catch (e) {
       alert(t('timeline:link.refused', { message: (e as Error).message }));
       setLinkSource(null);
+    }
+  }
+
+  async function handleChangeDepType(id: string, type: DependencyType) {
+    try {
+      await api.updateDependency(id, { type });
+      reload();
+    } catch (e) {
+      alert((e as Error).message);
     }
   }
 
@@ -624,40 +644,57 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
     }
   }
 
-  /** Analyse FS pour le drag-drop : retourne conflicts (rouge) et gaps (jaune).
-   *  - conflict : newStart < pred.end + lag (violation)
-   *  - gap      : newStart > pred.end + lag (démarrage en retard, informatif) */
-  function detectFsState(
+  /** Analyse les 4 types de dépendance pour le drag-drop (Lot 1c.3, généralise
+   *  l'ancien `detectFsState` FS-only) : retourne conflicts (rouge) et gaps
+   *  (jaune) pour TOUTE dépendance entrante sur `taskId` (= successeur).
+   *  - FS/SS contraignent directement le START du successeur.
+   *  - FF/SF contraignent sa FIN, ramenée à un plancher de START via SA PROPRE
+   *    durée (calendaire, cohérent avec l'affichage timeline — approximation,
+   *    le CPM jours-ouvrés exact vit côté backend/`Gantt`).
+   *  - conflict : newStart < plancher calculé (violation)
+   *  - gap      : newStart > plancher calculé (démarrage en retard, informatif) */
+  function detectDependencyState(
     taskId: string,
     newStartIso: string,
     gantt: GanttDto,
   ): { conflicts: DependencyConflict[]; gaps: DependencyGap[] } {
     const conflicts: DependencyConflict[] = [];
     const gaps: DependencyGap[] = [];
+    const succTask = gantt.tasks.find((x) => x.id === taskId);
+    const succDurationMs = succTask
+      ? +parseDay(succTask.scheduledEnd) - +parseDay(succTask.scheduledStart)
+      : 0;
     for (const dep of gantt.dependencies) {
       if (dep.successorId !== taskId) continue;
-      if (dep.type !== DependencyType.FS) continue;
       const pred = gantt.tasks.find((x) => x.id === dep.predecessorId);
       if (!pred) continue;
       const lag = dep.lagDays ?? 0;
-      const minStartDate = addDays(parseDay(pred.scheduledEnd), lag);
+      const anchorIsStart = dep.type === DependencyType.SS || dep.type === DependencyType.SF;
+      const predAnchorIso = anchorIsStart ? pred.scheduledStart : pred.scheduledEnd;
+      const constrainsEnd = dep.type === DependencyType.FF || dep.type === DependencyType.SF;
+      const rawConstraint = addDays(parseDay(predAnchorIso), lag);
+      const minStartDate = constrainsEnd
+        ? new Date(+rawConstraint - succDurationMs)
+        : rawConstraint;
       const newStartDate = parseDay(newStartIso);
       if (newStartDate < minStartDate) {
         conflicts.push({
           predTitle: pred.title,
-          predEnd: pred.scheduledEnd,
+          predEnd: predAnchorIso,
           minStart: isoDay(minStartDate),
           lagDays: lag,
-          type: 'FS',
+          type: dep.type,
+          anchorIsStart,
         });
       } else if (newStartDate > minStartDate) {
         const gapDays = Math.round((+newStartDate - +minStartDate) / 86_400_000);
         gaps.push({
           predTitle: pred.title,
-          predEnd: pred.scheduledEnd,
+          predEnd: predAnchorIso,
           minStart: isoDay(minStartDate),
           lagDays: lag,
           gapDays,
+          anchorIsStart,
         });
       }
     }
@@ -674,7 +711,7 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
     const oldEnd = t.scheduledEnd;
     const newStart = isoDay(addDays(parseDay(oldStart), dayDelta));
     const newEnd = isoDay(addDays(parseDay(oldEnd), dayDelta));
-    const { conflicts, gaps } = detectFsState(taskId, newStart, data);
+    const { conflicts, gaps } = detectDependencyState(taskId, newStart, data);
     setPendingMove({
       taskId,
       taskTitle: t.title,
@@ -749,11 +786,12 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
     }
     const y1 = yPred + ROW_H / 2;
     const y2 = ySucc + ROW_H / 2;
-    const isCritical =
-      showCritical &&
-      pred.critical &&
-      succ.critical &&
-      dep.type === DependencyType.FS;
+    // Le CPM backend (`GET /projects/:id/gantt`) calcule `critical` par tâche
+    // en tenant compte des 4 types de dépendance (forward+backward pass avec
+    // `constrainedEarlyStart`/`constrainedLateFinish`) — le surlignage rouge
+    // n'a donc plus de raison d'être limité à FS (avant : les liens
+    // SS/FF/SF sur le chemin critique restaient invisibles).
+    const isCritical = showCritical && pred.critical && succ.critical;
     return { x1, y1, x2, y2, isCritical };
   }
 
@@ -910,6 +948,19 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
             {linkSource && (
               <span className="gantt-link-banner">
                 {t('timeline:link.chooseTarget')}
+                <select
+                  className="gantt-link-type-select"
+                  value={linkType}
+                  onChange={(e) => setLinkType(e.target.value as DependencyType)}
+                  title={t(`common:depType.${linkType}.help`)}
+                  aria-label={t('common:depType.pickerLabel')}
+                >
+                  {(['FS', 'SS', 'FF', 'SF'] as const).map((dt) => (
+                    <option key={dt} value={dt}>
+                      {t(`common:depType.${dt}.label`)}
+                    </option>
+                  ))}
+                </select>
                 <button onClick={() => setLinkSource(null)}>{t('timeline:link.cancel')}</button>
               </span>
             )}
@@ -1277,6 +1328,35 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
                           : t('timeline:link.depTooltip', { type: dep.type })}
                       </title>
                     </path>
+                    {/* Sélecteur de type (Lot 1c.3) : clic = changer le type du
+                        lien existant, sans passer par la suppression/recréation. */}
+                    <foreignObject
+                      x={midX - 17}
+                      y={(ep.y1 + ep.y2) / 2 - 9}
+                      width={34}
+                      height={18}
+                    >
+                      <div className="gantt-dep-type-fo">
+                        <select
+                          className="gantt-dep-type-select"
+                          value={dep.type}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            handleChangeDepType(dep.id, e.target.value as DependencyType);
+                          }}
+                          title={t(`common:depType.${dep.type}.help`)}
+                          aria-label={t('common:depType.changeLabel')}
+                        >
+                          {(['FS', 'SS', 'FF', 'SF'] as const).map((dt) => (
+                            <option key={dt} value={dt}>
+                              {dt}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </foreignObject>
                   </g>
                 );
               })}
@@ -1540,7 +1620,8 @@ function MoveConfirmModal({
       predEnd: string;
       minStart: string;
       lagDays: number;
-      type: 'FS';
+      type: DependencyType;
+      anchorIsStart: boolean;
     }[];
     gaps: {
       predTitle: string;
@@ -1548,6 +1629,7 @@ function MoveConfirmModal({
       minStart: string;
       lagDays: number;
       gapDays: number;
+      anchorIsStart: boolean;
     }[];
   };
   onCancel: () => void;
@@ -1620,7 +1702,8 @@ function MoveConfirmModal({
               <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
                 {move.conflicts.map((c, i) => (
                   <li key={i} style={{ marginTop: 2 }}>
-                    <strong>{c.predTitle}</strong> {t('timeline:move.conflictEnds')}{' '}
+                    <strong>{c.predTitle}</strong>{' '}
+                    {t(c.anchorIsStart ? 'timeline:move.conflictStarts' : 'timeline:move.conflictEnds')}{' '}
                     <span className="mono">{fmt(c.predEnd)}</span>
                     {c.lagDays !== 0 && (
                       <span className="mono" style={{ color: 'var(--text-3)' }}>
@@ -1658,7 +1741,7 @@ function MoveConfirmModal({
                   <li key={i} style={{ marginTop: 2 }}>
                     {t('timeline:move.lateStartItemPrefix')}{' '}
                     <strong>{t('timeline:move.lateStartItemDays', { days: g.gapDays })}</strong>{' '}
-                    {t('timeline:move.lateStartItemSuffix')}{' '}
+                    {t(g.anchorIsStart ? 'timeline:move.lateStartItemSuffixStart' : 'timeline:move.lateStartItemSuffix')}{' '}
                     <strong>{g.predTitle}</strong>{' '}
                     <span className="mono" style={{ color: 'var(--text-3)' }}>
                       ({fmt(g.predEnd)})

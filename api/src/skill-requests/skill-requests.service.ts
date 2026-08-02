@@ -82,6 +82,25 @@ export class SkillRequestsService {
     return this.createInternal(orgId, dto, SYSTEM_REQUESTER_ID);
   }
 
+  /**
+   * Demande émise par un **agent bloqué** sur sa propre tâche (lot B,
+   * `POST /tasks/:id/assistance`). Court-circuite le gate PM — non pas par
+   * faveur, mais parce que le périmètre est déjà borné en amont par l'appelant :
+   * l'agent doit détenir la tâche, et l'équipe destinataire est **résolue
+   * serveur** à partir de la compétence manquante (l'agent ne choisit ni qui il
+   * dérange, ni pour quel projet).
+   *
+   * Le demandeur est l'AGENT lui-même — contrairement aux demandes nées d'une
+   * automatisation (sentinelle SYSTEM) : ici il y a bien un acteur identifiable,
+   * et l'attribuer à un humain fausserait l'audit.
+   */
+  async createFromAgent(orgId: string, dto: CreateSkillRequestDto, agentId: string) {
+    if (!dto.skillId && !dto.proposedName) {
+      throw new BadRequestException('Fournir un skillId ou un proposedName');
+    }
+    return this.createInternal(orgId, dto, agentId);
+  }
+
   /** Corps commun post-gate : validations, création, notif+webhook. */
   private async createInternal(
     orgId: string,

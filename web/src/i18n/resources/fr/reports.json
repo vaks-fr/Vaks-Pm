@@ -32,14 +32,14 @@
     "pageRange": "{{from}}–{{to}} sur {{total}}"
   },
   "status": {
-    "todo": "To do",
+    "todo": "À faire",
     "claimed": "Réclamée",
     "inProgress": "En cours",
-    "inReview": "Review",
+    "inReview": "En revue",
     "changesRequested": "Modifs demandées",
     "approved": "Approuvée",
     "onHold": "En pause",
-    "done": "Done"
+    "done": "Terminée"
   },
   "due": {
     "onTime": "À temps",

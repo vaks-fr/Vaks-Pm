@@ -13,26 +13,16 @@
  * pays par défaut de l'org.
  */
 
+import { startOfUtcDay, weekdayMonFirst, dateIso as isoDay } from '../workload/scheduling';
+
 const MS_PER_DAY = 86_400_000;
 
-export function startOfUtcDay(d: Date): Date {
-  const x = new Date(d);
-  x.setUTCHours(0, 0, 0, 0);
-  return x;
-}
+export { startOfUtcDay, weekdayMonFirst, isoDay };
 
 export function addCalendarDays(d: Date, n: number): Date {
   const x = new Date(d);
   x.setUTCDate(x.getUTCDate() + n);
   return x;
-}
-
-export function weekdayMonFirst(d: Date): number {
-  return (d.getUTCDay() + 6) % 7;
-}
-
-export function isoDay(d: Date): string {
-  return d.toISOString().slice(0, 10);
 }
 
 export interface AssigneeAvailability {

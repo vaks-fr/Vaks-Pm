@@ -274,7 +274,13 @@ export class AgentConnectorsService {
         where: { id },
         data: { lastSyncAt: new Date(), lastSyncOk: true, lastSyncError: null },
       });
-      return { ok: true, created: res.created, updated: res.updated, suspended: res.suspended };
+      return {
+        ok: true,
+        created: res.created,
+        updated: res.updated,
+        suspended: res.suspended,
+        skippedOverLimit: res.skippedOverLimit,
+      };
     } catch (e) {
       const msg = (e as Error).message?.slice(0, 500) ?? 'unknown error';
       this.log.warn(`[agents] sync failed provider="${row.provider}" (org=${orgId}): ${msg}`);

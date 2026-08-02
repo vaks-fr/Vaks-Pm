@@ -10,6 +10,7 @@ import { WorkloadService } from '../workload/workload.service';
 import { CapacityService } from '../workload/capacity.service';
 import { TeamsProvisioningService } from '../teams-provisioning/teams-provisioning.service';
 import { SeatService } from '../licensing/seat.service';
+import { blankStatusCounts } from '../common/task-status.util';
 import {
   AddTeamMemberDto,
   CreateTeamDto,
@@ -211,14 +212,13 @@ export class TeamsService {
 
     // Comptes de statut par user (tâches assignées, non supprimées).
     const statusByUser = new Map<string, Record<TaskStatus, number>>();
-    const blankStatus = (): Record<TaskStatus, number> => ({ TODO: 0, CLAIMED: 0, IN_PROGRESS: 0, IN_REVIEW: 0, CHANGES_REQUESTED: 0, APPROVED: 0, ON_HOLD: 0, DONE: 0 });
     if (userIds.length) {
       const assigned = await this.prisma.taskAssignee.findMany({
         where: { userId: { in: userIds }, task: { organizationId: orgId, deletedAt: null } },
         select: { userId: true, task: { select: { status: true } } },
       });
       for (const a of assigned) {
-        const s = statusByUser.get(a.userId) ?? blankStatus();
+        const s = statusByUser.get(a.userId) ?? blankStatusCounts();
         s[a.task.status]++;
         statusByUser.set(a.userId, s);
       }
@@ -249,12 +249,12 @@ export class TeamsService {
         byProject: [...byProj.values()]
           .map((p) => ({ projectKey: p.projectKey, projectName: p.projectName, hours: r2(p.hours), pct: capacity > 0 ? Math.round((p.hours / capacity) * 1000) / 10 : null }))
           .sort((a, b) => b.hours - a.hours),
-        statusCounts: statusByUser.get(row.userId) ?? blankStatus(),
+        statusCounts: statusByUser.get(row.userId) ?? blankStatusCounts(),
       };
     });
 
     // Agrégats équipe.
-    const totalsStatus = blankStatus();
+    const totalsStatus = blankStatusCounts();
     for (const m of members) (Object.keys(m.statusCounts) as TaskStatus[]).forEach((k) => (totalsStatus[k] += m.statusCounts[k]));
     const utilVals = members.map((m) => m.utilizationPct).filter((v): v is number => v != null);
     const avgUtilization = utilVals.length ? Math.round((utilVals.reduce((s, v) => s + v, 0) / utilVals.length) * 10) / 10 : null;

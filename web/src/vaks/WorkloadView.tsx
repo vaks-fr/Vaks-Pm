@@ -2,7 +2,8 @@
    Vaks — Workload / capacity view (Phase 5 — real API)
    People × days grid · capacity vs allocation · drag to reassign
    ============================================================ */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Trans, useTranslation } from 'react-i18next';
 import type { AutoplanResultDto, WorkloadGridDto } from '@vaks-pm/shared';
 import { type User } from './data';
@@ -20,12 +21,34 @@ const LS_MODE = 'vaks.workload.mode';
 const LS_ANCHOR = 'vaks.workload.anchor';
 const LS_PRESERVE = 'vaks.workload.autoplanPreserve';
 const LS_ASSIGNMODE = 'vaks.workload.autoplanAssignMode';
+const LS_STRATEGY = 'vaks.workload.autoplanStrategy';
+const LS_CONCENTRATION = 'vaks.workload.autoplanConcentration';
+const LS_HORIZON = 'vaks.workload.autoplanHorizon';
 
 type PreserveMode = 'manual_autosplit' | 'manual' | 'none';
 const PRESERVE_MODES: PreserveMode[] = ['none', 'manual_autosplit', 'manual'];
 /** Mode d'affectation des tâches sans assigné lors de l'auto-plan. */
 type AssignMode = 'off' | 'suggest' | 'auto';
 const ASSIGN_MODES: AssignMode[] = ['off', 'suggest', 'auto'];
+/** Lot 2.1 — stratégie de placement. `asap` = comportement historique. */
+type PlacementStrategy = 'asap' | 'deadline_aware';
+const PLACEMENT_STRATEGIES: PlacementStrategy[] = ['asap', 'deadline_aware'];
+/** Lot 2.2 — curseur de concentration de l'affectation assistée. */
+type Concentration = 'focus' | 'balanced' | 'spread';
+const CONCENTRATIONS: Concentration[] = ['focus', 'balanced', 'spread'];
+/** Lot 2.3 — horizon de planification envoyé en `to`. `all` = pas de `to`
+ *  (le backend borne à PLAN_HORIZON_DAYS = 2 ans — comportement historique). */
+type Horizon = '3m' | '6m' | '1y' | 'all';
+const HORIZONS: Horizon[] = ['3m', '6m', '1y', 'all'];
+function horizonToIso(h: Horizon): string | undefined {
+  if (h === 'all') return undefined;
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  if (h === '3m') d.setUTCMonth(d.getUTCMonth() + 3);
+  else if (h === '6m') d.setUTCMonth(d.getUTCMonth() + 6);
+  else d.setUTCFullYear(d.getUTCFullYear() + 1);
+  return d.toISOString().slice(0, 10);
+}
 
 interface ToastInput {
   actor: User;
@@ -121,6 +144,120 @@ function asUser(u: { userId: string; name: string; email: string }): User {
   };
 }
 
+/**
+ * Menu d'actions par personne dans la grille de charge (⋯ → entrées TEXTE).
+ * Remplace les deux icônes (zap/unlock) qui tronquaient le nom : un seul
+ * déclencheur compact rend le nom à sa pleine largeur, et les actions sont
+ * enfin explicites (libellées) plutôt que devinées depuis une icône terne.
+ */
+const ROWACTIONS_MENU_WIDTH = 220;
+
+function RowActions({
+  onReplan,
+  onReleaseDay,
+  labels,
+}: {
+  onReplan: () => void;
+  onReleaseDay: () => void;
+  labels: { menu: string; replan: string; releaseDay: string };
+}) {
+  const [open, setOpen] = useState(false);
+  // Position en coordonnées écran (le menu est rendu dans un PORTAL sur
+  // document.body avec position:fixed) — indispensable : la grille de charge
+  // est un conteneur scrollable (overflow) et chaque colonne « nom » figée crée
+  // son propre contexte d'empilement, ce qui rognait/recouvrait un menu posé en
+  // absolute dans la ligne. Le portal échappe aux deux.
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const place = useCallback(() => {
+    const b = btnRef.current?.getBoundingClientRect();
+    if (!b) return;
+    const left = Math.max(8, b.right - ROWACTIONS_MENU_WIDTH);
+    setPos({ top: Math.round(b.bottom + 4), left: Math.round(left) });
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      const tgt = e.target as Node;
+      if (menuRef.current?.contains(tgt) || btnRef.current?.contains(tgt)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    // Tout scroll (grille incluse, d'où la capture) ou resize détache le menu
+    // fixe du bouton → on ferme plutôt que d'afficher un menu mal placé.
+    const close = () => setOpen(false);
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [open]);
+
+  return (
+    <div style={{ marginLeft: 'auto', flexShrink: 0 }}>
+      <button
+        ref={btnRef}
+        className="wl-rowactions-btn"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={labels.menu}
+        title={labels.menu}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!open) place();
+          setOpen((v) => !v);
+        }}
+      >
+        ⋯
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="menu"
+            className="wl-rowactions-menu"
+            style={{ top: pos.top, left: pos.left, width: ROWACTIONS_MENU_WIDTH }}
+          >
+            <button
+              role="menuitem"
+              className="wl-menu-item"
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen(false);
+                onReplan();
+              }}
+            >
+              {labels.replan}
+            </button>
+            <button
+              role="menuitem"
+              className="wl-menu-item"
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen(false);
+                onReleaseDay();
+              }}
+            >
+              {labels.releaseDay}
+            </button>
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
 export function WorkloadView({
   monday,
   scope,
@@ -162,6 +299,10 @@ export function WorkloadView({
   const [planPreview, setPlanPreview] = useState<AutoplanResultDto | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
+  // Lot 3.3 — badge « plan obsolète » : fraîcheur du dernier auto-plan
+  // appliqué sur le projet sélectionné vs les tâches. Fail-soft : une erreur
+  // réseau ne doit jamais afficher le bandeau (juste rien).
+  const [planStale, setPlanStale] = useState(false);
   // Ce que l'auto-plan préserve (le passé/aujourd'hui est toujours gelé en
   // plus). Persisté pour retrouver le choix du PM d'une session à l'autre.
   const [preserveMode, setPreserveMode] = useState<PreserveMode>(() => {
@@ -183,6 +324,46 @@ export function WorkloadView({
     try { window.localStorage.setItem(LS_ASSIGNMODE, assignMode); } catch { /* ignore */ }
   }, [assignMode]);
   const [assignOverrides, setAssignOverrides] = useState<Record<string, string[]>>({});
+  // Lot 2.1 — stratégie de placement. Persistée comme les autres contrôles.
+  const [placementStrategy, setPlacementStrategy] = useState<PlacementStrategy>(() => {
+    const v = typeof window !== 'undefined' ? window.localStorage.getItem(LS_STRATEGY) : null;
+    return v === 'deadline_aware' ? v : 'asap';
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(LS_STRATEGY, placementStrategy); } catch { /* ignore */ }
+  }, [placementStrategy]);
+  // Lot 2.2 — curseur de concentration. Initialisé sur le défaut org au
+  // premier montage (pas de valeur locale persistée), puis surchargeable par
+  // run et mémorisé comme les autres contrôles.
+  const [concentration, setConcentration] = useState<Concentration>(() => {
+    const v = typeof window !== 'undefined' ? window.localStorage.getItem(LS_CONCENTRATION) : null;
+    return v === 'focus' || v === 'balanced' || v === 'spread' ? v : orgSettings.autoplanConcentration;
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(LS_CONCENTRATION, concentration); } catch { /* ignore */ }
+  }, [concentration]);
+  // Lot 2.3 — horizon de planification. `all` = comportement historique
+  // (pas de `to` envoyé, le backend borne à 2 ans).
+  const [horizon, setHorizon] = useState<Horizon>(() => {
+    const v = typeof window !== 'undefined' ? window.localStorage.getItem(LS_HORIZON) : null;
+    return v === '3m' || v === '6m' || v === '1y' || v === 'all' ? v : 'all';
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(LS_HORIZON, horizon); } catch { /* ignore */ }
+  }, [horizon]);
+  // Lot 2.4 — auto-plan scopé à UNE personne (« Replanifier cette personne »
+  // sur la ligne de la grille). Non persisté : redevient global/projet dès
+  // que la popup de config est refermée sans lancer d'aperçu.
+  const [userScope, setUserScope] = useState<{ userId: string; name: string } | null>(null);
+  // Lot 4.2 (porte 2) — levée CIBLÉE du gel du passé pour le run en cours
+  // (« Libérer cette journée »). Toujours accompagné de `userScope` sur le
+  // MÊME user — jamais posé seul. Effacé à la fermeture de l'aperçu ou dès
+  // qu'un autre flux d'auto-plan (global/projet/personne classique) démarre.
+  const [unfreezeDay, setUnfreezeDay] = useState<{ userId: string; date: string } | null>(null);
+  // Préservation forcée pour le run « Libérer cette journée » en cours (voir
+  // `releaseDay`) — distincte de `preserveMode` (réglage persisté du reste de
+  // la vue) pour ne jamais l'écraser. Suit le même cycle de vie que `unfreezeDay`.
+  const [releasePreserve, setReleasePreserve] = useState<PreserveMode | null>(null);
   // Popup de configuration de l'auto-plan (préservation + mode d'affectation).
   const [planConfigOpen, setPlanConfigOpen] = useState(false);
   // Popup « projet non actif » : l'auto-plan ne planifie que les projets ACTIVE
@@ -192,11 +373,30 @@ export function WorkloadView({
   const [notActiveOpen, setNotActiveOpen] = useState(false);
   const projectNotActive = !!projectId && !!projectStatus && projectStatus !== 'ACTIVE';
   // Point d'entrée unique du bouton Auto-plan (desktop + mobile) : garde le cas
-  // projet non actif, sinon ouvre la configuration.
+  // projet non actif, sinon ouvre la configuration. Scope projet/global.
   const openAutoplan = useCallback(() => {
+    setUserScope(null);
+    setUnfreezeDay(null);
+    setReleasePreserve(null);
     if (projectNotActive) setNotActiveOpen(true);
     else setPlanConfigOpen(true);
   }, [projectNotActive]);
+  // Lot 2.4 — « Replanifier cette personne » depuis la ligne de la grille.
+  // Le statut projet n'entre pas en jeu (scope=user, pas scope=project).
+  const openAutoplanForUser = useCallback((userId: string, name: string) => {
+    setUserScope({ userId, name });
+    setUnfreezeDay(null);
+    setReleasePreserve(null);
+    setPlanConfigOpen(true);
+  }, []);
+  // Ferme la popup de config SANS lancer d'aperçu (annulation) — remet le
+  // scope global/projet par défaut.
+  const closeAutoplanConfig = useCallback(() => {
+    setPlanConfigOpen(false);
+    setUserScope(null);
+    setUnfreezeDay(null);
+    setReleasePreserve(null);
+  }, []);
   const [timeOffOpen, setTimeOffOpen] = useState(false);
   // (14) Sort + search local state.
   const [sortBy, setSortBy] = useState<'hours-desc' | 'name'>('hours-desc');
@@ -359,53 +559,124 @@ export function WorkloadView({
     setRefreshTick((n) => n + 1);
   }, [refreshKey]);
 
+  // Lot 3.3 — badge « plan obsolète » : uniquement pertinent quand un projet
+  // est sélectionné (l'auto-plan projet est ce qui pose isAutoPlan). Refetch
+  // à chaque refresh (drag-drop, apply, panneau tâche fermé…). Fail-soft :
+  // toute erreur laisse simplement `planStale` à false, jamais de bandeau.
+  useEffect(() => {
+    if (!projectId) {
+      setPlanStale(false);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getPlanStatus(projectId)
+      .then((r) => {
+        if (!cancelled) setPlanStale(r.stale);
+      })
+      .catch(() => {
+        if (!cancelled) setPlanStale(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, refreshTick]);
+
   const runAutoplan = useCallback(
-    async (persist: boolean, ovArg?: Record<string, string[]>) => {
+    async (
+      persist: boolean,
+      ovArg?: Record<string, string[]>,
+      applyOnlyUserIds?: string[],
+      // Lot 4.2 (porte 2) — « Libérer cette journée » lance un aperçu à scope
+      // explicite SANS passer par la popup de config (donc sans attendre un
+      // re-render pour lire `userScope`/`unfreezeDay` depuis le state, encore
+      // stale au moment de l'appel). Une fois l'aperçu affiché, le state EST
+      // synchronisé (ci-dessous) pour que le bouton « Appliquer » de la modale
+      // (qui rappelle `runAutoplan` sans `scopeArg`) retombe correctement sur
+      // le même scope/unfreeze via les valeurs par défaut.
+      scopeArg?: {
+        userScope: { userId: string; name: string } | null;
+        unfreezeUserDay: { userId: string; date: string } | null;
+        /** Force le mode de préservation pour CE run (release day = 'none' :
+         *  on libère la journée quelle que soit l'origine des allocations). */
+        preserve?: PreserveMode;
+      },
+    ) => {
       setPlanLoading(true);
       setPlanError(null);
+      const effectiveUserScope = scopeArg ? scopeArg.userScope : userScope;
+      const effectiveUnfreeze = scopeArg ? scopeArg.unfreezeUserDay : unfreezeDay;
+      const effectivePreserve = scopeArg?.preserve ?? releasePreserve ?? preserveMode;
       try {
-        const autoAssign = assignMode !== 'off';
+        // Lot 2.4 — scope=user (« Replanifier cette personne ») : autoAssign/
+        // reassignAssigned sont IGNORÉS côté backend dans ce cas, on les
+        // omet donc aussi côté client (évite d'afficher une suggestion
+        // trompeuse en cas d'erreur serveur).
+        const autoAssign = !effectiveUserScope && assignMode !== 'off';
         const ov = ovArg ?? assignOverrides;
         const overridesList =
           autoAssign && Object.keys(ov).length
             ? Object.entries(ov).map(([taskId, userIds]) => ({ taskId, userIds }))
             : undefined;
-        // Scoping de l'auto-plan : on respecte le projet sélectionné dans
-        // le picker top-left si présent — sinon vue cross-projets → global.
-        // Sans ça, persist() supprimerait toutes les allocations auto des
-        // tâches concernées même quand on est censé être sur un projet vide.
+        // Scoping de l'auto-plan : user > projet sélectionné dans le picker
+        // top-left > global (vue cross-projets). Sans ça, persist()
+        // supprimerait toutes les allocations auto des tâches concernées
+        // même quand on est censé être sur un projet vide.
         //
-        // On ne passe PLUS `from`/`to` : l'autoplan planifie tout le scope
-        // (le backend borne à un horizon de 2 ans). La fenêtre semaine/mois
-        // de la vue ne sert qu'à l'affichage de la grille — la planifier
-        // dessus laissait tout le travail au-delà de la fenêtre non alloué.
+        // Lot 2.3 — horizon : `to` calculé depuis le sélecteur ('all' = pas de
+        // `to`, le backend borne à 2 ans — comportement historique). `from`
+        // n'est jamais envoyé : le gel du passé (cutoff = J+1) est géré
+        // côté serveur, pas par la fenêtre d'affichage de la grille.
         // En mode suggestion, on propose AUSSI les tâches déjà assignées (par
         // défaut sur leur assigné actuel) pour que le PM puisse en swapper
         // l'assigné. Indépendant du mode de préservation.
-        const reassignAssigned = assignMode === 'suggest';
+        const reassignAssigned = !effectiveUserScope && assignMode === 'suggest';
         const r = await api.autoplan({
-          scope: projectId ? 'project' : 'global',
-          projectId: projectId ?? undefined,
-          preserve: preserveMode,
+          scope: effectiveUserScope ? 'user' : projectId ? 'project' : 'global',
+          projectId: !effectiveUserScope && projectId ? projectId : undefined,
+          userId: effectiveUserScope ? effectiveUserScope.userId : undefined,
+          to: horizonToIso(horizon),
+          preserve: effectivePreserve,
           persist,
           autoAssign: autoAssign || undefined,
           reassignAssigned: reassignAssigned || undefined,
           assignmentOverrides: overridesList,
+          placementStrategy,
+          concentration,
+          applyOnly: applyOnlyUserIds ? { userIds: applyOnlyUserIds } : undefined,
+          unfreezeUserDay: effectiveUnfreeze ?? undefined,
         });
         if (persist) {
           setPlanPreview(null);
           setAssignOverrides({});
+          setUserScope(null);
+          setUnfreezeDay(null);
+          setReleasePreserve(null);
           pushToast({
             actor: asUser({ userId: '', name: 'System', email: '' }),
-            text: t('view.autoplanApplied', {
-              added: r.diff.added.length,
-              removed: r.diff.removed.length,
-              modified: r.diff.modified.length,
-            }),
+            text: effectiveUnfreeze
+              ? t('view.releaseDayApplied', {
+                  name: effectiveUserScope?.name ?? '',
+                  added: r.diff.added.length,
+                  removed: r.diff.removed.length,
+                })
+              : t('view.autoplanApplied', {
+                  added: r.diff.added.length,
+                  removed: r.diff.removed.length,
+                  modified: r.diff.modified.length,
+                }),
           });
           reload();
         } else {
           setPlanPreview(r);
+          // Synchronise le state affiché par la popup/modale avec le scope
+          // effectif de CET aperçu — nécessaire pour `releaseDay`, qui passe
+          // `scopeArg` sans être passé par `openAutoplanForUser`.
+          if (scopeArg) {
+            setUserScope(scopeArg.userScope);
+            setUnfreezeDay(scopeArg.unfreezeUserDay);
+            setReleasePreserve(scopeArg.preserve ?? null);
+          }
         }
       } catch (e) {
         setPlanError((e as Error).message);
@@ -413,7 +684,39 @@ export function WorkloadView({
         setPlanLoading(false);
       }
     },
-    [projectId, preserveMode, assignMode, assignOverrides, pushToast, reload, t],
+    [
+      projectId,
+      userScope,
+      unfreezeDay,
+      releasePreserve,
+      preserveMode,
+      assignMode,
+      assignOverrides,
+      placementStrategy,
+      concentration,
+      horizon,
+      pushToast,
+      reload,
+      t,
+    ],
+  );
+
+  // Lot 4.2 (porte 2) — « Libérer cette journée » : lance directement un
+  // aperçu scopé sur CE user avec le gel d'aujourd'hui levé, `preserve:'none'`
+  // (on libère la journée quelle que soit l'origine manuelle/auto des
+  // allocations — c'est tout le sens du bouton), en réutilisant le pipeline
+  // aperçu→diff→appliquer+undo existant.
+  const releaseDay = useCallback(
+    (userId: string, name: string) => {
+      const today = new Date().toISOString().slice(0, 10);
+      setAssignOverrides({});
+      void runAutoplan(false, {}, undefined, {
+        userScope: { userId, name },
+        unfreezeUserDay: { userId, date: today },
+        preserve: 'none',
+      });
+    },
+    [runAutoplan],
   );
 
   // Lance un aperçu propre depuis la popup de config (réinitialise les swaps).
@@ -721,12 +1024,19 @@ export function WorkloadView({
       {planConfigOpen && (
         <AutoplanConfigModal
           scopeIsProject={!!projectId}
+          userScope={userScope}
           preserve={preserveMode}
           setPreserve={setPreserveMode}
           assignMode={assignMode}
           setAssignMode={setAssignMode}
+          placementStrategy={placementStrategy}
+          setPlacementStrategy={setPlacementStrategy}
+          concentration={concentration}
+          setConcentration={setConcentration}
+          horizon={horizon}
+          setHorizon={setHorizon}
           onRun={launchPreview}
-          onClose={() => setPlanConfigOpen(false)}
+          onClose={closeAutoplanConfig}
           loading={planLoading}
         />
       )}
@@ -735,11 +1045,18 @@ export function WorkloadView({
           result={planPreview}
           viewFrom={fromIso}
           viewTo={toIso}
-          onClose={() => setPlanPreview(null)}
-          onApply={() => runAutoplan(true)}
+          onClose={() => {
+            setPlanPreview(null);
+            setUserScope(null);
+            setUnfreezeDay(null);
+            setReleasePreserve(null);
+          }}
+          onApply={(userIds) => runAutoplan(true, undefined, userIds)}
           onSwap={swapAssignee}
-          swappable={assignMode === 'suggest'}
+          swappable={!userScope && assignMode === 'suggest'}
           loading={planLoading}
+          onOpen={onOpen}
+          releasingDayFor={unfreezeDay ? userScope?.name : undefined}
         />
       )}
       {pendingMove && (
@@ -799,6 +1116,8 @@ export function WorkloadView({
           isTeamLead={isTeamLead}
           planLoading={planLoading}
           onAutoplan={openAutoplan}
+          onReplanUser={openAutoplanForUser}
+          onReleaseDay={releaseDay}
           onTimeOff={() => setTimeOffOpen(true)}
           shiftPeriod={shiftPeriod}
         />
@@ -948,6 +1267,37 @@ export function WorkloadView({
         )}
       </div>
 
+      {/* Lot 3.3 — badge « plan obsolète » : les tâches du projet ont bougé
+          depuis la dernière application de l'auto-plan. Discret, non
+          bloquant, masqué en vue cross-projets (planStale reste false). */}
+      {planStale && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '3px 18px 3px 15px',
+            background: 'transparent',
+            borderBottom: '1px solid var(--border)',
+            borderLeft: '3px solid oklch(0.75 0.18 85)',
+            fontSize: 11.5,
+            color: 'var(--text-3)',
+          }}
+        >
+          <Icon name="warn" size={11} />
+          <span>{t('view.planStale.text')}</span>
+          <div style={{ flex: 1 }} />
+          <button
+            className="btn btn-ghost"
+            disabled={planLoading}
+            onClick={openAutoplan}
+            style={{ fontSize: 11.5, padding: '2px 8px', color: 'var(--accent)' }}
+          >
+            {t('view.planStale.action')}
+          </button>
+        </div>
+      )}
+
       {/* (15) Undo banner pour le dernier drag — visible 30s. */}
       {undoOp && (
         <div
@@ -1020,6 +1370,15 @@ export function WorkloadView({
             }}
           >
             {t('view.rebalanceHint')}
+          </span>
+          {/* Lot 3.2 — légende auto vs manuel (bordure des chips). */}
+          <span
+            style={{ fontSize: 11.5, color: 'var(--text-3)', display: 'inline-flex', alignItems: 'center' }}
+          >
+            <span className="wl-legend-swatch is-auto" />
+            {t('view.legend.autoAlloc')}
+            <span className="wl-legend-swatch" style={{ marginLeft: 10 }} />
+            {t('view.legend.manualAlloc')}
           </span>
           <div style={{ flex: 1 }} />
           <span
@@ -1169,6 +1528,18 @@ export function WorkloadView({
                     {r.email}
                   </div>
                 </div>
+                {/* Menu ⋯ par personne — actions libellées (Lot 2.4 « Replanifier
+                    cette personne » + Lot 4.2 porte 2 « Libérer aujourd'hui »).
+                    Un seul déclencheur compact : le nom garde sa pleine largeur. */}
+                <RowActions
+                  labels={{
+                    menu: t('view.rowActions'),
+                    replan: t('view.menuReplan'),
+                    releaseDay: t('view.menuReleaseDay'),
+                  }}
+                  onReplan={() => openAutoplanForUser(r.userId, r.name)}
+                  onReleaseDay={() => releaseDay(r.userId, r.name)}
+                />
               </div>
               {r.cells.map((c) => {
                 const state = loadState(c.allocatedHours, c.capacityHours);
@@ -1203,7 +1574,11 @@ export function WorkloadView({
                     <div
                       key={a.allocationId}
                       data-block={a.allocationId}
-                      className={'wl-chip wl-chip-rich' + (dragId === a.allocationId ? ' wl-chip-dim' : '')}
+                      className={
+                        'wl-chip wl-chip-rich' +
+                        (dragId === a.allocationId ? ' wl-chip-dim' : '') +
+                        (a.isAutoPlan ? ' wl-chip-auto' : '')
+                      }
                       style={chipStyle}
                       onPointerDown={(e) =>
                         onChipDown(e, a.allocationId, r.userId, c.date, a.hours)
@@ -1799,19 +2174,36 @@ function ProjectNotActiveModal({
 // d'affectation, avant de lancer l'aperçu. Remplace les 3 contrôles de barre.
 function AutoplanConfigModal({
   scopeIsProject,
+  userScope,
   preserve,
   setPreserve,
   assignMode,
   setAssignMode,
+  placementStrategy,
+  setPlacementStrategy,
+  concentration,
+  setConcentration,
+  horizon,
+  setHorizon,
   onRun,
   onClose,
   loading,
 }: {
   scopeIsProject: boolean;
+  /** Lot 2.4 — non-null quand la config a été ouverte depuis « Replanifier
+   *  cette personne » : masque les sections autoAssign/reassign/concentration
+   *  (ignorées côté serveur en scope=user) et affiche un bandeau dédié. */
+  userScope: { userId: string; name: string } | null;
   preserve: PreserveMode;
   setPreserve: (m: PreserveMode) => void;
   assignMode: AssignMode;
   setAssignMode: (m: AssignMode) => void;
+  placementStrategy: PlacementStrategy;
+  setPlacementStrategy: (m: PlacementStrategy) => void;
+  concentration: Concentration;
+  setConcentration: (m: Concentration) => void;
+  horizon: Horizon;
+  setHorizon: (m: Horizon) => void;
   onRun: () => void;
   onClose: () => void;
   loading: boolean;
@@ -1896,7 +2288,11 @@ function AutoplanConfigModal({
           <div>
             <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>{t('config.title')}</h2>
             <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
-              {scopeIsProject ? t('config.scopeProject') : t('config.scopeGlobal')}
+              {userScope
+                ? t('config.scopeUser', { name: userScope.name })
+                : scopeIsProject
+                  ? t('config.scopeProject')
+                  : t('config.scopeGlobal')}
             </div>
           </div>
           <div style={{ flex: 1 }} />
@@ -1931,6 +2327,7 @@ function AutoplanConfigModal({
             ))}
           </div>
 
+          {/* Lot 2.1 — stratégie de placement. */}
           <div style={{ display: 'grid', gap: 8 }}>
             <div
               style={{
@@ -1941,20 +2338,106 @@ function AutoplanConfigModal({
                 color: 'var(--text-3)',
               }}
             >
-              {t('config.assignLabel')}
+              {t('config.strategyLabel')}
             </div>
-            {ASSIGN_MODES.map((m) => (
+            {PLACEMENT_STRATEGIES.map((m) => (
               <Option
                 key={m}
-                name="autoplan-assign"
+                name="autoplan-strategy"
                 value={m}
-                current={assignMode}
-                onPick={setAssignMode}
-                label={t('config.assign.' + m)}
-                desc={t('config.assignDesc.' + m)}
+                current={placementStrategy}
+                onPick={setPlacementStrategy}
+                label={t('config.strategy.' + m)}
+                desc={t('config.strategyDesc.' + m)}
               />
             ))}
           </div>
+
+          {/* Lot 2.3 — horizon de planification (`to`). */}
+          <div style={{ display: 'grid', gap: 8 }}>
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                letterSpacing: 0.5,
+                color: 'var(--text-3)',
+              }}
+            >
+              {t('config.horizonLabel')}
+            </div>
+            <div className="seg">
+              {HORIZONS.map((h) => (
+                <button
+                  key={h}
+                  type="button"
+                  className={'seg-btn' + (horizon === h ? ' seg-on' : '')}
+                  onClick={() => setHorizon(h)}
+                >
+                  {t('config.horizon.' + h)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Lot 2.4 — autoAssign/reassign/concentration n'ont aucun effet en
+              scope=user (ignorés côté serveur) : masqués pour ne pas
+              afficher des contrôles morts. */}
+          {!userScope && (
+            <>
+              <div style={{ display: 'grid', gap: 8 }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.5,
+                    color: 'var(--text-3)',
+                  }}
+                >
+                  {t('config.assignLabel')}
+                </div>
+                {ASSIGN_MODES.map((m) => (
+                  <Option
+                    key={m}
+                    name="autoplan-assign"
+                    value={m}
+                    current={assignMode}
+                    onPick={setAssignMode}
+                    label={t('config.assign.' + m)}
+                    desc={t('config.assignDesc.' + m)}
+                  />
+                ))}
+              </div>
+
+              {/* Lot 2.2 — curseur de concentration (module l'affectation
+                  assistée ci-dessus). */}
+              <div style={{ display: 'grid', gap: 8 }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.5,
+                    color: 'var(--text-3)',
+                  }}
+                >
+                  {t('config.concentrationLabel')}
+                </div>
+                {CONCENTRATIONS.map((m) => (
+                  <Option
+                    key={m}
+                    name="autoplan-concentration"
+                    value={m}
+                    current={concentration}
+                    onPick={setConcentration}
+                    label={t('config.concentration.' + m)}
+                    desc={t('config.concentrationDesc.' + m)}
+                  />
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         <div
@@ -1992,21 +2475,35 @@ function AutoplanPreviewModal({
   onSwap,
   swappable,
   loading,
+  onOpen,
+  releasingDayFor,
 }: {
   result: AutoplanResultDto;
   viewFrom: string;
   viewTo: string;
   onClose: () => void;
-  onApply: () => void;
+  /** Lot 2.5 — `userIds` absent = appliquer TOUT le plan ; sinon restreint la
+   *  persistance à ces users (le diff affiché reste toujours complet). */
+  onApply: (userIds?: string[]) => void;
   onSwap?: (taskId: string, userId: string) => void;
   swappable?: boolean;
   loading: boolean;
+  /** Lot 3.1b — ouvre le détail d'une tâche depuis un warning cliquable
+   *  (ferme la modale au préalable). */
+  onOpen?: (taskId: string) => void;
+  /** Lot 4.2 (porte 2) — nom de la personne dont AUJOURD'HUI est
+   *  exceptionnellement libéré pour ce run (« Libérer cette journée »).
+   *  Absent = comportement historique (note de gel générique). */
+  releasingDayFor?: string;
 }) {
   const { t } = useTranslation('workload');
   const { added, removed, modified } = result.diff;
   const total = added.length + removed.length + modified.length;
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [warnOpen, setWarnOpen] = useState(true);
+  // Lot 2.5 — sélection par user pour l'application partielle. Réinitialisée
+  // à « tout sélectionné » à chaque nouvel aperçu (identité de `result`).
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set());
 
   // Le plan couvre TOUT le projet (pas la fenêtre affichée). On calcule son
   // span calendaire complet + combien d'allocations tombent hors de la vue
@@ -2074,6 +2571,24 @@ function AutoplanPreviewModal({
       return next;
     });
 
+  // Lot 2.5 — sélection : tout coché par défaut, réinitialisé à chaque
+  // nouvel aperçu (swap PM → nouvelle référence `result`).
+  useEffect(() => {
+    setSelectedUserIds(new Set(byUser.map((r) => r.userId)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result]);
+  const toggleSelected = (uid: string) =>
+    setSelectedUserIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(uid)) next.delete(uid);
+      else next.add(uid);
+      return next;
+    });
+  const allSelected = selectedUserIds.size >= byUser.length;
+  const selectedDiffCount = byUser
+    .filter((r) => selectedUserIds.has(r.userId))
+    .reduce((s, r) => s + r.added.length + r.removed.length + r.modified.length, 0);
+
   // Auto-expand si peu d'utilisateurs (≤2) ou peu de changements.
   useEffect(() => {
     if (byUser.length <= 2) {
@@ -2139,7 +2654,9 @@ function AutoplanPreviewModal({
               )}
               <br />
               <span style={{ fontSize: 11 }}>
-                {t('autoplanModal.frozenNote')}
+                {releasingDayFor
+                  ? t('autoplanModal.unfreezeNote', { name: releasingDayFor })
+                  : t('autoplanModal.frozenNote')}
               </span>
             </div>
           </div>
@@ -2243,6 +2760,11 @@ function AutoplanPreviewModal({
               <div style={{ fontSize: 11, color: 'var(--text-3)', padding: '3px 12px 2px', fontStyle: 'italic' }}>
                 {t('autoplanModal.skillLegend')}
               </div>
+              {result.assignments.some((a) => a.alternatives.some((c) => c.unavailable) || a.chosen.some((c) => c.unavailable)) && (
+                <div style={{ fontSize: 11, color: 'var(--text-3)', padding: '0 12px 2px', fontStyle: 'italic' }}>
+                  {t('autoplanModal.unavailableLegend')}
+                </div>
+              )}
               {result.assignments.map((a) => {
                 const chosenIds = new Set(a.chosen.map((c) => c.userId));
                 // Pool de swap = choisis (multi) ∪ alternatives, dédupliqué.
@@ -2251,6 +2773,19 @@ function AutoplanPreviewModal({
                   ...a.alternatives.filter((c) => !chosenIds.has(c.userId)),
                 ];
                 const single = a.chosen.length <= 1;
+                // Lot 5.2 — suggestion agent IA : jamais auto-affectée sans
+                // acceptation PM explicite (swap → override). En mode `auto`
+                // (pas de select de swap, `swappable` false) la tâche reste
+                // visible ici mais N'EST PAS persistée à l'apply — on le dit.
+                const isAgentSourced = a.source === 'agent_suggested' || a.chosen.some((c) => c.isAgent);
+                // Tant que `source` reste `agent_suggested` (PM n'a pas encore
+                // swappé/accepté), l'apply ne persistera RIEN pour cette tâche
+                // — vrai en mode `suggest` ET `auto` (jamais d'auto-affectation).
+                const needsValidation = a.source === 'agent_suggested';
+                const candidateLabel = (c: (typeof a.chosen)[number]) =>
+                  c.isAgent
+                    ? `${c.name}${c.trustLevel ? ` · ${t(`agents.trust.${c.trustLevel}`)}` : ''}`
+                    : `${c.name}${c.meetsRequired === false ? ' ⚠' : ''}${c.unavailable ? ' 🚫' : ''} (${c.freeHours}h)`;
                 return (
                   <div
                     key={a.taskId}
@@ -2286,10 +2821,28 @@ function AutoplanPreviewModal({
                             {t('autoplanModal.reassignTag')}
                           </span>
                         )}
+                        {isAgentSourced && (
+                          <span
+                            title={t('assign.agentBadgeTip')}
+                            style={{
+                              marginLeft: 6,
+                              fontSize: 10,
+                              fontWeight: 700,
+                              textTransform: 'uppercase',
+                              letterSpacing: 0.3,
+                              padding: '1px 5px',
+                              borderRadius: 4,
+                              color: 'oklch(0.72 0.16 300)',
+                              background: 'oklch(from oklch(0.72 0.16 300) l c h / 0.14)',
+                            }}
+                          >
+                            {t('assign.agentBadge')}
+                          </span>
+                        )}
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>
                         {a.chosen.length > 0
-                          ? a.chosen.map((c) => `${c.name}${c.meetsRequired === false ? ' ⚠' : ''} (${c.freeHours}h)`).join(', ')
+                          ? a.chosen.map(candidateLabel).join(', ')
                           : t(`autoplanModal.assignWarn_${a.warning ?? 'no_qualified'}`)}
                         {a.source === 'override' && a.chosen.length > 0 && (
                           <span style={{ marginLeft: 6, color: 'oklch(0.7 0.15 250)' }}>
@@ -2301,6 +2854,11 @@ function AutoplanPreviewModal({
                             · {t(`autoplanModal.assignWarn_${a.warning}`)}
                           </span>
                         )}
+                        {needsValidation && (
+                          <span style={{ marginLeft: 6, color: 'oklch(0.78 0.16 65)' }}>
+                            · {t('assign.agentNeedsValidation')}
+                          </span>
+                        )}
                       </div>
                     </div>
                     {swappable && onSwap && single && swapPool.length > 1 && (
@@ -2309,17 +2867,39 @@ function AutoplanPreviewModal({
                         value={a.chosen[0]?.userId ?? ''}
                         disabled={loading}
                         onChange={(e) => onSwap(a.taskId, e.target.value)}
-                        title={t('autoplanModal.assignTo')}
+                        title={isAgentSourced ? t('assign.swapAgent') : t('autoplanModal.assignTo')}
                         style={{ fontSize: 11.5, padding: '3px 6px', maxWidth: 170 }}
                       >
                         {a.chosen.length === 0 && <option value="">—</option>}
                         {swapPool.map((c) => (
                           <option key={c.userId} value={c.userId}>
-                            {c.name} · {c.freeHours}h{c.meetsRequired === false ? ' ⚠' : ''}
+                            {c.isAgent
+                              ? `${c.name}${c.trustLevel ? ` · ${t(`agents.trust.${c.trustLevel}`)}` : ''}`
+                              : `${c.name} · ${c.freeHours}h${c.meetsRequired === false ? ' ⚠' : ''}${c.unavailable ? ' 🚫' : ''}`}
                           </option>
                         ))}
                       </select>
                     )}
+                    {/* Lot 5.2 — accepter une suggestion d'agent quand le select
+                        de swap n'est pas affiché (candidat unique) : bouton
+                        explicite. Toujours manuel — un agent n'est JAMAIS
+                        auto-affecté (garde-fou), donc dispo aussi en mode `auto`.
+                        Accepter = poser un override nommant l'agent → source
+                        `override`, `TaskAssignee` créé à l'apply, zéro Allocation. */}
+                    {needsValidation &&
+                      onSwap &&
+                      a.chosen.length === 1 &&
+                      !(swappable && single && swapPool.length > 1) && (
+                        <button
+                          className="btn btn-primary"
+                          disabled={loading}
+                          onClick={() => onSwap(a.taskId, a.chosen[0].userId)}
+                          title={t('assign.acceptAgentTip')}
+                          style={{ fontSize: 11.5, padding: '3px 8px', whiteSpace: 'nowrap' }}
+                        >
+                          {t('assign.acceptAgent')}
+                        </button>
+                      )}
                   </div>
                 );
               })}
@@ -2362,38 +2942,62 @@ function AutoplanPreviewModal({
               </button>
               {warnOpen && (
                 <div>
-                  {result.warnings.map((w, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        padding: '8px 12px',
-                        borderTop: '1px solid var(--border)',
-                        display: 'grid',
-                        gridTemplateColumns: '110px 1fr',
-                        gap: 10,
-                        fontSize: 12,
-                      }}
-                    >
-                      <span
-                        className="mono"
+                  {result.warnings.map((w, i) => {
+                    const clickable = !!w.taskId && !!onOpen;
+                    return (
+                      <div
+                        key={i}
+                        role={clickable ? 'button' : undefined}
+                        tabIndex={clickable ? 0 : undefined}
+                        title={clickable ? t('autoplanModal.warnOpenTaskTitle') : undefined}
+                        onClick={() => {
+                          if (!clickable) return;
+                          onClose();
+                          onOpen!(w.taskId);
+                        }}
+                        onKeyDown={(e) => {
+                          if (!clickable) return;
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            onClose();
+                            onOpen!(w.taskId);
+                          }
+                        }}
                         style={{
-                          fontSize: 10,
-                          padding: '2px 6px',
-                          borderRadius: 4,
-                          background: 'oklch(from oklch(0.75 0.18 85) l c h / 0.22)',
-                          color: 'oklch(0.88 0.18 85)',
-                          alignSelf: 'start',
-                          textTransform: 'uppercase',
-                          letterSpacing: 0.4,
-                          fontWeight: 700,
-                          textAlign: 'center',
+                          padding: '8px 12px',
+                          borderTop: '1px solid var(--border)',
+                          display: 'grid',
+                          gridTemplateColumns: '110px 1fr',
+                          gap: 10,
+                          fontSize: 12,
+                          cursor: clickable ? 'pointer' : undefined,
                         }}
                       >
-                        {w.type.replace('_', ' ')}
-                      </span>
-                      <span>{w.message}</span>
-                    </div>
-                  ))}
+                        <span
+                          className="mono"
+                          style={{
+                            fontSize: 10,
+                            padding: '2px 6px',
+                            borderRadius: 4,
+                            background: 'oklch(from oklch(0.75 0.18 85) l c h / 0.22)',
+                            color: 'oklch(0.88 0.18 85)',
+                            alignSelf: 'start',
+                            textTransform: 'uppercase',
+                            letterSpacing: 0.4,
+                            fontWeight: 700,
+                            textAlign: 'center',
+                          }}
+                        >
+                          {t('autoplanModal.warnType.' + w.type, { defaultValue: w.type.replace('_', ' ') })}
+                        </span>
+                        <span>
+                          {w.taskTitle && <b>{w.taskTitle}</b>}
+                          {w.taskTitle && ' · '}
+                          {w.message}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -2445,24 +3049,36 @@ function AutoplanPreviewModal({
                         borderTop: idx === 0 ? 'none' : '1px solid var(--border)',
                       }}
                     >
-                      <button
-                        onClick={() => toggleUser(row.userId)}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 10,
-                          width: '100%',
-                          padding: '10px 14px',
-                          background: isOpen
-                            ? 'var(--surface-2)'
-                            : 'transparent',
-                          border: 'none',
-                          color: 'var(--text)',
-                          cursor: 'pointer',
-                          textAlign: 'left',
-                          fontSize: 13,
-                        }}
-                      >
+                      <div style={{ display: 'flex', alignItems: 'stretch', background: isOpen ? 'var(--surface-2)' : 'transparent' }}>
+                        {/* Lot 2.5 — sélection pour l'application partielle. */}
+                        <label
+                          style={{ display: 'flex', alignItems: 'center', padding: '0 0 0 14px', cursor: 'pointer' }}
+                          onClick={(e) => e.stopPropagation()}
+                          title={row.userName}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedUserIds.has(row.userId)}
+                            onChange={() => toggleSelected(row.userId)}
+                          />
+                        </label>
+                        <button
+                          onClick={() => toggleUser(row.userId)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 10,
+                            flex: 1,
+                            minWidth: 0,
+                            padding: '10px 14px 10px 8px',
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--text)',
+                            cursor: 'pointer',
+                            textAlign: 'left',
+                            fontSize: 13,
+                          }}
+                        >
                         <span style={{ width: 12, color: 'var(--text-3)' }}>
                           {isOpen ? '▾' : '▸'}
                         </span>
@@ -2494,7 +3110,8 @@ function AutoplanPreviewModal({
                           {row.hoursDelta > 0 ? '+' : ''}
                           {Math.round(row.hoursDelta * 10) / 10}h
                         </span>
-                      </button>
+                        </button>
+                      </div>
                       {isOpen && (
                         <div>
                           {row.added.map((p, i) => (
@@ -2559,14 +3176,28 @@ function AutoplanPreviewModal({
           </button>
           <button
             className="btn btn-primary"
-            disabled={loading || (total === 0 && result.assignments.length === 0)}
-            onClick={onApply}
+            disabled={
+              loading ||
+              (byUser.length > 0 && selectedUserIds.size === 0) ||
+              (allSelected && total === 0 && result.assignments.length === 0) ||
+              (!allSelected && selectedDiffCount === 0)
+            }
+            // Lot 2.5 — tout sélectionné (ou rien à sélectionner : preview
+            // assignments-only) = apply() sans filtre (comportement
+            // historique, aucun `applyOnly` envoyé) ; sélection partielle =
+            // `applyOnly.userIds` restreint la PERSISTANCE (le diff affiché
+            // reste complet).
+            onClick={() => onApply(allSelected ? undefined : Array.from(selectedUserIds))}
           >
             {loading
               ? t('autoplanModal.applying')
-              : total === 0 && result.assignments.length === 0
-                ? t('autoplanModal.nothingToApply')
-                : t('autoplanModal.apply', { count: total })}
+              : byUser.length > 0 && selectedUserIds.size === 0
+                ? t('autoplanModal.applySelectionEmpty')
+                : allSelected
+                  ? total === 0 && result.assignments.length === 0
+                    ? t('autoplanModal.nothingToApply')
+                    : t('autoplanModal.apply', { count: total })
+                  : t('autoplanModal.applySelection', { count: selectedDiffCount })}
           </button>
         </div>
       </div>
@@ -2596,6 +3227,8 @@ function WorkloadMobile({
   isTeamLead,
   planLoading,
   onAutoplan,
+  onReplanUser,
+  onReleaseDay,
   onTimeOff,
   shiftPeriod,
 }: {
@@ -2620,6 +3253,10 @@ function WorkloadMobile({
   isTeamLead: boolean;
   planLoading: boolean;
   onAutoplan: () => void;
+  /** Lot 2.4 — « Replanifier cette personne » depuis la liste mobile. */
+  onReplanUser: (userId: string, name: string) => void;
+  /** Lot 4.2 (porte 2) — « Libérer cette journée » depuis la liste mobile. */
+  onReleaseDay: (userId: string, name: string) => void;
   onTimeOff: () => void;
   shiftPeriod: (dir: -1 | 0 | 1) => void;
 }) {
@@ -2791,6 +3428,15 @@ function WorkloadMobile({
                   <span className={'wlm-bar-fill load-' + st} style={{ width: pct + '%' }} />
                 </span>
               )}
+              <RowActions
+                labels={{
+                  menu: t('view.rowActions'),
+                  replan: t('view.menuReplan'),
+                  releaseDay: t('view.menuReleaseDay'),
+                }}
+                onReplan={() => onReplanUser(row.userId, row.name)}
+                onReleaseDay={() => onReleaseDay(row.userId, row.name)}
+              />
             </div>
             {allocs.length > 0 && (
               <div className="wlm-chips">

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../../api/client';
+import { safeUrl } from '../../lib/url';
 import type { CollabSpaceDto } from '@vaks-pm/shared';
 import { useConfirm } from '../confirm';
 
@@ -71,7 +72,7 @@ export function CollabSpacesList({
         {items.map((s) => (
           <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 13 }}>
             <span style={{ fontWeight: 600 }}>{PROVIDER_LABELS[s.provider] ?? s.provider}</span>
-            <a href={s.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>
+            <a href={safeUrl(s.url)} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>
               {s.name || s.url}
             </a>
             <span className="pill" style={{ fontSize: 11 }}>

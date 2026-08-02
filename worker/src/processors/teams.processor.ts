@@ -49,6 +49,12 @@ interface ResultBody {
   membersAdded?: number;
   membersSkipped?: number;
   error?: string | null;
+  /** Échec DÉFINITIF (dernière tentative épuisée, ou cas non-retryable connu
+   *  à l'avance) — signale à l'API qu'il faut alerter les admins du tenant,
+   *  par opposition à un échec transitoire qui sera retenté par BullMQ. */
+  terminal?: boolean;
+  /** Numéro de la tentative ayant produit ce résultat (informatif). */
+  attempts?: number;
 }
 
 function internalHeaders(tenantSlug?: string | null): Record<string, string> {
@@ -331,9 +337,34 @@ async function reconcileMembers(
   return { added, removed };
 }
 
-export async function processTeams(job: TeamsJob): Promise<void> {
-  const ctx = await fetchContext(job);
+export async function processTeams(
+  job: TeamsJob,
+  attempt?: number,
+  maxAttempts?: number,
+): Promise<void> {
+  const isTerminal = attempt !== undefined && maxAttempts !== undefined && attempt >= maxAttempts;
+  let ctx: ProvisionContext | null;
+  try {
+    ctx = await fetchContext(job);
+  } catch (err) {
+    // fetchContext peut THROW (ex. `context HTTP 500` côté API) et cet appel est
+    // HORS du try principal plus bas — sans ce catch, l'échec de récupération du
+    // contexte (le cas le plus fréquent en boucle de retry) ne déclenchait JAMAIS
+    // l'alerte terminale. On reporte FAILED+terminal à la dernière tentative puis
+    // on relance (BullMQ ne retente plus au-delà de maxAttempts).
+    const msg = err instanceof Error ? err.message : String(err);
+    await reportResult(job, {
+      action: job.action,
+      status: 'FAILED',
+      error: msg,
+      terminal: isTerminal,
+      attempts: attempt,
+    });
+    throw err instanceof Error ? err : new Error(msg);
+  }
   if (!ctx) {
+    // Bénin : projet supprimé entre l'enqueue et l'exécution, ou feature
+    // désactivée entre-temps — PAS actionnable par un admin, pas d'alerte.
     await reportResult(job, {
       action: job.action,
       status: 'FAILED',
@@ -397,6 +428,8 @@ export async function processTeams(job: TeamsJob): Promise<void> {
         error:
           'Aucun membre lié à Entra (externalId) sur ce projet — ajoutez au moins un utilisateur ' +
           'provenant de votre annuaire Entra (via SSO/SCIM) comme membre du projet.',
+        terminal: true, // actionnable par un admin, pas transitoire → alerte
+        attempts: attempt ?? 1,
       });
       return; // terminal : on ne relance pas
     }
@@ -407,6 +440,11 @@ export async function processTeams(job: TeamsJob): Promise<void> {
       webUrl = await getTeamWebUrl(ctx.token, teamId); // re-provisioning : relit le lien
     } else {
       ({ teamId, webUrl } = await createTeam(ctx));
+      // Persiste le teamId DÈS qu'il est connu, avant les étapes best-effort
+      // (channels/membres) qui peuvent throw. Sans ça, un retry BullMQ après
+      // un échec ici relirait existingTeamId=null et recréerait une équipe en
+      // double (createTeam n'est pas idempotent côté Graph app-only).
+      await reportResult(job, { action: 'provision', status: 'SUCCESS', teamId, webUrl });
     }
     const owner = ctx.members.find((m) => m.owner) ?? ctx.members[0];
     await setPrimaryChannelLayout(ctx, teamId);
@@ -424,7 +462,16 @@ export async function processTeams(job: TeamsJob): Promise<void> {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await reportResult(job, { action: job.action, status: 'FAILED', error: msg });
+    // Dernière tentative épuisée → échec DÉFINITIF, silencieux sinon : le
+    // signale à l'API (alerte admins) AVANT de rethrow.
+    const isTerminal = attempt !== undefined && maxAttempts !== undefined && attempt >= maxAttempts;
+    await reportResult(job, {
+      action: job.action,
+      status: 'FAILED',
+      error: msg,
+      terminal: isTerminal,
+      attempts: attempt,
+    });
     throw err instanceof Error ? err : new Error(msg); // laisse BullMQ retry
   }
 }

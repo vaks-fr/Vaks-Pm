@@ -831,7 +831,17 @@ model Project {
   /// Brief permanent lu par les agents avant de travailler (markdown) : objet du
   /// projet, où vont les livrables, conventions/style, liens. Propriété HUMAINE
   /// (le PM l'édite). Requis quand `agentsEnabled`.
+  ///
+  /// Depuis la refonte du contexte IA : ce champ reste le fourre-tout « notes
+  /// libres », rendu EN DERNIER dans le brief composé. La structure vit dans
+  /// `agentBrief`. L'un OU l'autre suffit à satisfaire `agentsEnabled`.
   agentContext   String?
+  /// Brief STRUCTURÉ lu par les agents : `{ role, outputConventions,
+  /// deliveryTarget, outOfScope }` (4 chaînes, toutes optionnelles). Le serveur
+  /// le compose en markdown avec les FAITS qu'il connaît déjà (reviewer, mode de
+  /// vérification, enjeu, langue) — le PM n'a plus à les retaper. Défaut org
+  /// hérité champ par champ via `OrgSetting agents.briefDefault`.
+  agentBrief     Json?
   /// Contexte négatif : ce que les agents ne doivent PAS faire sur ce projet
   /// (garde-fous, hors-périmètre). Optionnel.
   agentGuardrails String?
@@ -860,6 +870,12 @@ model Project {
   /// un verdict `agent_validator approve` auto-transitionne (échantillonné) ;
   /// `'report_only'` = journalise seulement (calibration). `null` = hérite de l'org.
   verificationMode String?
+  /// Dépôt(s) CI autorisé(s) pour ce projet (ex. `["owner/repo"]`), édité dans
+  /// l'onglet IA. Lie la preuve `ci_signed` d'un livrable au bon dépôt : un build
+  /// vert d'un AUTRE dépôt de l'org ne peut plus faire passer un livrable
+  /// (anti-réutilisation cross-dépôt). VIDE = comportement historique (match
+  /// org-wide) — la protection s'active dès qu'au moins un dépôt est renseigné.
+  ciRepos        String[]      @default([])
   /// Matrice d'événements notifiés aux SPONSORS du projet (membres `isSponsor`).
   /// JSON `{ milestoneReached?, projectStatus?, milestoneAtRisk?, budgetThresholds? }`.
   /// `null` = défauts appliqués côté code : jalon atteint + statut projet ON,
@@ -1058,10 +1074,17 @@ model ProjectDocument {
   folderId       String?
   /// Document marqué « Contexte IA » : listé dans le work-context des tâches du
   /// projet et lisible (texte) par les agents via l'endpoint task-scoped.
+  /// L'exposition EFFECTIVE est une UNION : ce drapeau **ou** l'appartenance à
+  /// un dossier `ProjectDocumentFolder.aiContext` (héritage calculé à la lecture).
   aiContext      Boolean             @default(false)
   filename       String
   mimeType       String
   sizeBytes      Int
+  /// Dernière réécriture du CONTENU (upsert par nom / `PUT .../text`). `null` =
+  /// jamais réécrit → la fraîcheur affichée retombe sur `uploadedAt`.
+  /// Volontairement PAS un `@updatedAt` : déplacer un document ou basculer son
+  /// drapeau « contexte IA » ne le rend pas plus frais.
+  contentUpdatedAt DateTime?
   /// Clé S3 complète du blob.
   storageKey     String
   uploadedAt     DateTime            @default(now())
@@ -1084,6 +1107,12 @@ model ProjectDocumentFolder {
   projectId      String
   parentId       String?
   name           String
+  /// Dossier « Contexte IA » : tous ses documents ET ceux de ses sous-dossiers
+  /// sont exposés aux agents, sans cocher fichier par fichier. Héritage
+  /// **calculé à la lecture**, jamais dénormalisé — la suppression d'un dossier
+  /// remonte son contenu au parent (`deleteFolder`) et l'exposition effective se
+  /// recalcule d'elle-même, sans chemin d'écriture à garder synchrone.
+  aiContext      Boolean  @default(false)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -1283,6 +1312,14 @@ model Task {
   /// au service si besoin.
   claimedById    String?
   claimedAt      DateTime?
+  /// Bail d'EXÉCUTION (lot A). Un agent qui revendique une tâche ne la tient que
+  /// pour une durée bornée : il prolonge par heartbeat (`POST /tasks/:id/heartbeat`)
+  /// tant qu'il travaille. Bail échu sans heartbeat ni soumission = agent zombie
+  /// (crash, perte de connectivité) → un cron remet la tâche en TODO et incrémente
+  /// `retryCount`. Posé au claim des AGENTS seulement (jamais un humain : on ne
+  /// déposséde pas quelqu'un qui a simplement fermé son laptop). `null` = pas de
+  /// bail (humain, ou TTL org à 0 = mécanisme désactivé).
+  leaseExpiresAt DateTime?
   estimateHours  Float?
   dueDate        DateTime?
   startDate      DateTime?
@@ -1378,6 +1415,9 @@ model Task {
   @@index([boardColumnId, position])
   @@index([organizationId])
   @@index([subStatusId])
+  /// Balayage des baux d'exécution expirés (cron 5 min) : très sélectif, la
+  /// colonne est null sur l'écrasante majorité des lignes.
+  @@index([leaseExpiresAt])
 }
 
 /// Historique des changements de statut d'une tâche (append-only). Source du
@@ -1438,6 +1478,15 @@ model Deliverable {
   verification   Json?
   /// SHA du commit associé (preuve CI signée, chantier vérif phase B). Optionnel.
   commitSha      String?
+  /// Sorties STRUCTURÉES du livrable (lot B) : dictionnaire plat clé → scalaire
+  /// (`{"api_endpoint":"https://…","artifact_version":"2.4.0"}`). Sert le
+  /// chaînage machine entre tâches : une tâche aval lit ces paires dans son
+  /// `work-context` (`upstreamOutputs`) au lieu de re-parser la prose du
+  /// livrable amont — c'est là que naissent les hallucinations. Normalisé et
+  /// borné à l'écriture (clés/valeurs scalaires, taille capée). ⚠️ N'est
+  /// propagé en aval que si le livrable est APPROUVÉ (même règle
+  /// anti-poisoning que le journal vivant).
+  structuredOutputs Json?
   /// Bail de validation par un AGENT VALIDATEUR (phase D `agent_validator`). La
   /// revue devient une **tâche tirée** (symétrie next_task) : un agent ≠ l'auteur
   /// revendique le livrable (lease TTL), envoie des heartbeats, rend un verdict.
@@ -1566,6 +1615,9 @@ model CiResultPending {
   runId          String?
   /// URL du run CI (affichée au reviewer, non vérifiée).
   runUrl         String?
+  /// Dépôt d'origine du build (ex. "owner/repo"), extrait du payload signé. Sert à
+  /// lier la preuve CI au projet du livrable (anti-réutilisation cross-dépôt).
+  repo           String?
   /// SHA-256 du payload brut reçu (intégrité de la preuve, informatif).
   payloadSha256  String?
   receivedAt     DateTime @default(now())

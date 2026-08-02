@@ -25,6 +25,9 @@ export interface PublicOrgSettings {
   /** Mois de début d'exercice fiscal (1 = janvier … 12 = décembre). Défaut 1.
    *  Sert aux filtres période (trimestre / exercice) des panneaux projets/finance. */
   fiscalYearStartMonth: number;
+  /** Curseur de concentration par défaut de l'auto-plan (Lot 2.2) —
+   *  surchargeable par run depuis `WorkloadView`. Défaut `balanced`. */
+  autoplanConcentration: 'focus' | 'balanced' | 'spread';
 }
 
 const SUPPORTED_LANGUAGES = ['en', 'fr', 'it', 'de'];
@@ -39,6 +42,7 @@ const DEFAULT_PUBLIC_SETTINGS: PublicOrgSettings = {
   skillsLevelScale: [],
   skillsLevelInputMode: 'number',
   fiscalYearStartMonth: 1,
+  autoplanConcentration: 'balanced',
 };
 
 /**
@@ -178,6 +182,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           s.fiscalYearStartMonth <= 12
             ? Math.floor(s.fiscalYearStartMonth)
             : 1,
+        autoplanConcentration:
+          s.autoplanConcentration === 'focus' || s.autoplanConcentration === 'spread'
+            ? s.autoplanConcentration
+            : 'balanced',
       });
     } catch {
       // garder les defaults — l'UI doit rester utilisable.

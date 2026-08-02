@@ -560,6 +560,27 @@ export default function Workspace() {
   const [holdReasonTask, setHoldReasonTask] = useState<string | null>(null);
   const [drawer, setDrawer] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
+  // Avertissement affiché à l'arrivée sur la démo sandbox (une fois par onglet
+  // navigateur — sessionStorage, pas localStorage : on veut le revoir à chaque
+  // nouvelle visite, pas seulement au tout premier passage jamais).
+  const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
+  useEffect(() => {
+    if (!DEMO) return;
+    try {
+      if (sessionStorage.getItem('vaks-demo-welcome-seen')) return;
+    } catch {
+      /* sessionStorage indispo (mode privé strict) : on affiche quand même */
+    }
+    setDemoWelcomeOpen(true);
+  }, []);
+  const dismissDemoWelcome = useCallback(() => {
+    setDemoWelcomeOpen(false);
+    try {
+      sessionStorage.setItem('vaks-demo-welcome-seen', '1');
+    } catch {
+      /* ignore */
+    }
+  }, []);
   const [search, setSearch] = useState('');
   const toastId = useRef(0);
   // Contexte API (rempli après loadVaksFromApi)
@@ -2223,6 +2244,44 @@ export default function Workspace() {
       )}
       {securityOpen && <SecuritySettings onClose={() => setSecurityOpen(false)} />}
       </Suspense>
+      {DEMO && demoWelcomeOpen && (
+        <div className="md-overlay" onMouseDown={dismissDemoWelcome}>
+          <div
+            className="md-card"
+            onMouseDown={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            style={{ width: 'min(480px, 100%)' }}
+          >
+            <div className="md-head">
+              <Icon name="warn" size={22} style={{ color: 'var(--warn, #92610a)', flexShrink: 0 }} />
+              <div className="grow">
+                <div className="md-eyebrow mono">{tr('shell.demoWelcomeEyebrow')}</div>
+                <div className="md-title">{tr('shell.demoWelcomeTitle')}</div>
+              </div>
+              <button className="icon-btn" onClick={dismissDemoWelcome} aria-label={tr('close')}>
+                <Icon name="x" size={18} />
+              </button>
+            </div>
+            <div className="md-body">
+              <p style={{ margin: 0, color: 'var(--text-2)', lineHeight: 1.5 }}>{tr('shell.demoWelcomeBody')}</p>
+            </div>
+            <div className="md-foot">
+              <a
+                className="btn btn-ghost btn-sm"
+                href="/demo-request.html"
+                target="_top"
+                rel="noopener noreferrer"
+              >
+                {tr('shell.demoWelcomeCta')}
+              </a>
+              <button className="btn btn-primary btn-sm" onClick={dismissDemoWelcome}>
+                {tr('shell.demoWelcomeDismiss')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Forced password change: blocks the whole app until the user updates
           their password (admin reset or expiry). Non-dismissible. */}
       {authUser?.mustChangePassword && (

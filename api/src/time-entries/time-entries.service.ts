@@ -193,7 +193,13 @@ export class TimeEntriesService {
 
   // ---- Timesheet hebdo (par utilisateur, jour × tâche) ----
   async timesheet(orgId: string, currentUserId: string, q: TimesheetQueryDto) {
-    const userId = !q.userId || q.userId === 'me' ? currentUserId : q.userId;
+    // Timesheet STRICTEMENT PERSONNELLE (règle CLAUDE.md) : on ignore tout `userId`
+    // passé en query — chaque utilisateur ne voit que la sienne. Ce chemin dupliqué
+    // (le module `/timesheet` le faisait déjà) honorait auparavant un `?userId`
+    // arbitraire sans contrôle d'accès → fuite cross-user de la timesheet hebdo de
+    // n'importe quel collègue (audit sécu 2026-08-02, IDOR HIGH).
+    void q.userId;
+    const userId = currentUserId;
     const start = this.toDateOnly(q.weekStart);
     const end = new Date(start);
     end.setUTCDate(end.getUTCDate() + 6);

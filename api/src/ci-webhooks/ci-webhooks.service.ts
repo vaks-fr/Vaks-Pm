@@ -32,11 +32,13 @@ export interface CiIngestResult {
 export interface CiCorroboration {
   status: 'pass' | 'fail' | 'pending';
   corroborated: boolean;
-  reason: 'matched' | 'no_result' | 'no_commit_sha';
+  reason: 'matched' | 'no_result' | 'no_commit_sha' | 'repo_mismatch';
   provider: string | null;
   conclusion: string | null;
   runUrl: string | null;
   commitSha: string | null;
+  /** Dépôt d'origine du build matché (ou du build rejeté en `repo_mismatch`). */
+  repo: string | null;
 }
 
 /**
@@ -110,6 +112,7 @@ export class CiWebhooksService {
         conclusion: parsed.conclusion,
         runId: parsed.runId,
         runUrl: parsed.runUrl,
+        repo: parsed.repo,
         payloadSha256,
         receivedAt: now,
         expiresAt: new Date(now.getTime() + PENDING_TTL_MS),
@@ -152,7 +155,11 @@ export class CiWebhooksService {
    * CI signés (le plus récent non expiré pour ce commit). Ne consomme rien (le
    * TTL/cron purge) — un livrable peut être ré-évalué. Aucun effet de bord.
    */
-  async corroborate(orgId: string, commitSha: string | null | undefined): Promise<CiCorroboration> {
+  async corroborate(
+    orgId: string,
+    commitSha: string | null | undefined,
+    allowedRepos?: string[] | null,
+  ): Promise<CiCorroboration> {
     if (!commitSha?.trim()) {
       return {
         status: 'pending',
@@ -162,15 +169,50 @@ export class CiWebhooksService {
         conclusion: null,
         runUrl: null,
         commitSha: null,
+        repo: null,
       };
     }
     const sha = commitSha.trim();
+    // Binding dépôt (audit sécu 2026-08-01, finding #3) : un projet qui a déclaré
+    // ses dépôts (onglet IA) exige que la preuve CI provienne de l'UN d'eux — un
+    // build vert d'un autre dépôt de l'org ne corrobore plus. Liste VIDE =
+    // comportement historique (match org-wide), la protection s'active dès qu'un
+    // dépôt est renseigné sur le projet.
+    const repos = (allowedRepos ?? []).map((r) => r.trim()).filter(Boolean);
+    const enforceRepo = repos.length > 0;
+    const now = new Date();
     const row = await this.prisma.ciResultPending.findFirst({
-      where: { organizationId: orgId, commitSha: sha, expiresAt: { gt: new Date() } },
+      where: {
+        organizationId: orgId,
+        commitSha: sha,
+        expiresAt: { gt: now },
+        ...(enforceRepo ? { repo: { in: repos } } : {}),
+      },
       orderBy: { receivedAt: 'desc' },
-      select: { provider: true, conclusion: true, runUrl: true, commitSha: true },
+      select: { provider: true, conclusion: true, runUrl: true, commitSha: true, repo: true },
     });
     if (!row) {
+      // Distinguer « aucun build signé » de « build existant mais mauvais dépôt » :
+      // plus clair pour le reviewer, et rend le rejet du binding explicite.
+      if (enforceRepo) {
+        const other = await this.prisma.ciResultPending.findFirst({
+          where: { organizationId: orgId, commitSha: sha, expiresAt: { gt: now } },
+          orderBy: { receivedAt: 'desc' },
+          select: { repo: true },
+        });
+        if (other) {
+          return {
+            status: 'pending',
+            corroborated: false,
+            reason: 'repo_mismatch',
+            provider: null,
+            conclusion: null,
+            runUrl: null,
+            commitSha: sha,
+            repo: other.repo,
+          };
+        }
+      }
       return {
         status: 'pending',
         corroborated: false,
@@ -179,6 +221,7 @@ export class CiWebhooksService {
         conclusion: null,
         runUrl: null,
         commitSha: sha,
+        repo: null,
       };
     }
     return {
@@ -189,6 +232,7 @@ export class CiWebhooksService {
       conclusion: row.conclusion,
       runUrl: row.runUrl,
       commitSha: row.commitSha,
+      repo: row.repo,
     };
   }
 

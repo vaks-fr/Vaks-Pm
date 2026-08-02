@@ -125,13 +125,15 @@ deploy_db() {
 build_images_on_host1() {
   echo "=== Build des images sur host1 ==="
   SSH "$VM_HOST1" "mkdir -p ~/vakspm/src"
-  for d in package.json tsconfig.base.json packages api worker web; do
+  for d in package.json tsconfig.base.json packages api worker web mcp; do
     RSY "$VM_HOST1" "$ROOT/$d" "~/vakspm/src/"
   done
-  SUDO "$VM_HOST1" "cd ~$VM_USER/vakspm/src && docker build -t vaks-pm/web:latest -f web/Dockerfile . && docker build -t vaks-pm/api:latest -f api/Dockerfile . && docker build -t vaks-pm/worker:latest -f worker/Dockerfile ."
+  # `mcp` est dans la liste : le service est déclaré dans le stack, donc sans
+  # son image l'installation démarrerait un service qui ne peut pas se lancer.
+  SUDO "$VM_HOST1" "cd ~$VM_USER/vakspm/src && docker build -t vaks-pm-web:latest -f web/Dockerfile . && docker build -t vaks-pm-api:latest -f api/Dockerfile . && docker build -t vaks-pm-worker:latest -f worker/Dockerfile . && docker build -t vaks-pm-mcp:latest -f mcp/Dockerfile ."
 
   echo "  export des images depuis host1"
-  SUDO "$VM_HOST1" "docker save vaks-pm/web:latest vaks-pm/api:latest vaks-pm/worker:latest -o /tmp/vakspm-images.tar && chown $VM_USER:$VM_USER /tmp/vakspm-images.tar"
+  SUDO "$VM_HOST1" "docker save vaks-pm-web:latest vaks-pm-api:latest vaks-pm-worker:latest vaks-pm-mcp:latest -o /tmp/vakspm-images.tar && chown $VM_USER:$VM_USER /tmp/vakspm-images.tar"
   local tmp; tmp="$(mktemp)"
   scp $SSHOPT "$VM_USER@$VM_HOST1:/tmp/vakspm-images.tar" "$tmp"
   for host in "$VM_HOST2" "$VM_HOST3"; do
@@ -155,7 +157,10 @@ deploy_app() {
   SSH "$VM_HOST1" "mkdir -p ~/vakspm/infra"
   RSY "$VM_HOST1" "$ROOT/infra/traefik-dynamic.yml" "~/vakspm/infra/traefik-dynamic.yml"
   DB_URL="postgresql://${POSTGRES_USER:-vakspm}:${POSTGRES_PASSWORD:?}@${HOST1_IP}:5000/${POSTGRES_DB:-vakspm}?schema=public"
-  SUDO "$VM_HOST1" "cd ~$VM_USER/vakspm/bootstrap && JWT_ACCESS_SECRET=${JWT_ACCESS_SECRET:?} JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:?} DATABASE_URL='$DB_URL' bash 50-deploy.sh"
+  # VAKS_IMAGE_PREFIX/VAKS_TAG forcent le stack à pointer vers les images buildées
+  # localement à l'étape précédente (vaks-pm-<svc>:latest), pas vers le défaut GHCR
+  # du template docker-stack.yml — sinon le build ci-dessus est buildé pour rien.
+  SUDO "$VM_HOST1" "cd ~$VM_USER/vakspm/bootstrap && JWT_ACCESS_SECRET=${JWT_ACCESS_SECRET:?} JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:?} DATABASE_URL='$DB_URL' VAKS_IMAGE_PREFIX=vaks-pm VAKS_TAG=latest bash 50-deploy.sh"
   echo "App déployée. Suivi: ssh -i $SSH_KEY $VM_USER@$VM_HOST1 'sudo docker stack ps vaks-pm'"
 }
 

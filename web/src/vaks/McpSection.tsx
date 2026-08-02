@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/client';
-import { useAuth } from '../auth/AuthContext';
 
 type Flash = (msg: string) => void;
 
@@ -43,11 +42,16 @@ const READ_TOOLS = [
  */
 export default function McpSection({ flash }: { flash: Flash }) {
   const { t } = useTranslation('admin');
-  const { hasFeature } = useAuth();
-  const licensed = hasFeature('mcp');
   const [enabled, setEnabled] = useState(false);
   const [allowWrites, setAllowWrites] = useState(false);
   const [allowFinance, setAllowFinance] = useState(false);
+  // Garde-fou de confirmation (défaut serveur = 'destructive' si non stocké).
+  const [confirmPolicy, setConfirmPolicy] = useState<'off' | 'destructive' | 'all_writes'>('destructive');
+  // Quotas par tool (appels/minute) + usage temps réel.
+  const [toolQuotas, setToolQuotas] = useState<Record<string, number>>({});
+  const [quotaTool, setQuotaTool] = useState('');
+  const [quotaLimit, setQuotaLimit] = useState('');
+  const [usage, setUsage] = useState<Array<{ tool: string; count: number }>>([]);
   const [ssoCount, setSsoCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
@@ -66,17 +70,25 @@ export default function McpSection({ flash }: { flash: Flash }) {
   useEffect(() => {
     (async () => {
       try {
-        const [settings, sso, clients] = await Promise.all([
+        const [settings, sso, clients, usageRes] = await Promise.all([
           api.getAdminSettings(),
           api.listSsoProviders().catch(() => []),
           api.listOauthClients().catch(() => []),
+          api.getMcpToolUsage().catch(() => ({ windowSec: 60, tools: [] })),
         ]);
         const s = settings as Record<string, unknown>;
         setEnabled(s['mcp.enabled'] === true);
         setAllowWrites(s['mcp.allowWrites'] === true);
         setAllowFinance(s['mcp.allowFinance'] === true);
+        // Absent en base ⇒ défaut serveur 'destructive' (le garde-fou est actif
+        // sans réglage explicite).
+        const cp = s['mcp.confirmPolicy'];
+        setConfirmPolicy(cp === 'off' || cp === 'all_writes' ? cp : 'destructive');
+        const tq = s['mcp.toolQuotas'];
+        setToolQuotas(tq && typeof tq === 'object' && !Array.isArray(tq) ? (tq as Record<string, number>) : {});
         setSsoCount(Array.isArray(sso) ? sso.length : 0);
         setOauthClients(Array.isArray(clients) ? clients : []);
+        setUsage(usageRes.tools ?? []);
       } catch (e) {
         flash(t('mcp.loadError', { defaultValue: 'Unable to load MCP settings: {{message}}', message: (e as Error).message }));
       } finally {
@@ -108,6 +120,69 @@ export default function McpSection({ flash }: { flash: Flash }) {
     } finally {
       setSaving(null);
     }
+  };
+
+  // Activation du connecteur : avertit l'admin de l'egress de données vers l'IA
+  // externe (le connecteur est désormais gratuit → premier garde-fou = consentement).
+  const toggleEnabled = (v: boolean) => {
+    if (v && !enabled) {
+      const ok = window.confirm(
+        t('mcp.enableConfirm', {
+          defaultValue:
+            'Enabling the AI connector makes the data of the projects your users connect accessible to the external AI assistant they link (Claude, ChatGPT, Copilot…). Writes stay off unless you enable them, and everything remains bounded by each user’s permissions. Enable the connector?',
+        }),
+      );
+      if (!ok) return;
+    }
+    void save('mcp.enabled', v);
+  };
+
+  const saveConfirmPolicy = async (value: 'off' | 'destructive' | 'all_writes') => {
+    const prev = confirmPolicy;
+    setConfirmPolicy(value);
+    setSaving('mcp.confirmPolicy');
+    try {
+      await api.putAdminSettings({ 'mcp.confirmPolicy': value } as Record<string, unknown>);
+      flash(t('mcp.saved', { defaultValue: 'Saved.' }));
+    } catch (e) {
+      setConfirmPolicy(prev);
+      flash(t('mcp.saveError', { defaultValue: 'Save failed: {{message}}', message: (e as Error).message }));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const saveQuotas = async (next: Record<string, number>) => {
+    const prev = toolQuotas;
+    setToolQuotas(next);
+    setSaving('mcp.toolQuotas');
+    try {
+      await api.putAdminSettings({ 'mcp.toolQuotas': next } as Record<string, unknown>);
+      flash(t('mcp.saved', { defaultValue: 'Saved.' }));
+    } catch (e) {
+      setToolQuotas(prev);
+      flash(t('mcp.saveError', { defaultValue: 'Save failed: {{message}}', message: (e as Error).message }));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const addQuota = () => {
+    const tool = quotaTool.trim();
+    const n = parseInt(quotaLimit, 10);
+    if (!/^(vaks_[a-z0-9_]{1,60}|\*)$/.test(tool) || !Number.isInteger(n) || n < 1) {
+      flash(t('mcp.quotaInvalid', { defaultValue: 'Enter a valid tool name (vaks_… or *) and a limit ≥ 1.' }));
+      return;
+    }
+    void saveQuotas({ ...toolQuotas, [tool]: n });
+    setQuotaTool('');
+    setQuotaLimit('');
+  };
+
+  const removeQuota = (tool: string) => {
+    const next = { ...toolQuotas };
+    delete next[tool];
+    void saveQuotas(next);
   };
 
   const copyUrl = () => {
@@ -153,37 +228,17 @@ export default function McpSection({ flash }: { flash: Flash }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
-      {!licensed && (
-        <div
-          style={{
-            ...cardStyle,
-            borderColor: 'color-mix(in oklch, var(--accent) 45%, var(--border))',
-            background: 'color-mix(in oklch, var(--accent) 7%, var(--surface))',
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            {t('mcp.premiumTitle', { defaultValue: 'Premium feature' })}
-          </div>
-          <div style={{ fontSize: 13, color: 'var(--text-3)' }}>
-            {t('mcp.premiumDesc', {
-              defaultValue:
-                'The AI connector (MCP) requires an active license that grants the “AI connector (MCP)” feature. It stays disabled until a matching license is imported (Security & Compliance → License).',
-            })}
-          </div>
-        </div>
-      )}
       {/* 1. Opt-in + URL publique */}
       <div style={cardStyle}>
         <Toggle
           label={t('mcp.enableLabel', { defaultValue: 'Enable the AI connector (MCP)' })}
           desc={t('mcp.enableDesc', {
             defaultValue:
-              'Opt-in for this organization only. When OFF, no AI client can obtain an access token — every connection attempt is refused at consent. When ON, your users can connect their own AI client and act with their own permissions.',
+              'Included for free — opt-in for this organization only. When OFF, no AI client can obtain an access token — every connection attempt is refused at consent. When ON, your users can connect their own AI client and act with their own permissions.',
           })}
           checked={enabled}
           busy={saving === 'mcp.enabled'}
-          disabled={!licensed}
-          onChange={(v) => void save('mcp.enabled', v)}
+          onChange={toggleEnabled}
         />
 
         <div style={{ height: 1, background: 'var(--border)', margin: '18px 0' }} />
@@ -261,7 +316,7 @@ export default function McpSection({ flash }: { flash: Flash }) {
           })}
           checked={allowWrites}
           busy={saving === 'mcp.allowWrites'}
-          disabled={!enabled || !licensed}
+          disabled={!enabled}
           onChange={(v) => void save('mcp.allowWrites', v)}
         />
 
@@ -274,7 +329,7 @@ export default function McpSection({ flash }: { flash: Flash }) {
             })}
             checked={allowFinance}
             busy={saving === 'mcp.allowFinance'}
-            disabled={!enabled || !licensed}
+            disabled={!enabled}
             onChange={(v) => void save('mcp.allowFinance', v)}
           />
         </div>
@@ -309,8 +364,187 @@ export default function McpSection({ flash }: { flash: Flash }) {
         </div>
       </div>
 
+      {/* 3bis. Garde-fou de confirmation (utilisateur humain uniquement) */}
+      {(
+        <div style={cardStyle}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>
+            {t('mcp.confirmTitle', { defaultValue: 'Confirmation guard' })}
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 3, lineHeight: 1.5 }}>
+            {t('mcp.confirmDesc', {
+              defaultValue:
+                'Before a destructive action (delete, notify stakeholders…), the AI must ask the user to confirm, then repeat the call with a one-time token. Applies only to people driving an AI assistant (Claude, ChatGPT…) — NOT to autonomous agents, which are governed under Agents.',
+            })}
+          </div>
+          <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <label style={{ fontSize: 13, fontWeight: 600 }}>
+              {t('mcp.confirmPolicyLabel', { defaultValue: 'Policy' })}
+            </label>
+            <select
+              value={confirmPolicy}
+              disabled={!enabled || saving === 'mcp.confirmPolicy'}
+              onChange={(e) => void saveConfirmPolicy(e.target.value as 'off' | 'destructive' | 'all_writes')}
+              style={{
+                padding: '7px 10px',
+                borderRadius: 8,
+                border: '1px solid var(--border)',
+                background: 'var(--surface-2)',
+                color: 'var(--text)',
+                fontSize: 13,
+              }}
+            >
+              <option value="off">{t('mcp.confirmOff', { defaultValue: 'Off — no confirmation' })}</option>
+              <option value="destructive">
+                {t('mcp.confirmDestructive', { defaultValue: 'Destructive actions (recommended)' })}
+              </option>
+              <option value="all_writes">
+                {t('mcp.confirmAllWrites', { defaultValue: 'Every write action' })}
+              </option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      {/* 3ter. Quotas par tool + usage temps réel */}
+      {(
+        <div style={cardStyle}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>
+            {t('mcp.quotaTitle', { defaultValue: 'Per-tool rate limits' })}
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 3, lineHeight: 1.5 }}>
+            {t('mcp.quotaDesc', {
+              defaultValue:
+                'Cap how many times a given AI tool may be called per minute, per token — a safety net against a runaway loop that stays invisible to € / token budgets. This adds a frequency dimension to the cost budgets set under Agents. Use “*” as a catch-all for tools without an explicit limit.',
+            })}
+          </div>
+
+          {/* Quotas configurés */}
+          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {Object.keys(toolQuotas).length === 0 && (
+              <div style={{ fontSize: 12.5, color: 'var(--text-3)' }}>
+                {t('mcp.quotaNone', { defaultValue: 'No limit configured — only the per-token rate limit applies.' })}
+              </div>
+            )}
+            {Object.entries(toolQuotas).map(([tool, limit]) => (
+              <div key={tool} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <code
+                  style={{
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                    fontSize: 12,
+                    padding: '3px 8px',
+                    borderRadius: 6,
+                    border: '1px solid var(--border)',
+                    background: 'var(--surface-2)',
+                    color: 'var(--text-2)',
+                    minWidth: 180,
+                  }}
+                >
+                  {tool}
+                </code>
+                <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
+                  {t('mcp.quotaPerMin', { defaultValue: '{{n}} / min', n: limit })}
+                </span>
+                <button
+                  onClick={() => removeQuota(tool)}
+                  disabled={saving === 'mcp.toolQuotas'}
+                  style={{
+                    marginLeft: 'auto',
+                    fontSize: 12,
+                    padding: '4px 10px',
+                    borderRadius: 6,
+                    border: '1px solid var(--border)',
+                    background: 'transparent',
+                    color: 'var(--text-3)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {t('mcp.quotaRemove', { defaultValue: 'Remove' })}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Ajout */}
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <input
+              value={quotaTool}
+              onChange={(e) => setQuotaTool(e.target.value)}
+              placeholder={t('mcp.quotaToolPlaceholder', { defaultValue: 'vaks_list_projects or *' })}
+              style={{
+                padding: '7px 10px',
+                borderRadius: 8,
+                border: '1px solid var(--border)',
+                background: 'var(--surface-2)',
+                color: 'var(--text)',
+                fontSize: 13,
+                minWidth: 200,
+              }}
+            />
+            <input
+              value={quotaLimit}
+              onChange={(e) => setQuotaLimit(e.target.value)}
+              inputMode="numeric"
+              placeholder={t('mcp.quotaLimitPlaceholder', { defaultValue: 'calls / min' })}
+              style={{
+                padding: '7px 10px',
+                borderRadius: 8,
+                border: '1px solid var(--border)',
+                background: 'var(--surface-2)',
+                color: 'var(--text)',
+                fontSize: 13,
+                width: 110,
+              }}
+            />
+            <button
+              onClick={addQuota}
+              disabled={saving === 'mcp.toolQuotas'}
+              style={{
+                fontSize: 13,
+                padding: '7px 14px',
+                borderRadius: 8,
+                border: '1px solid var(--border)',
+                background: 'var(--surface-2)',
+                color: 'var(--text)',
+                cursor: 'pointer',
+              }}
+            >
+              {t('mcp.quotaAdd', { defaultValue: 'Add limit' })}
+            </button>
+          </div>
+
+          {/* Usage temps réel */}
+          <div style={{ marginTop: 18 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-3)', marginBottom: 8, letterSpacing: 0.3 }}>
+              {t('mcp.usageHeading', { defaultValue: 'Current-window usage' })}
+            </div>
+            {usage.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'var(--text-3)' }}>
+                {t('mcp.usageNone', { defaultValue: 'No AI tool call in the current window.' })}
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {usage.map((u) => (
+                  <div key={u.tool} style={{ display: 'flex', gap: 10, fontSize: 12.5 }}>
+                    <code style={{ fontFamily: 'ui-monospace, monospace', color: 'var(--text-2)', minWidth: 200 }}>
+                      {u.tool}
+                    </code>
+                    <span style={{ color: 'var(--text-3)' }}>{u.count}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--text-3)' }}>
+              {t('mcp.usageNote', {
+                defaultValue:
+                  'Live counters (reads included). The audit log keeps the history, but under-counts reads (only writes and audited reads are recorded there).',
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 4. Clients OAuth pré-enregistrés (Copilot Studio / intégrations) */}
-      {licensed && (
+      {(
         <div style={cardStyle}>
           <div style={{ fontSize: 14, fontWeight: 600 }}>
             {t('mcp.clientsTitle', { defaultValue: 'Pre-registered OAuth clients' })}

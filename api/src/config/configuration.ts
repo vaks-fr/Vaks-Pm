@@ -92,8 +92,23 @@ export default () => ({
     // slug tenant. Pas d'annuaire partagé → mapping statique par config.
     //   TENANCY_CUSTOM_DOMAINS="vaks-pm.vaks.fr=vaks,pm.acme.com=acme"
     customDomains: parseCustomDomains(process.env.TENANCY_CUSTOM_DOMAINS),
+    // Domaines de base sur lesquels un serveur MCP publie tous les tenants, sous
+    // la forme `<slug>.<mcpDomain>`. Un host qui en dépend résout le tenant sur
+    // son premier label — donc UNE valeur couvre toutes les organisations, sans
+    // entrée par tenant. Sert au MCP en DMZ dont le domaine public diffère du
+    // domaine interne de l'instance (le MCP relaie le Host public tel quel).
+    //   TENANCY_MCP_DOMAINS="mcp.vaks.fr,mcp.autre-client.com"
+    mcpDomains: parseDomainList(process.env.TENANCY_MCP_DOMAINS),
   },
 });
+
+/** Parse `a.b,c.d` → ['a.b','c.d'] (minuscule, sans vide). */
+function parseDomainList(raw?: string): string[] {
+  return (raw ?? '')
+    .split(',')
+    .map((d) => d.trim().toLowerCase())
+    .filter(Boolean);
+}
 
 /** Parse `host=slug,host2=slug2` → { host: slug } (hosts en minuscule). */
 function parseCustomDomains(raw?: string): Record<string, string> {

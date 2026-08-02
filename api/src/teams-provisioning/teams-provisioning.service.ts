@@ -13,6 +13,9 @@ import { TenantContext } from '../tenancy/tenant-context.service';
 import { GraphService } from './graph.service';
 import { getTeamsQueue } from './teams-queue';
 import { SharePointProvider } from '../filesources/providers/sharepoint.provider';
+import { NotificationsService } from '../notifications/notifications.service';
+import { AuditLogService } from '../audit-logs/audit-log.service';
+import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
 
 const FEATURE = 'teams-provisioning' as const;
 
@@ -47,6 +50,11 @@ export interface ProvisionResult {
   membersAdded?: number;
   membersSkipped?: number;
   error?: string | null;
+  /** Échec DÉFINITIF (retries épuisés / cas non-retryable) — déclenche l'alerte
+   *  admins-tenant dans `applyResult`. */
+  terminal?: boolean;
+  /** Numéro de la tentative ayant produit ce résultat (informatif, pour l'email/audit). */
+  attempts?: number;
 }
 
 @Injectable()
@@ -60,6 +68,8 @@ export class TeamsProvisioningService {
     private readonly tenantCtx: TenantContext,
     private readonly graph: GraphService,
     private readonly moduleRef: ModuleRef,
+    private readonly notifications: NotificationsService,
+    private readonly audit: AuditLogService,
   ) {}
 
   /** Lève si la feature premium n'est pas active dans la licence du tenant. */
@@ -444,6 +454,13 @@ export class TeamsProvisioningService {
       });
     }
 
+    // Échec DÉFINITIF (retries BullMQ épuisés / cas non-retryable) : jusqu'ici
+    // silencieux (console.error worker) — alerte les admins du tenant. L'état
+    // FAILED ci-dessus est déjà écrit ; cette étape est best-effort en plus.
+    if (r.status === 'FAILED' && r.terminal === true) {
+      await this.alertProvisionFailed(orgId, projectId, r);
+    }
+
     // Espace de collaboration : à un provisioning réussi, on inscrit/actualise
     // la ligne `ProjectCollabSpace` (source `provisioned`) — l'équipe Teams
     // apparaît alors dans l'onglet Intégrations du projet, à côté des espaces
@@ -494,6 +511,76 @@ export class TeamsProvisioningService {
     // le contexte documentaire et que le grant n'est pas encore posé.
     if (r.action === 'reconcile' && r.status !== 'FAILED') {
       await this.retrySharePointIfPending(orgId, projectId);
+    }
+  }
+
+  /**
+   * Alerte les admins du tenant qu'un provisioning Teams a échoué DÉFINITIVEMENT
+   * (retries BullMQ épuisés, ou cas non-retryable connu d'avance) — jusqu'ici
+   * silencieux (juste un `console.error` côté worker). Triple effet, calqué sur
+   * `AuditAlertsService`/`BackupAlertService` :
+   *   1. cooldown Redis PAR PROJET (1h) pour ne pas spammer un projet qui
+   *      re-échoue à chaque déclenchement de provisioning ;
+   *   2. email à chaque admin du tenant (`isAdmin` actif) ;
+   *   3. entrée d'audit WARNING `teams.provision.failed`.
+   * Fail-open intégral : une erreur ici ne doit jamais faire échouer
+   * `applyResult` (l'état FAILED est déjà écrit avant cet appel).
+   */
+  private async alertProvisionFailed(
+    orgId: string,
+    projectId: string,
+    r: ProvisionResult,
+  ): Promise<void> {
+    try {
+      const redis = await getTeamsQueue().client;
+      const ok = await (redis as unknown as {
+        set: (k: string, v: string, ex: 'EX', ttl: number, nx: 'NX') => Promise<string | null>;
+      }).set(`vaks:teams-alert:${projectId}`, '1', 'EX', 3600, 'NX');
+      if (ok !== 'OK') return;
+
+      const project = await this.prisma.project.findFirst({
+        where: { id: projectId, organizationId: orgId },
+        select: { name: true },
+      });
+      const projectName = project?.name ?? projectId;
+      const error = r.error ?? 'Erreur inconnue';
+      const attempts = r.attempts ?? 1;
+
+      const admins = await this.prisma.user.findMany({
+        where: { organizationId: orgId, isAdmin: true, deletedAt: null, status: 'ACTIVE' },
+        select: { email: true, name: true, preferredLanguage: true },
+      });
+      for (const a of admins) {
+        try {
+          await this.notifications.sendTeamsProvisionFailedAlert(
+            orgId,
+            a.email,
+            a.name,
+            { projectName, action: r.action, attempts, error },
+            a.preferredLanguage,
+          );
+        } catch (err) {
+          this.logger.warn(`teams provision failed mail to ${a.email} failed: ${(err as Error).message}`);
+        }
+      }
+
+      void this.audit.logNow({
+        organizationId: orgId,
+        action: AUDIT_ACTIONS.TEAMS_PROVISION_FAILED,
+        severity: 'WARNING',
+        actorType: 'SYSTEM',
+        resourceType: 'project',
+        resourceId: projectId,
+        resourceLabel: projectName,
+        detail: { error, attempts, action: r.action },
+      });
+
+      this.logger.warn(
+        `Alerte teams.provision.failed org=${orgId} project=${projectId} action=${r.action} attempts=${attempts}`,
+      );
+    } catch (err) {
+      // Fail-open : l'alerting ne casse jamais applyResult.
+      this.logger.error(`alertProvisionFailed failed: ${(err as Error).message}`);
     }
   }
 

@@ -1,5 +1,6 @@
 import {
   IsIn,
+  IsObject,
   IsOptional,
   IsString,
   IsUrl,
@@ -83,4 +84,15 @@ export class CreateDeliverableDto {
   @IsString()
   @Length(0, 80)
   commitSha?: string;
+
+  /**
+   * Sorties structurées (lot B) : dictionnaire PLAT clé → scalaire, destiné aux
+   * tâches aval (`upstreamOutputs` de leur work-context). Validé finement par
+   * `normalizeStructuredOutputs` côté service — ici on se contente d'exiger un
+   * objet (`class-validator` ne sait pas exprimer « plat, scalaires, borné »),
+   * pour que le message d'erreur reste actionnable pour un agent.
+   */
+  @IsOptional()
+  @IsObject()
+  structuredOutputs?: Record<string, unknown>;
 }

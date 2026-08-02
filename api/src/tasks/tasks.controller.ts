@@ -21,12 +21,13 @@ import { ProjectAccessGuard } from '../rbac/project-access.guard';
 import { ProjectAccess, TaskWritePolicy, fromProjectParam, fromTaskParam } from '../rbac/project-access.decorator';
 import { RequirePermissions, PublicApi } from '../rbac/require-permissions.decorator';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
-import { Audited } from '../audit-logs/audited.decorator';
+import { Audited, SkipAudit } from '../audit-logs/audited.decorator';
 import { TasksService } from './tasks.service';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
 import { MoveTaskDto } from './dto/move-task.dto';
 import { ListTasksDto } from './dto/list-tasks.dto';
+import { RequestAssistanceDto } from './dto/request-assistance.dto';
 
 @ApiTags('tasks')
 @ApiBearerAuth()
@@ -90,6 +91,10 @@ export class TasksController {
   ) {
     return this.tasks.create(user.orgId, projectId, user.userId, dto, {
       isAdmin: user.isAdmin,
+      // Nécessaires au gating de la décomposition agent (« tu ne découpes que
+      // la tâche que tu tiens ») — sans eux le contrôle ne s'armerait jamais.
+      actorKind: user.actorKind ?? 'HUMAN',
+      userId: user.userId,
     });
   }
 
@@ -108,7 +113,57 @@ export class TasksController {
   @Get('tasks/:taskId/work-context')
   @RequirePermissions('task:view')
   workContext(@CurrentUser() user: AuthUser, @Param('taskId', ParseUUIDPipe) id: string) {
-    return this.tasks.getWorkContext(user.orgId, id);
+    return this.tasks.getWorkContext(user.orgId, id, {
+      userId: user.userId,
+      actorKind: user.actorKind ?? 'HUMAN',
+    });
+  }
+
+  /**
+   * Demande d'assistance ciblée (lot B) : commentaire + demande de compétence
+   * vers l'équipe qui la couvre, + mise en pause optionnelle. Réservé au
+   * claimant (le service arbitre) — `task:update` suffit côté RBAC.
+   */
+  @Post('tasks/:taskId/assistance')
+  @RequirePermissions('task:update')
+  @TaskWritePolicy()
+  @Audited('task.assistance_requested', { resource: 'task', idParam: 'taskId' })
+  assistance(
+    @CurrentUser() user: AuthUser,
+    @Param('taskId', ParseUUIDPipe) id: string,
+    @Body() dto: RequestAssistanceDto,
+  ) {
+    return this.tasks.requestAssistance(
+      user.orgId,
+      id,
+      { userId: user.userId, actorKind: user.actorKind ?? 'HUMAN', isAdmin: user.isAdmin },
+      dto,
+    );
+  }
+
+  /**
+   * Synthèse des sous-tâches (lot B) : état de chacune + sorties structurées
+   * approuvées, pour consolider avant le livrable final.
+   */
+  @Get('tasks/:taskId/subtasks')
+  @RequirePermissions('task:view')
+  subtasks(@CurrentUser() user: AuthUser, @Param('taskId', ParseUUIDPipe) id: string) {
+    return this.tasks.getSubtasksSummary(user.orgId, id, user.userId);
+  }
+
+  /**
+   * Heartbeat d'exécution (lot A) : prolonge le bail de la tâche revendiquée.
+   * Réservé de fait au claimant (409 `LEASE_LOST` sinon) — pas de permission
+   * supplémentaire, `task:update` suffit, le service arbitre la propriété.
+   */
+  @Post('tasks/:taskId/heartbeat')
+  @RequirePermissions('task:update')
+  @SkipAudit() // battement périodique : noierait le journal sans rien prouver.
+  heartbeat(@CurrentUser() user: AuthUser, @Param('taskId', ParseUUIDPipe) id: string) {
+    return this.tasks.heartbeat(user.orgId, id, {
+      userId: user.userId,
+      actorKind: user.actorKind ?? 'HUMAN',
+    });
   }
 
   /**

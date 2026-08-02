@@ -31,6 +31,10 @@ export interface AutomationMessageParams {
   tier?: number;
   /** Nombre d'éléments concernés (tâches ouvertes, prédécesseurs non finis…). */
   count?: number;
+  /** Texte libre cité tel quel dans le message (question d'un agent bloqué). */
+  note?: string;
+  /** `'yes'`/`'no'` — la tâche a-t-elle été mise en pause (kind `agent_blocked`). */
+  paused?: string;
   /** Heures (heures sup, écart de capacité…). */
   hours?: number;
   /** Montants déjà formatés avec la devise de l'org. */
@@ -711,6 +715,52 @@ const M: Record<AutomationKind, Record<Lang, MessageBuilder>> = {
       ctaLabel: 'Agenten öffnen',
     }),
   },
+  agent_blocked: {
+    en: (p) => ({
+      subject: `[AI agent] Blocked on ${p.taskTitle}`,
+      heading: 'An AI agent is asking for help',
+      bodyHtml:
+        `<strong>${esc(p.userName ?? 'An agent')}</strong> is blocked on <strong>${esc(p.taskTitle ?? '')}</strong>` +
+        `${p.projectName ? ` (${esc(p.projectName)})` : ''} and asked a question rather than guessing:` +
+        `<blockquote>${esc(p.note ?? '')}</blockquote>` +
+        `${p.paused === 'yes' ? 'The task is paused until someone answers.' : 'The task is still running.'}`,
+      text: `${p.userName} is blocked on ${p.taskTitle}: ${p.note}`,
+      ctaLabel: 'Open the task',
+    }),
+    fr: (p) => ({
+      subject: `[Agent IA] Blocage sur ${p.taskTitle}`,
+      heading: "Un agent IA demande de l'aide",
+      bodyHtml:
+        `<strong>${esc(p.userName ?? 'Un agent')}</strong> est bloqué sur <strong>${esc(p.taskTitle ?? '')}</strong>` +
+        `${p.projectName ? ` (${esc(p.projectName)})` : ''} et pose une question plutôt que de deviner :` +
+        `<blockquote>${esc(p.note ?? '')}</blockquote>` +
+        `${p.paused === 'yes' ? "La tâche est en pause en attendant une réponse." : 'La tâche continue de tourner.'}`,
+      text: `${p.userName} est bloqué sur ${p.taskTitle} : ${p.note}`,
+      ctaLabel: 'Ouvrir la tâche',
+    }),
+    it: (p) => ({
+      subject: `[Agente IA] Blocco su ${p.taskTitle}`,
+      heading: "Un agente IA chiede aiuto",
+      bodyHtml:
+        `<strong>${esc(p.userName ?? 'Un agente')}</strong> è bloccato su <strong>${esc(p.taskTitle ?? '')}</strong>` +
+        `${p.projectName ? ` (${esc(p.projectName)})` : ''} e pone una domanda invece di tirare a indovinare:` +
+        `<blockquote>${esc(p.note ?? '')}</blockquote>` +
+        `${p.paused === 'yes' ? "L'attività è in pausa in attesa di una risposta." : "L'attività prosegue."}`,
+      text: `${p.userName} è bloccato su ${p.taskTitle}: ${p.note}`,
+      ctaLabel: "Apri l'attività",
+    }),
+    de: (p) => ({
+      subject: `[KI-Agent] Blockiert bei ${p.taskTitle}`,
+      heading: 'Ein KI-Agent bittet um Hilfe',
+      bodyHtml:
+        `<strong>${esc(p.userName ?? 'Ein Agent')}</strong> ist bei <strong>${esc(p.taskTitle ?? '')}</strong> blockiert` +
+        `${p.projectName ? ` (${esc(p.projectName)})` : ''} und stellt eine Frage, statt zu raten:` +
+        `<blockquote>${esc(p.note ?? '')}</blockquote>` +
+        `${p.paused === 'yes' ? 'Die Aufgabe pausiert, bis jemand antwortet.' : 'Die Aufgabe läuft weiter.'}`,
+      text: `${p.userName} ist bei ${p.taskTitle} blockiert: ${p.note}`,
+      ctaLabel: 'Aufgabe öffnen',
+    }),
+  },
   agent_run_anomaly: {
     en: (p) => {
       const why =
@@ -861,6 +911,41 @@ const M: Record<AutomationKind, Record<Lang, MessageBuilder>> = {
       bodyHtml: `Die letzte Auto-Planung in <strong>${esc(p.projectName ?? '')}</strong> konnte <strong>${p.count} Aufgabe${p.count === 1 ? '' : 'n'}</strong> nicht vor der Frist platzieren. Kapazität ergänzen, Termine verschieben oder Umfang reduzieren.`,
       text: `Auto-Planung in „${p.projectName}" überschreitet die Frist für ${p.count} Aufgabe(n).`,
       ctaLabel: 'Auslastung öffnen',
+    }),
+  },
+  // ============================================================
+  // Absorber l'imprévu (Lot 4.3, AUTOPLAN_IMPROVEMENTS.md §4.3) — signal
+  // fondé sur le statut : tâche allouée dont la fenêtre est passée sans
+  // jamais avoir quitté TODO.
+  // ============================================================
+  allocation_window_missed: {
+    en: (p) => ({
+      subject: `[Not started] "${p.taskTitle}" was allocated but is still To do`,
+      heading: 'An allocated task never started',
+      bodyHtml: `<strong>${esc(p.taskTitle ?? '')}</strong> in <strong>${esc(p.projectName ?? '')}</strong> had time allocated for it, but the planned window closed <strong>${p.days} day${p.days === 1 ? '' : 's'} ago</strong> and the task is still <strong>To do</strong>. Reschedule it or check what's blocking it.`,
+      text: `"${p.taskTitle}" (${p.projectName}) was allocated but its window closed ${p.days} day(s) ago and it is still To do.`,
+      ctaLabel: 'Open task',
+    }),
+    fr: (p) => ({
+      subject: `[Non démarrée] « ${p.taskTitle} » était allouée mais reste à faire`,
+      heading: 'Une tâche allouée n\'a jamais démarré',
+      bodyHtml: `<strong>${esc(p.taskTitle ?? '')}</strong> dans <strong>${esc(p.projectName ?? '')}</strong> avait du temps alloué, mais la fenêtre prévue s'est refermée il y a <strong>${p.days} jour${p.days === 1 ? '' : 's'}</strong> et la tâche est toujours <strong>à faire</strong>. Replanifiez-la ou vérifiez ce qui bloque.`,
+      text: `« ${p.taskTitle} » (${p.projectName}) était allouée mais sa fenêtre s'est refermée il y a ${p.days} jour(s) et elle est toujours à faire.`,
+      ctaLabel: 'Ouvrir la tâche',
+    }),
+    it: (p) => ({
+      subject: `[Non iniziata] "${p.taskTitle}" era allocata ma è ancora da fare`,
+      heading: "Un'attività allocata non è mai partita",
+      bodyHtml: `<strong>${esc(p.taskTitle ?? '')}</strong> in <strong>${esc(p.projectName ?? '')}</strong> aveva tempo allocato, ma la finestra prevista si è chiusa <strong>${p.days} giorn${p.days === 1 ? 'o' : 'i'} fa</strong> e l'attività è ancora <strong>da fare</strong>.`,
+      text: `"${p.taskTitle}" (${p.projectName}) era allocata ma la sua finestra si è chiusa ${p.days} giorni fa ed è ancora da fare.`,
+      ctaLabel: "Apri l'attività",
+    }),
+    de: (p) => ({
+      subject: `[Nicht gestartet] „${p.taskTitle}" war verplant, ist aber noch zu erledigen`,
+      heading: 'Eine verplante Aufgabe wurde nie begonnen',
+      bodyHtml: `Für <strong>${esc(p.taskTitle ?? '')}</strong> in <strong>${esc(p.projectName ?? '')}</strong> war Zeit verplant, aber das vorgesehene Zeitfenster endete vor <strong>${p.days} Tag${p.days === 1 ? '' : 'en'}</strong> und die Aufgabe ist weiterhin <strong>zu erledigen</strong>.`,
+      text: `„${p.taskTitle}" (${p.projectName}) war verplant, das Zeitfenster endete vor ${p.days} Tag(en) und sie ist weiterhin zu erledigen.`,
+      ctaLabel: 'Aufgabe öffnen',
     }),
   },
   // ============================================================

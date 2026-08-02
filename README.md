@@ -91,13 +91,13 @@ The images for the 4 services are built by GitHub Actions
 the **GitHub Container Registry**:
 
 ```
-ghcr.io/thomasvaxelaire-vaks/vakspm-{api,web,worker,mcp}
+ghcr.io/vaks-fr/vakspm-{api,web,worker,mcp}
   :latest        (default branch)
   :sha-<short>   (immutable — to pin or roll back a deployment)
 ```
 
 `docker-stack.yml` consumes these images via `${VAKS_TAG:-latest}`. To pull from a mirror
-registry, override `VAKS_IMAGE_PREFIX` (default `ghcr.io/thomasvaxelaire-vaks/vakspm`). Deployment
+registry, override `VAKS_IMAGE_PREFIX` (default `ghcr.io/vaks-fr/vakspm`). Deployment
 performs a rolling update (`docker service update --force --image …`) with no downtime.
 
 ---

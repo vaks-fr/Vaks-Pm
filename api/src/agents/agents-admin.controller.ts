@@ -14,15 +14,18 @@ import {
 import type { Request } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { CreateAgentDto, UpdateAgentDto, UpsertAgentConnectorDto } from '@vaks-pm/shared';
+import { resolveLeaseMinutes } from './agent-budget';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../rbac/permissions.guard';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { AuthUser, CurrentUser } from '../auth/current-user.decorator';
 import { SkipAudit } from '../audit-logs/audited.decorator';
 import { AgentsService } from './agents.service';
+import { PolicyEngineService } from './policy-engine.service';
 import { AgentConnectorsService } from './agent-connectors.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
+import { normalizeAgentBrief } from './context/agent-brief';
 import { pickExcLang, translateExc } from '../common/i18n/exception-i18n';
 
 /**
@@ -53,6 +56,13 @@ const AGENT_POLICY_KEYS = [
   'agents.backpressure.maxPendingReviews',
   'agents.requireRunDeclaration',
   'agents.preauthorizeBudget',
+  // Lot A : bail d'exécution (min, 0 = off) + coupe-circuit budgétaire.
+  'agents.executionLeaseMinutes',
+  'agents.budgetBreaker',
+  // Brief agent par défaut de l'org, hérité CHAMP PAR CHAMP par les projets :
+  // les conventions maison (langue, format des livrables) se règlent une fois
+  // ici au lieu d'être retapées dans chaque projet.
+  'agents.briefDefault',
 ] as const;
 
 function pickAgentPolicies(all: Record<string, unknown>) {
@@ -62,6 +72,12 @@ function pickAgentPolicies(all: Record<string, unknown>) {
       all['agents.backpressure.maxPendingReviews'] ?? 5,
     'agents.requireRunDeclaration': all['agents.requireRunDeclaration'] === true,
     'agents.preauthorizeBudget': all['agents.preauthorizeBudget'] === true,
+    // Clé absente = filet armé au défaut serveur (30 min), PAS 0 : l'UI relit
+    // ce bloc puis le réécrit tel quel au save — un 0 par omission désarmerait
+    // silencieusement le bail à la première sauvegarde.
+    'agents.executionLeaseMinutes': resolveLeaseMinutes(all['agents.executionLeaseMinutes']),
+    'agents.budgetBreaker': all['agents.budgetBreaker'] === true,
+    'agents.briefDefault': normalizeAgentBrief(all['agents.briefDefault']),
   };
 }
 
@@ -80,6 +96,7 @@ export class AgentsAdminController {
     private readonly agents: AgentsService,
     private readonly settings: AdminSettingsService,
     private readonly tokens: ApiTokensService,
+    private readonly policies: PolicyEngineService,
   ) {}
 
   @Get()
@@ -153,6 +170,10 @@ export class AgentsAdminController {
       id: user.userId,
       email: user.email,
     });
+    // Purge immédiate du cache 30 s (finding #7, audit sécu 2026-08-01) : sans
+    // ça, un claim/auto-close survenant juste après ce PUT continuait de lire
+    // les ANCIENNES policies jusqu'à expiration naturelle du TTL.
+    this.policies.invalidate(user.orgId);
     return pickAgentPolicies(await this.settings.getAll(user.orgId));
   }
 

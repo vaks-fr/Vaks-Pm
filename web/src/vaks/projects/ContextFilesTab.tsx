@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { api, type ContextFileEntry } from '../../api/client';
 import { Icon } from '../primitives';
 import { useFormat } from '../../lib/format';
+import { safeUrl } from '../../lib/url';
 import { fmtBytes } from './shared';
 
 interface Props {
@@ -161,7 +162,7 @@ export function ContextFilesTab({ projectId, source, label, accent, pushToast }:
                   {f.webUrl && (
                     <a
                       className="icon-btn"
-                      href={f.webUrl}
+                      href={safeUrl(f.webUrl)}
                       target="_blank"
                       rel="noreferrer noopener"
                       title={t('contextFiles.openIn', { source: label })}
@@ -210,7 +211,7 @@ export function ContextFilesTab({ projectId, source, label, accent, pushToast }:
                 <div className="md-title truncate">{preview.doc.name}</div>
               </div>
               {preview.doc.webUrl && (
-                <a className="btn btn-ghost btn-sm" href={preview.doc.webUrl} target="_blank" rel="noreferrer noopener">
+                <a className="btn btn-ghost btn-sm" href={safeUrl(preview.doc.webUrl)} target="_blank" rel="noreferrer noopener">
                   <Icon name="link" size={13} /> {t('contextFiles.openIn', { source: label })}
                 </a>
               )}

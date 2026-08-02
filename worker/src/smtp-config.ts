@@ -3,8 +3,10 @@
  * Le mot de passe SMTP n'est PAS exposé par l'API : on le lit côté worker
  * dans la variable d'env `SMTP_PASSWORD` (montée comme Swarm secret).
  *
- * Cache mémoire 60 s — un changement de SMTP via l'UI prend au pire 1 minute
- * à se propager au worker. Suffisant pour du config admin ; aucune perte de
+ * Cache mémoire 60 s, **par tenant** (`tenantSlug`) — en pooled, la conf SMTP
+ * (From/Reply-To/branding) d'un tenant ne doit jamais fuiter vers un autre.
+ * Un changement de SMTP via l'UI prend au pire 1 minute à se propager au
+ * worker pour CE tenant. Suffisant pour du config admin ; aucune perte de
  * mail (les jobs en file sont rejoués si SMTP_HOST a changé entre temps).
  */
 export type SmtpEncryption = 'none' | 'starttls' | 'ssl';
@@ -29,32 +31,41 @@ interface CachedConfig {
 }
 
 const CACHE_TTL_MS = 60_000;
-let cached: CachedConfig | null = null;
+/** Clé = tenantSlug (`''` pour le mode non-pooled / dev local sans stack). */
+const cacheBySlug = new Map<string, CachedConfig>();
 
 /**
- * Lit la conf SMTP. Tente l'API d'abord (URL `INTERNAL_API_URL`, défaut
- * `http://api:3000`), fallback sur les env vars classiques si l'API n'est pas
- * joignable (utile en dev local sans stack Swarm).
+ * Lit la conf SMTP du tenant `tenantSlug`. Tente l'API d'abord (URL
+ * `INTERNAL_API_URL`, défaut `http://api:3000`), fallback sur les env vars
+ * classiques si l'API n'est pas joignable (utile en dev local sans stack Swarm).
  */
-export async function getSmtpConfig(force = false): Promise<SmtpConfig> {
-  if (!force && cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-    return cached.cfg;
+export async function getSmtpConfig(
+  tenantSlug?: string | null,
+  force = false,
+): Promise<SmtpConfig> {
+  const key = tenantSlug ?? '';
+  const existing = cacheBySlug.get(key);
+  if (!force && existing && Date.now() - existing.fetchedAt < CACHE_TTL_MS) {
+    return existing.cfg;
   }
-  const cfg = await fetchFromApi().catch(() => fromEnv());
-  cached = { cfg, fetchedAt: Date.now() };
+  const cfg = await fetchFromApi(tenantSlug).catch(() => fromEnv());
+  cacheBySlug.set(key, { cfg, fetchedAt: Date.now() });
   return cfg;
 }
 
-export function invalidateSmtpCache(): void {
-  cached = null;
+export function invalidateSmtpCache(tenantSlug?: string | null): void {
+  cacheBySlug.delete(tenantSlug ?? '');
 }
 
-async function fetchFromApi(): Promise<SmtpConfig> {
+async function fetchFromApi(tenantSlug?: string | null): Promise<SmtpConfig> {
   const base = process.env.INTERNAL_API_URL ?? 'http://api:3000';
   const token = process.env.WORKER_API_TOKEN;
   // Token optionnel tant que l'endpoint est sur l'overlay uniquement (durci en phase 8).
   const headers: Record<string, string> = {};
   if (token) headers['X-Worker-Token'] = token;
+  // En pooled, sans ce header la conf résout sur l'org de base et fuite vers
+  // tous les tenants (From/Reply-To/branding d'une autre org). Cf. reportDelivery.
+  if (tenantSlug) headers['X-Tenant-Slug'] = tenantSlug;
   const res = await fetch(`${base}/api/v1/internal/notifications/smtp`, { headers });
   if (!res.ok) throw new Error(`SMTP fetch failed: ${res.status}`);
   const json = (await res.json()) as {

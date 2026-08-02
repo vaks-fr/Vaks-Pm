@@ -53,6 +53,9 @@ export interface ParsedCiResult {
   conclusion: 'success' | 'failure';
   runId: string | null;
   runUrl: string | null;
+  /** Dépôt d'origine (ex. "owner/repo"), quand le payload le porte — sert à lier
+   *  la preuve au projet du livrable (anti-réutilisation cross-dépôt). */
+  repo: string | null;
 }
 
 /** Normalise un verdict CI hétérogène → success | failure. */
@@ -90,10 +93,13 @@ export function parseCiPayload(provider: CiProvider, body: unknown): ParsedCiRes
       conclusion: normalizeConclusion(conclusionRaw),
       runId: asStr(b.runId ?? b.run_id),
       runUrl: asStr(b.runUrl ?? b.run_url),
+      repo: asStr(b.repo ?? b.repository ?? b.repoFullName ?? b.repo_full_name),
     };
   }
 
-  // github
+  // github — le dépôt est au niveau racine du payload (identique aux 3 types
+  // d'événement) : `repository.full_name` (ex. "owner/repo").
+  const repo = asStr(asObj(b.repository)?.full_name);
   const wr = asObj(b.workflow_run);
   const cs = asObj(b.check_suite);
   if (wr) {
@@ -106,13 +112,14 @@ export function parseCiPayload(provider: CiProvider, body: unknown): ParsedCiRes
       conclusion: normalizeConclusion(wr.conclusion),
       runId: asStr(wr.id),
       runUrl: asStr(wr.html_url),
+      repo,
     };
   }
   if (cs) {
     if (asStr(cs.status) && asStr(cs.status) !== 'completed') return null;
     const commitSha = asStr(cs.head_sha);
     if (!commitSha || cs.conclusion == null) return null;
-    return { commitSha, conclusion: normalizeConclusion(cs.conclusion), runId: asStr(cs.id), runUrl: null };
+    return { commitSha, conclusion: normalizeConclusion(cs.conclusion), runId: asStr(cs.id), runUrl: null, repo };
   }
   // `status` event : { sha, state, target_url }
   if (b.state != null && b.sha != null) {
@@ -125,6 +132,7 @@ export function parseCiPayload(provider: CiProvider, body: unknown): ParsedCiRes
       conclusion: state === 'success' ? 'success' : 'failure',
       runId: null,
       runUrl: asStr(b.target_url),
+      repo,
     };
   }
   return null;

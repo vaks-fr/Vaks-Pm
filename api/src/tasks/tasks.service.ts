@@ -22,10 +22,27 @@ import { auditDiff } from '../audit-logs/audit-sanitize';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { TaskTransitionService } from './task-transition.service';
 import { PolicyEngineService } from '../agents/policy-engine.service';
+import { AgentBudgetService } from '../agents/agent-budget.service';
+import { leaseExpiryFrom } from '../agents/agent-budget';
+import { readStructuredOutputs } from '../deliverables/structured-outputs';
+// Résolus en LAZY via `moduleRef` (comme les hooks d'automatisation) : on
+// n'ajoute PAS ces modules aux imports de TasksModule — CommentsModule et
+// SkillRequestsModule vivent au-dessus des tâches, l'inverse ferait un cycle de
+// modules. L'import de fichier, lui, est sans cycle (ni l'un ni l'autre
+// n'importe `tasks.service`) et il faut la classe à l'exécution comme jeton DI.
+import { CommentsService } from '../comments/comments.service';
+import { SkillRequestsService } from '../skill-requests/skill-requests.service';
+// Service AUTONOME (prisma + settings + logique pure de vérification) : import
+// direct sans cycle, contrairement à `DeliverablesService` qui importe déjà
+// `TasksService`. Fourni par `TasksModule` pour la même raison.
+import { SubtreeVerificationService } from '../deliverables/subtree-verification.service';
 import { agentSelfGovernanceViolation } from './agent-self-governance';
 import { decideSubStatus } from '../custom-statuses/sub-status-rules';
 import { S3Service } from '../storage/s3.service';
 import { FileSourcesService } from '../filesources/filesources.service';
+import { AgentContextService } from '../agent-context/agent-context.service';
+import { buildContextSnapshot } from '../agents/context/context-hash';
+import { effectiveAiFolderIds } from '../projects/document-context';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
 import { MoveTaskDto } from './dto/move-task.dto';
@@ -39,6 +56,11 @@ const POSITION_GAP = 1000;
 const TASK_LIST_HARD_LIMIT = 2000;
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+/** Longueur minimale de la description d'une sous-tâche créée par un agent.
+ *  Assez pour forcer une phrase utile, assez peu pour ne pas pousser au
+ *  remplissage : c'est un plancher, pas une cible. */
+const MIN_SUBTASK_DESCRIPTION = 60;
 
 /**
  * Normalise une couleur de groupe.
@@ -80,6 +102,13 @@ export interface TaskCaller {
   /** Nature du principal. Pilote l'anti auto-gouvernance des agents. */
   actorKind?: 'HUMAN' | 'AGENT';
   /**
+   * Identifiant du principal. Renseigné pour les contrôles qui comparent
+   * l'acteur à l'état de la tâche — décomposition agent (« tu ne découpes que
+   * ce que tu tiens »). `create()` reçoit déjà `userId` en paramètre ; ce champ
+   * sert aux chemins où seul le `caller` est propagé.
+   */
+  userId?: string;
+  /**
    * true = mutation émise par le **moteur d'automatisations** (règles de
    * mutation, lot 5). Sert de garde anti-boucle : les hooks d'automatisation
    * s'abstiennent quand ils sont eux-mêmes à l'origine du changement, sinon une
@@ -104,6 +133,8 @@ export class TasksService {
     private readonly transitions: TaskTransitionService,
     private readonly settings: AdminSettingsService,
     private readonly policies: PolicyEngineService,
+    private readonly budgets: AgentBudgetService,
+    private readonly subtreeVerification: SubtreeVerificationService,
     private readonly moduleRef: ModuleRef,
   ) {}
 
@@ -314,6 +345,171 @@ export class TasksService {
     };
   }
 
+  /**
+   * Remontée de preuve de l'arbre au moment où un agent soumet un parent en
+   * revue. Le plancher est celui du PARENT (enjeu projet × confiance ∩ capacités
+   * de vérification), c'est-à-dire la politique réglée en admin — jamais quelque
+   * chose que l'agent choisit.
+   *
+   * Même dualité que le gate d'un livrable isolé : en `enforce` on refuse, en
+   * `report_only` on journalise. `DeliverablesService` est résolu en lazy — il
+   * importe déjà `TasksService`, un import direct ferait un cycle.
+   */
+  private async assertSubtreeVerified(
+    orgId: string,
+    taskId: string,
+    projectId: string,
+    actorUserId: string,
+  ) {
+    let sub: Awaited<ReturnType<SubtreeVerificationService['evaluate']>> | null = null;
+    try {
+      sub = await this.subtreeVerification.evaluate(orgId, taskId, actorUserId);
+    } catch {
+      return; // fail-open : une panne d'évaluation ne bloque pas un flux légitime
+    }
+    if (!sub || sub.satisfied) return;
+
+    const detail = {
+      projectId,
+      requiredFloor: sub.requiredFloor,
+      weakest: sub.weakest,
+      belowFloor: sub.below,
+      missingProof: sub.missing,
+      mode: sub.mode,
+    };
+    void this.audit.log({
+      organizationId: orgId,
+      action: 'agent.subtree.below_floor',
+      severity: 'WARNING',
+      actorType: 'AGENT',
+      actorId: actorUserId,
+      resourceType: 'task',
+      resourceId: taskId,
+      detail,
+    });
+    if (sub.mode !== 'enforce') return; // calibration : on observe sans bloquer
+
+    const parts: string[] = [];
+    if (sub.missing.length) parts.push(`sans livrable approuvé : #${sub.missing.join(', #')}`);
+    if (sub.below.length) {
+      parts.push(
+        `sous le plancher ${sub.requiredFloor} : ` +
+          sub.below.map((b) => `#${b.number} (${b.method})`).join(', '),
+      );
+    }
+    throw new ConflictException({
+      code: 'SUBTREE_BELOW_FLOOR',
+      message: `Le découpage ne prouve pas assez pour ce parent — ${parts.join(' ; ')}.`,
+    });
+  }
+
+  /**
+   * Décomposition par un AGENT (lot B, capability `tasks:decompose`).
+   *
+   * `task:create` seul serait une porte de sortie : un agent plafonné sur sa
+   * tâche s'ouvrirait une tâche neuve, hors enveloppe et hors périmètre. Le
+   * droit est donc borné **à l'action**, comme le pouvoir de valider (4c) :
+   *
+   *  1. la tâche créée DOIT être l'enfant d'une tâche que l'agent **tient**
+   *     (`claimedById`) — il découpe son propre travail, il n'ouvre pas de
+   *     chantier ;
+   *  2. **un seul niveau** : on ne décompose pas une sous-tâche (l'arbre reste
+   *     borné, et l'héritage d'enveloppe reste calculable en une remontée) ;
+   *  3. aucun champ de gouvernance (budget, enjeu, garde-fous, critères) —
+   *     un agent ne s'écrit pas ses propres limites, ici comme au PATCH.
+   *
+   * Un humain n'est concerné par aucune de ces règles.
+   */
+  private async assertAgentDecomposition(
+    orgId: string,
+    projectId: string,
+    dto: CreateTaskDto,
+    caller?: TaskCaller,
+  ): Promise<void> {
+    if (caller?.actorKind !== 'AGENT') return;
+
+    const forbidden = agentSelfGovernanceViolation(
+      'AGENT',
+      dto as unknown as Record<string, unknown>,
+    );
+    if (forbidden.length) {
+      throw new ForbiddenException({
+        code: 'AGENT_SELF_GOVERNANCE',
+        message: `Un agent ne définit pas lui-même ${forbidden.join(', ')} sur une tâche.`,
+      });
+    }
+    if (!dto.parentTaskId) {
+      throw new ForbiddenException({
+        code: 'AGENT_SUBTASK_ONLY',
+        message:
+          "Un agent ne crée que des sous-tâches de la tâche qu'il a revendiquée : fournissez `parentTaskId`.",
+      });
+    }
+    const parent = await this.prisma.task.findFirst({
+      where: { id: dto.parentTaskId, organizationId: orgId, deletedAt: null },
+      select: {
+        id: true, projectId: true, claimedById: true, parentTaskId: true, status: true,
+        requiredSkillId: true, requiredSkillLevel: true,
+      },
+    });
+    if (!parent || parent.projectId !== projectId) {
+      throw new NotFoundException('Tâche parente introuvable dans ce projet.');
+    }
+    if (parent.claimedById !== caller.userId) {
+      throw new ForbiddenException({
+        code: 'AGENT_NOT_CLAIMANT',
+        message:
+          "Vous ne détenez pas cette tâche — un agent ne peut décomposer que la tâche qu'il a revendiquée.",
+      });
+    }
+    // `claimedById` SURVIT à l'approbation et à la clôture (c'est une trace, pas
+    // un bail) : sans ce contrôle, un agent pourrait rouvrir du travail sous une
+    // tâche terminée des semaines plus tôt. On exige donc un statut où le travail
+    // est réellement en cours.
+    const ACTIVE_PARENT: TaskStatus[] = [
+      TaskStatus.CLAIMED,
+      TaskStatus.IN_PROGRESS,
+      TaskStatus.CHANGES_REQUESTED,
+    ];
+    if (!ACTIVE_PARENT.includes(parent.status)) {
+      throw new ForbiddenException({
+        code: 'AGENT_PARENT_NOT_ACTIVE',
+        message: `La tâche parente n'est pas en cours d'exécution (statut ${parent.status}) — on ne rouvre du travail que sous une tâche activement tenue.`,
+      });
+    }
+    // CONTRAT DE PASSAGE DE RELAIS. Une sous-tâche est destinée à être reprise
+    // par QUELQU'UN D'AUTRE : le créateur sait pourquoi il découpe, celui qui la
+    // prend ne le saura jamais. Un titre seul produit une tâche techniquement
+    // prenable et pratiquement infaisable — on l'exige donc explicitement plutôt
+    // que d'espérer la bonne volonté de l'agent.
+    if (!dto.description || dto.description.trim().length < MIN_SUBTASK_DESCRIPTION) {
+      throw new BadRequestException({
+        code: 'SUBTASK_DESCRIPTION_REQUIRED',
+        message:
+          `Décrivez la sous-tâche (${MIN_SUBTASK_DESCRIPTION} caractères minimum) : ce qu'il y a à faire, ` +
+          "ce qui est déjà connu, et à quoi ressemble le résultat attendu. Un autre acteur doit pouvoir la prendre sans vous.",
+      });
+    }
+    if (parent.parentTaskId) {
+      throw new ForbiddenException({
+        code: 'AGENT_DEPTH_LIMIT',
+        message:
+          "Cette tâche est déjà une sous-tâche : la décomposition est limitée à un niveau. Signalez le besoin dans un commentaire.",
+      });
+    }
+    // Compétence HÉRITÉE du parent par défaut. Sans elle, `next_task` n'a aucun
+    // critère de routage : n'importe quel agent membre peut tirer la sous-tâche,
+    // y compris celui qui ne sait pas la faire — alors même que « il me manque
+    // une compétence » est le premier motif de découpage. L'agent peut toujours
+    // déclarer une autre compétence s'il découpe justement pour en changer.
+    if (!dto.requiredSkillId && parent.requiredSkillId) {
+      dto.requiredSkillId = parent.requiredSkillId;
+      if (dto.requiredSkillLevel == null && parent.requiredSkillLevel != null) {
+        dto.requiredSkillLevel = parent.requiredSkillLevel;
+      }
+    }
+  }
+
   // ------------------------------------------------------------
   // Création
   // ------------------------------------------------------------
@@ -341,6 +537,8 @@ export class TasksService {
     if (dto.requiredSkillId) {
       await this.assertRequiredSkillAllowed(orgId, projectId, dto.requiredSkillId, caller);
     }
+    // Décomposition par un agent (lot B) : bornée à l'action, pas au RBAC.
+    await this.assertAgentDecomposition(orgId, projectId, dto, caller);
 
     // Si la colonne n'est pas fournie, on tombe sur la première colonne du board principal.
     const columnId = dto.boardColumnId ?? (await this.firstColumnId(projectId));
@@ -351,7 +549,9 @@ export class TasksService {
     // Position : juste après la plus grande position de la colonne.
     const position = await this.nextPositionInColumn(columnId);
 
-    if (dto.parentTaskId) await this.assertSameProjectTask(projectId, dto.parentTaskId);
+    if (dto.parentTaskId) {
+      await this.assertSameProjectTask(projectId, dto.parentTaskId);
+    }
     if (dto.assigneeIds?.length)
       await this.assertAssigneesAllowedOnProject(orgId, projectId, dto.assigneeIds);
     if (dto.labelIds?.length) await this.assertLabelsInProject(projectId, dto.labelIds);
@@ -686,27 +886,18 @@ export class TasksService {
             projectId: existing.projectId,
             deletedAt: null,
           },
-          select: { id: true, isGroup: true },
+          select: { id: true },
         });
         if (!parent) throw new BadRequestException('Tâche parente invalide');
-        if (!parent.isGroup) {
-          throw new BadRequestException(
-            "Le parent doit être un groupe (cochez 'Mark as group' sur la tâche parente).",
-          );
-        }
+        // N'importe quelle tâche peut être parente (cf. assertSameProjectTask) ;
+        // seul le cycle est interdit.
+        await this.assertNoParentCycle(taskId, dto.parentTaskId);
       }
     }
-    // Si on tente de retirer le flag groupe alors que la tâche a encore des enfants, on refuse.
-    if (dto.isGroup === false && existing.isGroup) {
-      const childCount = await this.prisma.task.count({
-        where: { parentTaskId: taskId, deletedAt: null },
-      });
-      if (childCount > 0) {
-        throw new BadRequestException(
-          'Impossible de retirer le statut groupe : la tâche contient encore des sous-éléments.',
-        );
-      }
-    }
+    // Retirer le flag « groupe » d'une tâche qui a des enfants est désormais
+    // LÉGITIME : elle redevient une tâche ordinaire qui porte un découpage, ce
+    // que le modèle autorise depuis la séparation affichage/découpage. Seule la
+    // couleur (significative pour un groupe seulement) est effacée, plus bas.
     if (dto.assigneeIds) {
       const currentAssignees = await this.prisma.taskAssignee.findMany({
         where: { taskId },
@@ -792,6 +983,25 @@ export class TasksService {
     } else if (reasonProvided && existing.status === 'ON_HOLD') {
       // Édition de la raison d'une tâche déjà en pause (pas de transition).
       data.holdReason = normReason;
+    }
+
+    // Bail d'exécution (lot A §1) : il ne vit que dans les statuts où un agent
+    // TIENT la tâche (CLAIMED / IN_PROGRESS). On le renouvelle quand l'agent
+    // claimant y (re)vient lui-même — typiquement CLAIMED→IN_PROGRESS au
+    // démarrage, et CHANGES_REQUESTED→IN_PROGRESS à la reprise après revue,
+    // sinon un bail périmé ferait faucher la tâche à la seconde où l'agent la
+    // reprend. Toute sortie de ces statuts l'éteint. Jamais de bail posé pour un
+    // humain (ni claimant humain, ni PM qui déplace la carte d'un agent).
+    if (statusChanging) {
+      const held = dto.status === TaskStatus.CLAIMED || dto.status === TaskStatus.IN_PROGRESS;
+      if (!held) {
+        data.leaseExpiresAt = null;
+      } else if (caller?.actorKind === 'AGENT' && existing.claimedById === actorUserId) {
+        data.leaseExpiresAt = leaseExpiryFrom(
+          new Date(),
+          await this.policies.getExecutionLeaseMinutes(orgId),
+        );
+      }
     }
 
     // Gating clôture : on ne peut passer une tâche à DONE que si tous ses
@@ -1311,6 +1521,28 @@ export class TasksService {
       transition: `${TaskStatus.TODO}->${TaskStatus.CLAIMED}`,
     }, { taskId, projectId: task.projectId, actorUserId: actor.userId, throwOnDeny: true });
 
+    // Snapshot du contexte lu par l'agent — composé AVANT la transaction (c'est
+    // une lecture pure, et on ne veut pas tenir un verrou pendant tout ça).
+    const contextSnapshot = await this.buildClaimSnapshot(orgId, task.projectId, task);
+
+    // Enveloppe de coût de la tâche, HÉRITAGE COMPRIS (lot B) : une sous-tâche
+    // sans plafond propre est couverte par celui de son parent, sinon découper
+    // une tâche plafonnée suffirait à s'en affranchir. Résolu hors transaction
+    // (lecture pure), consommé sous verrou plus bas.
+    const taskEnvelope =
+      actor.actorKind === 'AGENT'
+        ? await this.budgets.resolveTaskEnvelope(orgId, taskId)
+        : { projectId: task.projectId, budget: null as number | null, taskIds: [taskId] };
+
+    // Bail d'exécution (lot A §1) : un AGENT ne tient la tâche que pour une
+    // durée bornée, qu'il prolonge par heartbeat tant qu'il travaille. Les
+    // humains n'ont pas de bail — on ne déposséde pas quelqu'un parce qu'il a
+    // fermé son laptop, alors qu'un agent muet est presque toujours un agent mort.
+    const leaseExpiresAt =
+      actor.actorKind === 'AGENT'
+        ? leaseExpiryFrom(new Date(), await this.policies.getExecutionLeaseMinutes(orgId))
+        : null;
+
     const claimed = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${actor.userId}))`;
 
@@ -1416,13 +1648,13 @@ export class TasksService {
           });
         }
       }
-      if (actor.actorKind === 'AGENT' && task.agentCostBudget != null) {
+      if (actor.actorKind === 'AGENT' && taskEnvelope.budget != null) {
         const agg = await tx.agentRun.aggregate({
           _sum: { cost: true },
-          where: { organizationId: orgId, taskId },
+          where: { organizationId: orgId, taskId: { in: taskEnvelope.taskIds } },
         });
         const spent = Number(agg._sum.cost ?? 0);
-        const budget = Number(task.agentCostBudget);
+        const budget = taskEnvelope.budget;
         if (spent >= budget) {
           throw new ConflictException({
             code: 'BUDGET_COST_TASK',
@@ -1443,8 +1675,9 @@ export class TasksService {
           status: TaskStatus.CLAIMED,
           claimedById: actor.userId,
           claimedAt: new Date(),
+          leaseExpiresAt,
           // Fige le contexte lu par l'agent au claim (traçabilité DORA, chantier 2c.2).
-          contextSnapshot: this.buildContextSnapshot(task.project, task) as unknown as Prisma.InputJsonValue,
+          contextSnapshot: contextSnapshot as unknown as Prisma.InputJsonValue,
         },
       });
       if (res.count === 0) {
@@ -1511,7 +1744,7 @@ export class TasksService {
     const released = await this.prisma.$transaction(async (tx) => {
       await tx.task.update({
         where: { id: taskId },
-        data: { status: TaskStatus.TODO, claimedById: null, claimedAt: null },
+        data: { status: TaskStatus.TODO, claimedById: null, claimedAt: null, leaseExpiresAt: null },
       });
       await tx.taskStatusHistory.create({
         data: {
@@ -1535,6 +1768,128 @@ export class TasksService {
     void this.webhooks.dispatch(orgId, 'task.updated', out, { projectId: task.projectId });
     void this.webhooks.dispatch(orgId, 'task.released', out, { projectId: task.projectId });
     return out;
+  }
+
+  /**
+   * Heartbeat d'exécution (lot A §1) — l'agent prolonge son bail tant qu'il
+   * travaille. C'est le pendant de `validationHeartbeat` côté revue.
+   *
+   * Conditionné au claimant ET au statut par un `updateMany` (pas un `update`) :
+   * si le balayeur vient de reprendre la tâche, ou si un humain a fait un
+   * takeover, le compteur retombe à 0 et l'agent reçoit `LEASE_LOST` — il doit
+   * alors abandonner ce travail plutôt que continuer à brûler des tokens sur une
+   * tâche qui ne lui appartient plus.
+   *
+   * Renvoie aussi les LIMITES courantes (budget restant, compteur de rejets) :
+   * le heartbeat est le canal naturel par lequel un agent apprend qu'il doit
+   * s'arrêter, sans avoir à interroger quoi que ce soit d'autre.
+   */
+  async heartbeat(
+    orgId: string,
+    taskId: string,
+    actor: { userId: string; actorKind: 'HUMAN' | 'AGENT' },
+  ) {
+    const task = await this.prisma.task.findFirst({
+      where: { id: taskId, organizationId: orgId, deletedAt: null },
+      select: { id: true, status: true, projectId: true, claimedById: true, retryCount: true },
+    });
+    if (!task) throw new NotFoundException('Tâche introuvable');
+    if (task.claimedById !== actor.userId) {
+      throw new ConflictException({
+        code: 'LEASE_LOST',
+        message:
+          "Vous ne détenez plus cette tâche (bail expiré ou reprise par un autre acteur) — arrêtez ce travail.",
+      });
+    }
+    if (task.status !== TaskStatus.CLAIMED && task.status !== TaskStatus.IN_PROGRESS) {
+      throw new ConflictException({
+        code: 'LEASE_LOST',
+        message: `La tâche n'est plus en cours d'exécution (statut ${task.status}) — le bail ne s'applique plus.`,
+      });
+    }
+
+    const minutes = await this.policies.getExecutionLeaseMinutes(orgId);
+    const expires = leaseExpiryFrom(new Date(), minutes);
+    const res = await this.prisma.task.updateMany({
+      where: {
+        id: taskId,
+        organizationId: orgId,
+        claimedById: actor.userId,
+        status: { in: [TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS] },
+        deletedAt: null,
+      },
+      data: { leaseExpiresAt: expires },
+    });
+    if (res.count === 0) {
+      throw new ConflictException({
+        code: 'LEASE_LOST',
+        message: "Le bail vient d'être perdu (reprise concurrente) — arrêtez ce travail.",
+      });
+    }
+
+    return {
+      taskId,
+      status: task.status,
+      leaseExpiresAt: expires ? expires.toISOString() : null,
+      ...(await this.agentLimits(orgId, taskId, task.projectId, actor, task.retryCount)),
+    };
+  }
+
+  /**
+   * Limites opposables à un agent sur une tâche : bail, plafond de rejets
+   * (poison task) et enveloppes de budget restantes. Bloc commun au heartbeat et
+   * au work-context — un agent doit connaître ses bornes AVANT de produire, pas
+   * les découvrir en se faisant refuser.
+   *
+   * Renvoie un bloc vide (`applicable:false`) pour un humain : ces plafonds
+   * n'existent que pour les agents, autant le dire explicitement.
+   */
+  private async agentLimits(
+    orgId: string,
+    taskId: string,
+    projectId: string,
+    actor: { userId: string; actorKind: 'HUMAN' | 'AGENT' },
+    retryCount: number,
+  ) {
+    if (actor.actorKind !== 'AGENT') {
+      return { limits: { applicable: false as const } };
+    }
+    const [leaseMinutes, maxRetries, budget] = await Promise.all([
+      this.policies.getExecutionLeaseMinutes(orgId).catch(() => 0),
+      this.poisonRetryThreshold(orgId),
+      this.budgets
+        .snapshot(orgId, actor.userId, { taskId, projectId })
+        .catch(() => ({ envelopes: [], stop: false, exceeded: [] })),
+    ]);
+    return {
+      limits: {
+        applicable: true as const,
+        /** Durée du bail en minutes (0 = pas de bail sur cette org). */
+        executionLeaseMinutes: leaseMinutes,
+        /** Nombre de rejets de revue au-delà duquel la tâche sort du circuit agent. */
+        maxRetries,
+        retryCount,
+        /** Enveloppes € définies (agent/jour, agent/mois, projet, tâche). */
+        budget: {
+          envelopes: budget.envelopes,
+          exceeded: budget.exceeded,
+          /** `true` = une enveloppe est consommée : arrêtez et soumettez l'existant. */
+          stop: budget.stop,
+        },
+      },
+    };
+  }
+
+  /** Seuil de rejets « poison task » (réglable, défaut 3, clamp 1–20). */
+  private async poisonRetryThreshold(orgId: string): Promise<number> {
+    try {
+      const all = await this.settings.getAll(orgId);
+      const n = Number(all['agents.verification.poisonRetryThreshold']);
+      if (Number.isInteger(n) && n >= 1 && n <= 20) return n;
+    } catch {
+      /* défaut */
+    }
+    return 3;
   }
 
   // ------------------------------------------------------------
@@ -1650,6 +2005,30 @@ export class TasksService {
       });
     }
     if (actor.actorKind === 'AGENT') {
+      // ORDRE VOULU : le découpage AVANT le livrable de synthèse. Refuser
+      // d'abord sur « pas de livrable » pousserait l'agent à rédiger sa synthèse
+      // alors que ses sous-tâches sont encore ouvertes — exactement la
+      // consolidation prématurée qu'on veut éviter.
+      const children = await this.prisma.task.findMany({
+        where: { parentTaskId: taskId, organizationId: orgId, deletedAt: null },
+        select: { number: true, status: true },
+      });
+      if (children.length) {
+        const open = children
+          .filter((c) => c.status !== TaskStatus.DONE && c.status !== TaskStatus.APPROVED)
+          .map((c) => c.number);
+        if (open.length) {
+          throw new ConflictException({
+            code: 'SUBTASKS_PENDING',
+            message: `Sous-tâches non terminées (#${open.join(', #')}) — terminez le découpage avant de soumettre le parent.`,
+          });
+        }
+        // Remontée de preuve : le parent vaut son maillon le plus faible. Le
+        // livrable de synthèse ne rachète pas une sous-tâche restée sous le
+        // plancher (décision Thomas 2026-08-01).
+        await this.assertSubtreeVerified(orgId, taskId, task.projectId, actor.userId);
+      }
+
       const pending = await this.prisma.deliverable.findMany({
         where: { taskId, organizationId: orgId, reviewStatus: 'PENDING', deletedAt: null },
         select: { id: true },
@@ -1725,7 +2104,12 @@ export class TasksService {
     });
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.IN_REVIEW } });
+      // Le bail d'exécution s'éteint ici : la balle est dans le camp du reviewer,
+      // plus dans celui de l'agent — le balayeur n'a plus rien à reprendre.
+      await tx.task.update({
+        where: { id: taskId },
+        data: { status: TaskStatus.IN_REVIEW, leaseExpiresAt: null },
+      });
       await tx.taskStatusHistory.create({
         data: {
           organizationId: orgId, projectId: task.projectId, taskId,
@@ -1877,14 +2261,7 @@ export class TasksService {
     reviewerId: string,
   ) {
     if (!claimedById) return null;
-    let threshold = 3;
-    try {
-      const all = await this.settings.getAll(orgId);
-      const n = Number(all['agents.verification.poisonRetryThreshold']);
-      if (Number.isInteger(n) && n >= 1 && n <= 20) threshold = n;
-    } catch {
-      /* défaut 3 */
-    }
+    const threshold = await this.poisonRetryThreshold(orgId);
     if (retryCount < threshold) return null;
     const claimant = await this.prisma.user.findUnique({
       where: { id: claimedById },
@@ -1957,19 +2334,36 @@ export class TasksService {
    * changement. Si le brief/critères changent après coup, on sait que le livrable
    * a été produit sur la base du contexte `hash` (traçabilité DORA).
    */
-  private buildContextSnapshot(
-    project: { agentContext: string | null; agentGuardrails: string | null } | null,
+  private async buildClaimSnapshot(
+    orgId: string,
+    projectId: string,
     task: { agentGuardrails: string | null; acceptanceCriteria: Prisma.JsonValue },
   ) {
     const criteria = Array.isArray(task.acceptanceCriteria) ? task.acceptanceCriteria : [];
-    const payload = {
-      brief: project?.agentContext ?? null,
-      projectGuardrails: project?.agentGuardrails ?? null,
-      taskGuardrails: task.agentGuardrails ?? null,
-      criteria,
-    };
-    const hash = createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16);
-    return { hash, capturedAt: new Date().toISOString(), ...payload };
+    const pack = await this.agentContextPack(orgId, projectId);
+    return buildContextSnapshot(
+      {
+        // INSTRUCTIONS HUMAINES → `authoredHash`. Ajouter un chef de projet ne
+        // doit PAS ressembler à une modification d'instructions.
+        brief: pack?.project.briefStructured ?? null,
+        freeNotes: pack?.project.freeNotes ?? null,
+        projectGuardrails: pack?.project.guardrails ?? null,
+        taskGuardrails: task.agentGuardrails ?? null,
+        criteria,
+        charter: pack?.charter ?? null,
+      },
+      {
+        // ENVIRONNEMENT RÉSOLU → `factsHash`. Sa dérive reste observable, sans
+        // polluer le signal « quelqu'un a réécrit les consignes ».
+        reviewers: pack?.facts.reviewers ?? [],
+        verificationMode: pack?.facts.verificationMode ?? null,
+        stakes: pack?.facts.stakes ?? null,
+        verificationCapabilities: pack?.facts.verificationCapabilities ?? [],
+        locale: pack?.facts.locale ?? null,
+        hasCostBudget: !!pack?.facts.hasCostBudget,
+      },
+      pack?.project.brief ?? null,
+    );
   }
 
   /**
@@ -1993,6 +2387,7 @@ export class TasksService {
         agentCostBudget: true,
         claimedById: true,
         claimedAt: true,
+        contextSnapshot: true,
         project: { select: { agentsEnabled: true } },
       },
     });
@@ -2056,60 +2451,73 @@ export class TasksService {
             claimedAt: task.claimedAt ? task.claimedAt.toISOString() : null,
           }
         : null,
+      /**
+       * Empreintes du contexte figé au claim. Écrites depuis le chantier 2c.2
+       * mais lues par PERSONNE jusqu'ici : il fallait ouvrir psql pour vérifier
+       * la traçabilité DORA. On expose les hashes (pas le texte composé, trop
+       * volumineux) sur cette route déjà app-privée et gatée `task:view`.
+       *
+       * `authoredHash` bouge quand un humain réécrit les consignes ;
+       * `factsHash` bouge quand l'environnement change (nouveau PM, mode de
+       * vérification…). Les distinguer est tout l'intérêt du dispositif.
+       */
+      contextSnapshot: task.contextSnapshot
+        ? (() => {
+            const s = task.contextSnapshot as Record<string, unknown>;
+            return {
+              authoredHash: (s.authoredHash ?? s.hash ?? null) as string | null,
+              factsHash: (s.factsHash ?? null) as string | null,
+              capturedAt: (s.capturedAt ?? null) as string | null,
+            };
+          })()
+        : null,
       runs: runDtos,
     };
   }
 
-  async getWorkContext(orgId: string, taskId: string) {
+  /**
+   * Contexte de travail complet d'une tâche.
+   *
+   * La partie PROJET (brief composé, charter filtré, documents de contexte,
+   * sources externes, journal) vient de `AgentContextService.buildPack` — le
+   * MÊME code que l'écran « ce que voient les agents ». C'est ce qui garantit
+   * que la prévisualisation ne peut pas dériver de ce que l'agent reçoit
+   * réellement. Ne pas recomposer quoi que ce soit ici.
+   */
+  async getWorkContext(
+    orgId: string,
+    taskId: string,
+    actor: { userId: string; actorKind: 'HUMAN' | 'AGENT' } = { userId: '', actorKind: 'HUMAN' },
+  ) {
     const task = await this.prisma.task.findFirst({
       where: { id: taskId, organizationId: orgId, deletedAt: null },
       select: {
         id: true, number: true, title: true, description: true, status: true,
         dueDate: true, startDate: true, estimateHours: true,
         agentGuardrails: true, acceptanceCriteria: true, projectId: true,
-        requiredSkillLevel: true,
+        requiredSkillLevel: true, retryCount: true, leaseExpiresAt: true,
+        parentTaskId: true,
         requiredSkill: { select: { name: true } },
-        project: {
-          select: { key: true, name: true, agentContext: true, agentGuardrails: true },
-        },
+        project: { select: { key: true, name: true } },
       },
     });
     if (!task) throw new NotFoundException('Tâche introuvable');
 
-    const [journal, comments, aiDocs] = await Promise.all([
-      this.prisma.agentJournalEntry.findMany({
-        where: { organizationId: orgId, projectId: task.projectId },
-        orderBy: { createdAt: 'desc' },
-        take: 10,
-        select: { title: true, summary: true, taskId: true, createdAt: true },
-      }),
+    const [pack, comments, limits, reviewFeedback, upstreamOutputs, parent] = await Promise.all([
+      this.agentContextPack(orgId, task.projectId),
       this.prisma.comment.findMany({
         where: { taskId, organizationId: orgId, deletedAt: null },
         orderBy: { createdAt: 'desc' },
         take: 8,
         select: { body: true, createdAt: true, author: { select: { name: true } } },
       }),
-      // Documents projet marqués « Contexte IA » — l'agent lit le contenu via
-      // `GET /tasks/:taskId/context-documents/:docId` (borné à sa tâche).
-      this.prisma.projectDocument.findMany({
-        where: { projectId: task.projectId, organizationId: orgId, aiContext: true },
-        orderBy: { uploadedAt: 'desc' },
-        take: 50,
-        select: { id: true, filename: true, mimeType: true, sizeBytes: true },
-      }),
+      this.agentLimits(orgId, taskId, task.projectId, actor, task.retryCount),
+      this.reviewFeedback(orgId, taskId),
+      this.upstreamOutputs(orgId, taskId),
+      this.parentContext(orgId, task.parentTaskId),
     ]);
 
     const criteria = Array.isArray(task.acceptanceCriteria) ? task.acceptanceCriteria : [];
-    // Sources de fichiers externes (SharePoint…) disponibles pour cette tâche —
-    // l'agent découvre la dispo ici sans sonder. Résolu en lazy (module @Global)
-    // pour ne pas coupler TasksModule au seam filesources ; best-effort.
-    let contextSources: { source: string; label: string; available: boolean; reason?: string }[] = [];
-    try {
-      const fs = this.moduleRef.get(FileSourcesService, { strict: false });
-      contextSources = await fs.availabilityForTask(orgId, taskId);
-    } catch {
-      /* seam indisponible : on omet simplement le bloc */
-    }
     return {
       task: {
         id: task.id, number: task.number, title: task.title,
@@ -2120,28 +2528,502 @@ export class TasksService {
       },
       project: {
         key: task.project.key, name: task.project.name,
-        brief: task.project.agentContext ?? null,
-        guardrails: task.project.agentGuardrails ?? null,
+        /** Brief COMPOSÉ (4 champs + faits système + notes libres en dernier). */
+        brief: pack?.project.brief ?? null,
+        /** Les 4 champs, pour un agent qui préfère la donnée au markdown. */
+        briefStructured: pack?.project.briefStructured ?? null,
+        guardrails: pack?.project.guardrails ?? null,
+        stakes: pack?.project.stakes ?? 'low',
       },
+      /** Rubriques du charter autorisées aux agents (jamais budget/personnes). */
+      charter: pack?.charter ?? null,
       taskGuardrails: task.agentGuardrails ?? null,
       acceptanceCriteria: criteria,
-      // Ordre chronologique (le plus ancien d'abord) pour la lecture.
-      journal: journal.reverse().map((j) => ({
-        title: j.title, summary: j.summary, taskId: j.taskId, at: j.createdAt,
+      /**
+       * Bloc PRIORITAIRE de reprise après revue (lot A §5). Non nul dès qu'un
+       * livrable a été rejeté : décision, note exacte du valideur, historique des
+       * versions. Sans ça un agent en CHANGES_REQUESTED devait deviner ce qu'on
+       * lui reprochait (la note vivait sur le livrable, hors du contexte de
+       * travail) — première cause de re-travail à côté de la plaque.
+       */
+      reviewFeedback,
+      /**
+       * Sorties structurées produites en amont (prédécesseurs + sous-tâches),
+       * livrables APPROUVÉS uniquement. À lire AVANT de partir chercher les
+       * mêmes valeurs dans la prose des livrables amont.
+       */
+      upstreamOutputs,
+      /**
+       * Tâche dont celle-ci est le découpage. `null` si c'est une tâche racine.
+       * Sans ce bloc, une sous-tâche est orpheline de sa raison d'être : elle
+       * hérite du brief PROJET mais rien du travail qui l'a fait naître.
+       */
+      parent,
+      /** Bornes opposables : bail, plafond de rejets, enveloppes € restantes. */
+      ...limits,
+      /** Échéance du bail courant si l'agent tient déjà la tâche. */
+      leaseExpiresAt: task.leaseExpiresAt ? task.leaseExpiresAt.toISOString() : null,
+      journal: (pack?.journal ?? []).map((j) => ({
+        title: j.title, summary: j.summary, taskId: j.taskId, at: j.at,
       })),
       recentComments: comments.reverse().map((c) => ({
         author: c.author?.name ?? '—', body: c.body, at: c.createdAt,
       })),
       // Documents « Contexte IA » du projet : métadonnées seulement ici, le
       // contenu (texte) se lit à la demande via context-documents/:docId.
-      projectDocuments: aiDocs.map((d) => ({
+      projectDocuments: (pack?.documents.items ?? []).map((d) => ({
         id: d.id, filename: d.filename, mimeType: d.mimeType, sizeBytes: d.sizeBytes,
+        freshAt: d.freshAt,
       })),
+      /** Troncature EXPLICITE : `truncated:true` = tout n'est pas remonté. */
+      projectDocumentsMeta: {
+        total: pack?.documents.total ?? 0,
+        returned: pack?.documents.returned ?? 0,
+        truncated: pack?.documents.truncated ?? false,
+      },
       // Sources de fichiers externes (ex. SharePoint de la team) : lecture via
       // `GET /tasks/:taskId/context-files[/:source/:itemId]`. `available:false` +
       // `reason` (FS_*) quand la source n'est pas exploitable sur ce projet.
-      contextSources,
+      contextSources: pack?.contextSources ?? [],
     };
+  }
+
+  /**
+   * Demande d'assistance ciblée sur la tâche qu'on détient (lot B).
+   *
+   * Poster un commentaire est un appel dans le vide : personne n'est nommément
+   * prévenu. On réutilise donc la mécanique qui existe déjà pour ça — la
+   * **demande de compétence** (`SkillRequest`), qui atterrit dans la boîte du
+   * lead de l'équipe couvrant la compétence manquante. Pas de nouveau statut
+   * `BLOCKED` ni de « sous-tâche d'assistance » : ce serait une troisième
+   * mécanique de demande d'aide à maintenir, pour le même service rendu.
+   *
+   * Trois effets, dans cet ordre : (1) la question est **toujours** postée en
+   * commentaire (trace lisible sur la tâche, quoi qu'il arrive ensuite) ;
+   * (2) si une compétence est nommée ET qu'une équipe du projet la couvre, une
+   * `SkillRequest` est ouverte vers cette équipe ; (3) si `pause` est demandé,
+   * la tâche passe ON_HOLD avec la question pour motif — elle garde son claim et
+   * son bail s'éteint, donc le balayeur ne la reprend pas : elle attend un
+   * humain, ce qui est exactement l'état voulu.
+   */
+  async requestAssistance(
+    orgId: string,
+    taskId: string,
+    actor: { userId: string; actorKind: 'HUMAN' | 'AGENT'; isAdmin?: boolean },
+    dto: { question: string; skillId?: string; proposedSkillName?: string; pause?: boolean },
+  ) {
+    const task = await this.prisma.task.findFirst({
+      where: { id: taskId, organizationId: orgId, deletedAt: null },
+      select: {
+        id: true, number: true, title: true, status: true, projectId: true,
+        claimedById: true, requiredSkillId: true, requiredSkillLevel: true,
+      },
+    });
+    if (!task) throw new NotFoundException('Tâche introuvable');
+    if (task.claimedById !== actor.userId) {
+      throw new ConflictException({
+        code: 'NOT_CLAIMANT',
+        message:
+          "Vous ne détenez pas cette tâche — on ne demande de l'aide que sur le travail qu'on a revendiqué.",
+      });
+    }
+    const question = dto.question.trim();
+    if (!question) throw new BadRequestException('Décrivez ce qui vous bloque.');
+
+    // (1) Trace sur la tâche — best-effort : une panne du fil de commentaires
+    // ne doit pas empêcher la demande de partir.
+    let commentPosted = false;
+    try {
+      const comments = this.moduleRef.get(CommentsService, { strict: false });
+      await comments.create(orgId, actor.userId, taskId, { body: `🆘 ${question}` });
+      commentPosted = true;
+    } catch {
+      /* best-effort */
+    }
+
+    // (2) Équipe destinataire résolue SERVEUR à partir de la compétence : parmi
+    // les équipes affectées au projet, la première qui déclare couvrir ce skill.
+    // Aucune équipe couvrante ⇒ pas de demande (mieux vaut rien qu'un ticket
+    // envoyé à quelqu'un qui n'y peut rien) — le commentaire, lui, est passé.
+    const skillId = dto.skillId ?? task.requiredSkillId ?? null;
+    let skillRequestId: string | null = null;
+    let reason: string | null = null;
+    if (!skillId && !dto.proposedSkillName?.trim()) {
+      reason = 'no_skill_specified';
+    } else {
+      const teams = await this.prisma.projectTeam.findMany({
+        where: { projectId: task.projectId },
+        select: { teamId: true },
+      });
+      const teamIds = teams.map((t) => t.teamId);
+      let targetTeamId: string | null = null;
+      if (teamIds.length && skillId) {
+        const cover = await this.prisma.teamSkill.findFirst({
+          where: { teamId: { in: teamIds }, skillId },
+          select: { teamId: true },
+        });
+        targetTeamId = cover?.teamId ?? null;
+      }
+      // Compétence proposée (hors catalogue) ou non couverte : à défaut, la
+      // première équipe du projet — quelqu'un de concerné, pas n'importe qui.
+      if (!targetTeamId && teamIds.length) targetTeamId = teamIds[0];
+      if (!targetTeamId) {
+        reason = 'no_team_on_project';
+      } else {
+        try {
+          const svc = this.moduleRef.get(SkillRequestsService, { strict: false });
+          const created = await svc.createFromAgent(
+            orgId,
+            {
+              teamId: targetTeamId,
+              type: 'ASSIGN_SKILL',
+              ...(skillId ? { skillId } : { proposedName: dto.proposedSkillName!.trim() }),
+              desiredLevel: task.requiredSkillLevel ?? undefined,
+              projectId: task.projectId,
+              taskId,
+              note: `[#${task.number} ${task.title}] ${question}`.slice(0, 2000),
+            } as never,
+            actor.userId,
+          );
+          skillRequestId = (created as { id?: string })?.id ?? null;
+        } catch (e) {
+          reason = `skill_request_failed: ${(e as Error).message}`;
+        }
+      }
+    }
+
+    // (3) Mise en pause explicite — passe par `update()` (donc par la matrice de
+    // transitions et l'historique), jamais par une écriture directe.
+    let paused = false;
+    if (dto.pause) {
+      await this.update(
+        orgId,
+        taskId,
+        { status: TaskStatus.ON_HOLD, statusReason: question.slice(0, 500) } as UpdateTaskDto,
+        actor.userId,
+        { isAdmin: !!actor.isAdmin, actorKind: actor.actorKind, userId: actor.userId },
+      );
+      paused = true;
+    }
+
+    // (4) ALERTE HUMAINE — le cœur de la demande d'aide. Sans elle, l'appel au
+    // secours ne réveille personne : le commentaire ne touche que les watchers,
+    // la mise en pause dépend d'un réglage de notification désactivé par défaut,
+    // et la demande de compétence n'existe que si une équipe couvrante a été
+    // trouvée. On prévient donc explicitement le PM du projet, l'owner de
+    // l'agent et les co-assignés, via le chokepoint `emit` (cooldown, quiet
+    // hours, kill switch, carte Teams et audit hérités).
+    const notified =
+      (await this.automationHooks()
+        ?.onAgentAssistanceRequested(orgId, {
+          agentId: actor.userId,
+          taskId,
+          projectId: task.projectId,
+          question,
+          paused,
+        })
+        .catch(() => 0)) ?? 0;
+
+    return {
+      taskId,
+      commentPosted,
+      skillRequestId,
+      paused,
+      /** Nombre d'humains effectivement alertés (PM, owner, co-assignés). */
+      notified,
+      /** Pourquoi aucune demande de compétence n'a été ouverte, le cas échéant. */
+      reason,
+    };
+  }
+
+  /**
+   * Synthèse des sous-tâches d'une tâche (lot B) — ce qu'un agent lit AVANT de
+   * consolider son livrable final.
+   *
+   * Sans ça, l'agent parent devrait lister les tâches du projet, filtrer, puis
+   * ouvrir chaque livrable pour savoir ce qui est fait. Ici : un appel, l'état
+   * de chaque sous-tâche et les **sorties structurées approuvées** qu'elle a
+   * produites. `allDone` dit s'il peut conclure ; `pending` liste ce qui manque
+   * (une consolidation prématurée est le meilleur moyen de se faire rejeter).
+   */
+  async getSubtasksSummary(orgId: string, taskId: string, callerUserId?: string) {
+    const parent = await this.prisma.task.findFirst({
+      where: { id: taskId, organizationId: orgId, deletedAt: null },
+      select: { id: true, number: true, title: true, status: true },
+    });
+    if (!parent) throw new NotFoundException('Tâche introuvable');
+
+    const subtasks = await this.prisma.task.findMany({
+      where: { parentTaskId: taskId, organizationId: orgId, deletedAt: null },
+      orderBy: { number: 'asc' },
+      select: {
+        id: true, number: true, title: true, status: true, estimateHours: true,
+        claimedById: true, assignees: { select: { userId: true } },
+      },
+      take: 100,
+    });
+    const approved = subtasks.length
+      ? await this.prisma.deliverable.findMany({
+          where: {
+            organizationId: orgId,
+            taskId: { in: subtasks.map((s) => s.id) },
+            reviewStatus: 'APPROVED',
+            deletedAt: null,
+          },
+          orderBy: { reviewedAt: 'desc' },
+          select: { taskId: true, title: true, url: true, structuredOutputs: true, reviewedAt: true },
+        })
+      : [];
+    const byTask = new Map<string, (typeof approved)[number]>();
+    for (const d of approved) if (!byTask.has(d.taskId)) byTask.set(d.taskId, d);
+
+    const items = subtasks.map((s) => {
+      const d = byTask.get(s.id);
+      return {
+        taskId: s.id,
+        number: s.number,
+        title: s.title,
+        status: s.status,
+        estimateHours: s.estimateHours,
+        assigneeIds: s.assignees.map((a) => a.userId),
+        approvedDeliverable: d
+          ? {
+              title: d.title,
+              url: d.url,
+              outputs: readStructuredOutputs(d.structuredOutputs),
+              approvedAt: d.reviewedAt ? d.reviewedAt.toISOString() : null,
+            }
+          : null,
+      };
+    });
+    // Remontée de preuve : ce que l'arbre démontre, contre le plancher du
+    // parent. C'est ce qui bloquera (ou non) la soumission en revue — autant que
+    // l'agent le voie AVANT de tenter, plutôt qu'en se prenant un 409.
+    const verification = callerUserId
+      ? await this.subtreeVerification.evaluate(orgId, taskId, callerUserId).catch(() => null)
+      : null;
+
+    const DONE_ENOUGH: TaskStatus[] = [TaskStatus.DONE, TaskStatus.APPROVED];
+    return {
+      parent: { taskId: parent.id, number: parent.number, title: parent.title, status: parent.status },
+      count: items.length,
+      /** Plancher de preuve du parent + maillon le plus faible de l'arbre. */
+      verification,
+      /** true = toutes les sous-tâches sont closes : la consolidation peut se faire. */
+      allDone: items.length > 0 && items.every((i) => DONE_ENOUGH.includes(i.status as TaskStatus)),
+      pending: items.filter((i) => !DONE_ENOUGH.includes(i.status as TaskStatus)).map((i) => i.number),
+      subtasks: items,
+    };
+  }
+
+  /**
+   * Contexte de la tâche PARENTE, pour une sous-tâche.
+   *
+   * Un découpage transmet aujourd'hui le brief du projet mais rien du travail
+   * qui l'a fait naître : celui qui reprend la sous-tâche ignore ce qu'on
+   * cherchait à faire, ce qui a déjà été décidé et ce sur quoi le parent sera
+   * jugé. On remonte donc l'énoncé du parent, ses critères, ses garde-fous
+   * propres — et ses sorties structurées **approuvées**, seules à circuler
+   * (même règle anti-poisoning que partout ailleurs).
+   */
+  private async parentContext(orgId: string, parentTaskId: string | null) {
+    if (!parentTaskId) return null;
+    try {
+      const p = await this.prisma.task.findFirst({
+        where: { id: parentTaskId, organizationId: orgId, deletedAt: null },
+        select: {
+          id: true, number: true, title: true, description: true, status: true,
+          acceptanceCriteria: true, agentGuardrails: true,
+        },
+      });
+      if (!p) return null;
+      const approved = await this.prisma.deliverable.findFirst({
+        where: {
+          taskId: parentTaskId, organizationId: orgId,
+          reviewStatus: 'APPROVED', deletedAt: null,
+        },
+        orderBy: { reviewedAt: 'desc' },
+        select: { structuredOutputs: true },
+      });
+      return {
+        taskId: p.id,
+        number: p.number,
+        title: p.title,
+        description: p.description,
+        status: p.status,
+        acceptanceCriteria: Array.isArray(p.acceptanceCriteria) ? p.acceptanceCriteria : [],
+        guardrails: p.agentGuardrails ?? null,
+        outputs: approved ? readStructuredOutputs(approved.structuredOutputs) : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Sorties structurées des tâches AMONT (lot B) — le chaînage machine.
+   *
+   * Sans ça, une tâche qui dépend d'une autre doit relire tout le livrable amont
+   * (prose sur S3) pour y retrouver un endpoint ou un numéro de version : c'est
+   * exactement la lecture où un modèle invente. On remonte donc les paires
+   * clé/valeur produites en amont, telles quelles.
+   *
+   * Deux sources : les **prédécesseurs directs** (toute dépendance, pas
+   * seulement FS — un SS renseigne autant) et les **sous-tâches** de la tâche
+   * courante (décomposition). Dans les deux cas, **livrables APPROUVÉS
+   * uniquement** : même règle anti-poisoning que le journal vivant — un livrable
+   * rejeté ne doit jamais alimenter le contexte d'une autre tâche. Une seule
+   * entrée par tâche (la version approuvée la plus récente), plafonnée.
+   */
+  private async upstreamOutputs(orgId: string, taskId: string) {
+    try {
+      const self = await this.prisma.task.findFirst({
+        where: { id: taskId, organizationId: orgId },
+        select: { parentTaskId: true },
+      });
+      const [deps, subtasks, siblings] = await Promise.all([
+        this.prisma.taskDependency.findMany({
+          where: { successorId: taskId, organizationId: orgId },
+          select: { predecessorId: true, type: true },
+          take: 20,
+        }),
+        this.prisma.task.findMany({
+          where: { parentTaskId: taskId, organizationId: orgId, deletedAt: null },
+          select: { id: true },
+          take: 20,
+        }),
+        // Fratrie : les autres sous-tâches du même découpage. C'est le cas
+        // d'usage naturel — on découpe un travail en morceaux qui se répondent,
+        // et chacun doit pouvoir lire ce que les autres ont établi.
+        self?.parentTaskId
+          ? this.prisma.task.findMany({
+              where: {
+                parentTaskId: self.parentTaskId,
+                organizationId: orgId,
+                deletedAt: null,
+                NOT: { id: taskId },
+              },
+              select: { id: true },
+              take: 20,
+            })
+          : Promise.resolve([] as { id: string }[]),
+      ]);
+      const sources = new Map<string, 'predecessor' | 'subtask' | 'sibling'>();
+      for (const d of deps) sources.set(d.predecessorId, 'predecessor');
+      for (const s of subtasks) if (!sources.has(s.id)) sources.set(s.id, 'subtask');
+      for (const s of siblings) if (!sources.has(s.id)) sources.set(s.id, 'sibling');
+      if (!sources.size) return [];
+
+      const rows = await this.prisma.deliverable.findMany({
+        where: {
+          organizationId: orgId,
+          taskId: { in: [...sources.keys()] },
+          reviewStatus: 'APPROVED',
+          deletedAt: null,
+          NOT: { structuredOutputs: { equals: Prisma.DbNull } },
+        },
+        orderBy: { reviewedAt: 'desc' },
+        select: {
+          taskId: true, title: true, structuredOutputs: true, reviewedAt: true,
+          task: { select: { number: true, title: true, status: true } },
+        },
+      });
+
+      const seen = new Set<string>();
+      const out: Array<Record<string, unknown>> = [];
+      for (const r of rows) {
+        if (seen.has(r.taskId)) continue; // la plus récente approuvée suffit
+        const outputs = readStructuredOutputs(r.structuredOutputs);
+        if (!outputs) continue;
+        seen.add(r.taskId);
+        out.push({
+          taskId: r.taskId,
+          taskNumber: r.task?.number ?? null,
+          taskTitle: r.task?.title ?? null,
+          taskStatus: r.task?.status ?? null,
+          source: sources.get(r.taskId) ?? 'predecessor',
+          deliverableTitle: r.title,
+          approvedAt: r.reviewedAt ? r.reviewedAt.toISOString() : null,
+          outputs,
+        });
+        if (out.length >= 10) break;
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Retour de revue sur les livrables d'une tâche (lot A §5) — ce que le
+   * valideur a effectivement écrit, plus la chaîne des versions.
+   *
+   * `pending` = livrable en attente (l'agent a déjà soumis, il n'a rien à
+   * refaire) ; `lastDecision` porte le verdict le plus récent. On remonte
+   * jusqu'à 5 versions : au-delà, ce n'est plus du contexte utile mais du bruit
+   * qui coûte des tokens. Best-effort — un contexte de travail ne doit jamais
+   * échouer sur ce bloc.
+   */
+  private async reviewFeedback(orgId: string, taskId: string) {
+    try {
+      const rows = await this.prisma.deliverable.findMany({
+        where: { taskId, organizationId: orgId, deletedAt: null },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: {
+          id: true, title: true, version: true, reviewStatus: true,
+          reviewNote: true, reviewedAt: true, reviewedById: true, createdAt: true,
+        },
+      });
+      if (!rows.length) return null;
+      const reviewerIds = [...new Set(rows.map((r) => r.reviewedById).filter((v): v is string => !!v))];
+      const reviewers = reviewerIds.length
+        ? await this.prisma.user.findMany({
+            where: { id: { in: reviewerIds }, organizationId: orgId },
+            select: { id: true, name: true },
+          })
+        : [];
+      const nameById = new Map(reviewers.map((u) => [u.id, u.name]));
+      const decided = rows.find((r) => r.reviewStatus !== 'PENDING') ?? null;
+      return {
+        pending: rows.some((r) => r.reviewStatus === 'PENDING'),
+        lastDecision: decided
+          ? {
+              deliverableId: decided.id,
+              version: decided.version,
+              decision: decided.reviewStatus,
+              /** Le texte EXACT du valideur — c'est la consigne de reprise. */
+              note: decided.reviewNote,
+              reviewedAt: decided.reviewedAt ? decided.reviewedAt.toISOString() : null,
+              reviewer: decided.reviewedById ? nameById.get(decided.reviewedById) ?? null : null,
+            }
+          : null,
+        history: rows.map((r) => ({
+          deliverableId: r.id,
+          title: r.title,
+          version: r.version,
+          reviewStatus: r.reviewStatus,
+          note: r.reviewNote,
+          at: (r.reviewedAt ?? r.createdAt).toISOString(),
+        })),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Pack de contexte projet, résolu en lazy (module `@Global`) pour ne pas
+   * coupler `TasksModule` au module de composition. Best-effort : un agent ne
+   * doit jamais être privé de sa tâche parce que la composition a échoué.
+   */
+  private async agentContextPack(orgId: string, projectId: string) {
+    try {
+      const svc = this.moduleRef.get(AgentContextService, { strict: false });
+      return await svc.buildPack(orgId, projectId);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -2156,8 +3038,24 @@ export class TasksService {
       select: { projectId: true },
     });
     if (!task) throw new NotFoundException('Tâche introuvable');
+    // L'exposition est une UNION : drapeau propre OU dossier « contexte IA »
+    // (héritage). Ne filtrer que sur `aiContext:true` listerait dans le
+    // work-context des documents que l'agent recevrait ensuite en 404.
+    const folders = await this.prisma.projectDocumentFolder.findMany({
+      where: { projectId: task.projectId, organizationId: orgId },
+      select: { id: true, parentId: true, aiContext: true },
+    });
+    const aiFolderIds = effectiveAiFolderIds(folders);
     const doc = await this.prisma.projectDocument.findFirst({
-      where: { id: docId, projectId: task.projectId, organizationId: orgId, aiContext: true },
+      where: {
+        id: docId,
+        projectId: task.projectId,
+        organizationId: orgId,
+        OR: [
+          { aiContext: true },
+          ...(aiFolderIds.size ? [{ folderId: { in: [...aiFolderIds] } }] : []),
+        ],
+      },
       select: { id: true, filename: true, mimeType: true, sizeBytes: true, storageKey: true },
     });
     if (!doc) throw new NotFoundException('Document de contexte introuvable');
@@ -2225,16 +3123,49 @@ export class TasksService {
     if (!col) throw new BadRequestException('Colonne inconnue pour ce projet');
   }
 
+  /**
+   * Parent valide : même projet, vivant. **Plus d'exigence de « groupe »**
+   * (2026-08-01).
+   *
+   * Le produit faisait porter deux métiers à une seule relation : le
+   * *regroupement d'affichage* (colonne « Groupes » du board, couleur héritée =
+   * `isGroup`) et le *découpage du travail* (une tâche réelle qui se subdivise).
+   * Exiger que tout parent soit un groupe rendait le second impossible sans
+   * dénaturer le premier — une tâche revendiquée, en cours, avec son livrable et
+   * son budget, n'a aucune raison de devenir un conteneur d'affichage.
+   *
+   * Les deux notions sont désormais séparées : `isGroup` ne pilote plus que le
+   * board, et n'importe quelle tâche peut porter des enfants. L'anti-cycle est
+   * assuré par `assertNoParentCycle`.
+   */
   private async assertSameProjectTask(projectId: string, parentId: string) {
     const t = await this.prisma.task.findFirst({
       where: { id: parentId, projectId, deletedAt: null },
-      select: { id: true, isGroup: true },
+      select: { id: true },
     });
     if (!t) throw new BadRequestException('Tâche parente invalide');
-    if (!t.isGroup) {
-      throw new BadRequestException(
-        "Le parent doit être un groupe (cochez 'Mark as group' sur la tâche parente).",
-      );
+  }
+
+  /**
+   * Refuse un rattachement qui créerait un cycle (A enfant de B, B enfant de A).
+   * Tant que seuls les groupes pouvaient être parents, le risque restait
+   * théorique ; en ouvrant la parenté à toutes les tâches, il devient réel.
+   * Remontée bornée : un arbre légitime est peu profond, une boucle déjà
+   * présente en base ne doit pas faire tourner la requête à l'infini.
+   */
+  private async assertNoParentCycle(taskId: string, parentId: string) {
+    let current: string | null = parentId;
+    for (let depth = 0; current && depth < 50; depth++) {
+      if (current === taskId) {
+        throw new BadRequestException(
+          'Rattachement impossible : la tâche parente descend déjà de cette tâche.',
+        );
+      }
+      const row: { parentTaskId: string | null } | null = await this.prisma.task.findUnique({
+        where: { id: current },
+        select: { parentTaskId: true },
+      });
+      current = row?.parentTaskId ?? null;
     }
   }
 

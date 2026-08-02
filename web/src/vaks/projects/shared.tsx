@@ -2,7 +2,7 @@
    Vaks — Projects panel : helpers & primitives partagés
    (dates, statuts, couleurs, dialogue de confirmation, Escape)
    ============================================================ */
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Icon } from '../primitives';
@@ -141,6 +141,49 @@ export function useEscapeKey(onEscape: () => void, active = true) {
       if (i >= 0) escStack.splice(i, 1);
     };
   }, [active]);
+}
+
+/* ============================ Virtual list ============================ */
+
+/**
+ * Fixed-row-height virtualizer for long option lists (client / manager
+ * pickers, …) — renders only the rows near the scrolled window instead of
+ * every item, so a catalog of thousands of entries stays cheap to open and
+ * scroll. Pass a `key` on this component that changes with the filtered set
+ * (e.g. the search query) so a stale scroll position from the previous
+ * result set can't point past the end of a shorter one.
+ */
+export function VirtualList<T>({
+  items,
+  itemHeight,
+  visibleCount,
+  renderItem,
+  keyFn,
+}: {
+  items: T[];
+  itemHeight: number;
+  /** How many rows are visible at once before the list scrolls. */
+  visibleCount: number;
+  renderItem: (item: T) => React.ReactNode;
+  keyFn: (item: T) => string;
+}) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const overscan = 4;
+  const height = itemHeight * Math.max(1, Math.min(visibleCount, items.length));
+  const startIndex = Math.max(0, Math.floor(scrollTop / itemHeight) - overscan);
+  const endIndex = Math.min(items.length, Math.ceil((scrollTop + height) / itemHeight) + overscan);
+  const visible = items.slice(startIndex, endIndex);
+  return (
+    <div style={{ height, overflowY: 'auto' }} onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}>
+      <div style={{ height: startIndex * itemHeight }} />
+      {visible.map((item) => (
+        <div key={keyFn(item)} style={{ height: itemHeight }}>
+          {renderItem(item)}
+        </div>
+      ))}
+      <div style={{ height: (items.length - endIndex) * itemHeight }} />
+    </div>
+  );
 }
 
 /* ============================ Confirm dialog ============================ */

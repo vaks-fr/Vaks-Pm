@@ -18,6 +18,7 @@ import {
   FillResult,
   UserCapacityCtx,
 } from './capacity.service';
+import { dateIso, excessLoggedHours, isPlanStale } from './scheduling';
 import { UpsertWorkScheduleDto } from './dto/work-schedule.dto';
 import {
   BulkTimeOffItem,
@@ -1581,6 +1582,35 @@ export class WorkloadService {
         })
       : [];
     const taskColorById = new Map(taskColorInfos.map((t) => [t.id, t]));
+
+    // 4ter (Lot 4.1) — temps réellement loggé, BORNÉ au passé/aujourd'hui,
+    // pour rendre visible dans la grille la journée « brûlée » (loggé au-delà
+    // de ce qui était alloué). Display only — n'entre dans aucun calcul
+    // d'idempotence (l'auto-plan ne lit pas cette grille). Pas de filtre
+    // projectId/kind : inclut les tickets externes.
+    const todayStart = startOfUtcDay(new Date());
+    const loggedUpperBound = to.getTime() < todayStart.getTime() ? to : todayStart;
+    const loggedRows =
+      from.getTime() <= loggedUpperBound.getTime()
+        ? await this.prisma.timeEntry.groupBy({
+            by: ['userId', 'date'],
+            where: {
+              organizationId: orgId,
+              userId: { in: userIds },
+              date: { gte: from, lte: loggedUpperBound },
+            },
+            _sum: { durationMinutes: true },
+          })
+        : [];
+    const loggedByUserDay = new Map<string, Map<string, number>>();
+    for (const row of loggedRows) {
+      let m = loggedByUserDay.get(row.userId);
+      if (!m) {
+        m = new Map<string, number>();
+        loggedByUserDay.set(row.userId, m);
+      }
+      m.set(dateIso(row.date), (row._sum.durationMinutes ?? 0) / 60);
+    }
     /** Couleur effective : couleur propre si présente, sinon celle du
      * plus proche ancêtre coloré. Retourne `null` si rien à propager. */
     const effectiveColor = (taskId: string): string | null => {
@@ -1602,6 +1632,7 @@ export class WorkloadService {
       const myTimeOffs = timeOffs.filter((t) => t.userId === u.id);
       const myAllocs = allocs.filter((a) => a.userId === u.id);
       const myHolidays = holidayByUser.get(u.id) ?? new Map<string, string>();
+      const myLoggedByDay = loggedByUserDay.get(u.id);
       const cells = days.map((d) => {
         const date = startOfUtcDay(new Date(d.date));
         // Capacité brute selon le schedule (par jour de semaine).
@@ -1612,6 +1643,19 @@ export class WorkloadService {
         if (off) cap = 0;
         const holidayName = myHolidays.get(d.date) ?? null;
         if (holidayName) cap = 0;
+        // Lot 4.1 (display only) — un jour <= aujourd'hui où le temps loggé
+        // dépasse ce qui était alloué grignote la capacité affichée, pour que
+        // la journée « brûlée » (détournement, incident) soit visible dans la
+        // grille sans attendre le prochain auto-plan.
+        if (cap > 0 && date.getTime() <= todayStart.getTime() && myLoggedByDay) {
+          const rawAllocatedForDay = myAllocs
+            .filter(
+              (a) => a.startDate.getTime() <= date.getTime() && a.endDate.getTime() >= date.getTime(),
+            )
+            .reduce((s, a) => s + a.hoursPerDay, 0);
+          const logged = myLoggedByDay.get(d.date) ?? 0;
+          cap = Math.max(0, cap - excessLoggedHours(logged, rawAllocatedForDay));
+        }
         // Allocations pour ce jour.
         //   - Jour ouvré (cap>0) : toutes les allocations dont la plage couvre
         //     le jour, plafonnées par la capacité (mi-temps, etc.).
@@ -1640,6 +1684,8 @@ export class WorkloadService {
             // Sur un jour ouvré : plafonné par la capacité. Sur un jour non
             // ouvré : pleine charge (overtime), la capacité étant nulle.
             hours: cap > 0 ? Math.min(a.hoursPerDay, cap) : a.hoursPerDay,
+            isManual: a.isManual,
+            isAutoPlan: a.isAutoPlan,
           }));
         const allocated = cellAllocs.reduce((s, x) => s + x.hours, 0);
         return {
@@ -1657,6 +1703,33 @@ export class WorkloadService {
     });
 
     return { from: dateIso(from), to: dateIso(to), days, rows };
+  }
+
+  /**
+   * Fraîcheur du dernier auto-plan appliqué sur un projet (Lot 3.3,
+   * AUTOPLAN_IMPROVEMENTS.md §3.3). Comparaison synchrone de deux `max()` —
+   * pas de job en arrière-plan, pas de nouvelle table. Retourne
+   * `PlanStatusDto` (packages/shared).
+   */
+  async planStatus(orgId: string, projectId: string) {
+    const [taskAgg, allocAgg] = await Promise.all([
+      this.prisma.task.aggregate({
+        where: { organizationId: orgId, projectId, deletedAt: null },
+        _max: { updatedAt: true },
+      }),
+      this.prisma.allocation.aggregate({
+        where: { organizationId: orgId, projectId, isAutoPlan: true },
+        _max: { createdAt: true },
+      }),
+    ]);
+    const maxTaskUpdatedAt = taskAgg._max.updatedAt ?? null;
+    const maxAutoAllocCreatedAt = allocAgg._max.createdAt ?? null;
+    return {
+      stale: isPlanStale(maxTaskUpdatedAt, maxAutoAllocCreatedAt),
+      hasAutoPlan: !!maxAutoAllocCreatedAt,
+      maxTaskUpdatedAt: maxTaskUpdatedAt ? maxTaskUpdatedAt.toISOString() : null,
+      maxAutoAllocCreatedAt: maxAutoAllocCreatedAt ? maxAutoAllocCreatedAt.toISOString() : null,
+    };
   }
 
   // ============================================================
@@ -1752,10 +1825,6 @@ function startOfUtcDay(d: Date): Date {
   const x = new Date(d);
   x.setUTCHours(0, 0, 0, 0);
   return x;
-}
-
-function dateIso(d: Date): string {
-  return d.toISOString().slice(0, 10);
 }
 
 /** 0 = Monday … 6 = Sunday */

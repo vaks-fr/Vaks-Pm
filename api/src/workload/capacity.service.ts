@@ -3,7 +3,7 @@ import { WorkSchedule } from '@db';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { HolidaysService } from '../holidays/holidays.service';
-import { dateIso, weekdayMonFirst } from './scheduling';
+import { dateIso, excessLoggedHours, startOfUtcDay, weekdayMonFirst } from './scheduling';
 
 const MS_PER_DAY = 86_400_000;
 
@@ -30,6 +30,13 @@ export interface UserCapacityCtx {
   timeOffs: { startDate: Date; endDate: Date }[];
   holidaysSet: Set<string>;
   existingAllocs: { taskId: string; startDate: Date; endDate: Date; hoursPerDay: number }[];
+  /** Lot 4.1 — temps réellement loggé (TimeEntry), en heures, par jour ISO.
+   *  BORNÉ au passé/aujourd'hui (jamais au-delà de `startOfUtcDay(now)`) —
+   *  c'est ce bornage qui garantit que l'auto-plan (qui ne place qu'à partir
+   *  de J+1) reste idempotent : cette carte y est structurellement toujours
+   *  vide. Inclut les projets `kind=EXTERNAL` (tickets externes, pas de
+   *  filtre projectId) — c'est par là qu'arrivent les incidents. */
+  loggedByDay: Map<string, number>;
 }
 
 /** Résultat du remplissage jour-par-jour de la capacité d'un user. */
@@ -107,7 +114,22 @@ export class CapacityService {
       where: { id: userId, organizationId: orgId },
       select: { countryCode: true },
     });
-    const [scheduleRow, timeOffs, defaultCountry, defaultSchedule, existingAllocs] =
+    // Lot 4.1 — fenêtre du temps loggé : BORNÉE au passé/aujourd'hui, jamais
+    // au-delà. Si `start` est déjà dans le futur (le cas normal de l'auto-plan,
+    // qui ne charge le contexte qu'à partir de `cutoff` = J+1), `loggedUpperBound
+    // < start` rend la plage `[start, loggedUpperBound]` naturellement vide —
+    // Prisma renvoie [] sans qu'on ait besoin de sauter la requête en code.
+    const todayStart = startOfUtcDay(new Date());
+    const loggedUpperBound = +horizon < +todayStart ? horizon : todayStart;
+    const loggedQuery = this.prisma.timeEntry.groupBy({
+      by: ['date'],
+      // Pas de filtre projectId/kind : les tickets externes (projets
+      // EXTERNAL) sont inclus à dessein — c'est par là qu'arrivent les
+      // incidents qui détournent la capacité prévue.
+      where: { organizationId: orgId, userId, date: { gte: start, lte: loggedUpperBound } },
+      _sum: { durationMinutes: true },
+    });
+    const [scheduleRow, timeOffs, defaultCountry, defaultSchedule, existingAllocs, loggedRows] =
       await Promise.all([
         this.prisma.workSchedule.findFirst({
           where: { userId, organizationId: orgId, effectiveFrom: { lte: horizon } },
@@ -130,6 +152,7 @@ export class CapacityService {
           },
           select: { taskId: true, startDate: true, endDate: true, hoursPerDay: true },
         }),
+        loggedQuery,
       ]);
     const sched: EffectiveSchedule = scheduleRow
       ? { ...scheduleRow, isDefault: false }
@@ -141,7 +164,11 @@ export class CapacityService {
         .forCountryRange(cc, dateIso(start), dateIso(horizon))
         .map((h) => h.date),
     );
-    return { sched, occ, timeOffs, holidaysSet, existingAllocs };
+    const loggedByDay = new Map<string, number>();
+    for (const row of loggedRows) {
+      loggedByDay.set(dateIso(row.date), (row._sum.durationMinutes ?? 0) / 60);
+    }
+    return { sched, occ, timeOffs, holidaysSet, existingAllocs, loggedByDay };
   }
 
   /**
@@ -163,7 +190,7 @@ export class CapacityService {
       allowOvertime?: boolean;
     },
   ): FillResult {
-    const { sched, occ, timeOffs, holidaysSet, existingAllocs } = ctx;
+    const { sched, occ, timeOffs, holidaysSet, existingAllocs, loggedByDay } = ctx;
     const { start, totalHours, hoursPerDay, deadline, allowOvertime } = opts;
     const filled: { iso: string; hours: number }[] = [];
     let remaining = totalHours;
@@ -196,7 +223,14 @@ export class CapacityService {
             alreadyUsed += a.hoursPerDay;
           }
         }
-        const freeFromSchedule = Math.max(0, cap - alreadyUsed);
+        // Lot 4.1 — l'EXCÉDENT de temps loggé ce jour (au-delà de ce qui était
+        // alloué) grignote la capacité restante, comme une allocation de plus.
+        // `loggedByDay` est structurellement vide pour tout jour >= cutoff (le
+        // seul territoire où l'auto-plan place) — le plafond overtime, lui, ne
+        // bouge pas : l'excédent loggé n'agrandit jamais la marge 24h.
+        const logged = loggedByDay.get(iso) ?? 0;
+        const excess = excessLoggedHours(logged, alreadyUsed);
+        const freeFromSchedule = Math.max(0, cap - alreadyUsed - excess);
         const ceil = allowOvertime
           ? Math.max(0, 24 - alreadyUsed)
           : freeFromSchedule;

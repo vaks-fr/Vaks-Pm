@@ -49,9 +49,19 @@ export type AutomationKind =
   // implausiblement sous le coût de référence recalculé serveur). Alerte l'owner
   // de l'agent. Gaté par le kill switch automations seulement.
   | 'agent_run_anomaly'
+  // Agent bloqué (lot B) — l'agent a demandé de l'aide sur la tâche qu'il tient
+  // (`vaks_request_assistance`). Un commentaire ne prévient personne en soi :
+  // cette alerte vise le PM du projet, l'owner de l'agent et les co-assignés.
+  | 'agent_blocked'
   // Planning (lot 3, événementiel)
   | 'timeoff_conflict'
   | 'autoplan_overflow'
+  // Absorber l'imprévu (Lot 4.3, AUTOPLAN_IMPROVEMENTS.md §4.3, quotidien) —
+  // signal fondé sur le STATUT (fiable sans aucune saisie), jamais le
+  // pointage : « aucun temps loggé » serait mort à la livraison (le cas
+  // nominal sans saisie quotidienne). Une tâche ALLOUÉE dont la fenêtre est
+  // passée et qui n'a JAMAIS quitté TODO signale un détournement ou un oubli.
+  | 'allocation_window_missed'
   // Sous-statuts (Custom Status, événementiel) — notification configurée SUR le
   // sous-statut (notifyUserIds/notifyTeamIds), déclenchée à l'ENTRÉE d'une
   // tâche dans le sous-statut. Feature par sous-statut, pas une règle du moteur
@@ -108,8 +118,13 @@ export const COOLDOWN_TTL_S: Record<AutomationKind, number> = {
   deliverable_stale: 24 * 3600,
   // Anti-triche : clé qualifiée par motif+jour → une alerte par agent×jour×motif.
   agent_run_anomaly: 24 * 3600,
+  // Un blocage par tâche et par jour : l'agent peut relancer, on ne spamme pas.
+  agent_blocked: 24 * 3600,
   timeoff_conflict: 24 * 3600,
   autoplan_overflow: 24 * 3600,
+  // Re-nudge hebdo : tant que la tâche n'a pas bougé, ça reste à signaler,
+  // mais pas une fois par jour.
+  allocation_window_missed: 7 * 24 * 3600,
   // Événementiel : un jalon n'est atteint qu'une fois (re-clôture rapprochée
   // après réouverture = bruit → filtrée par le TTL).
   milestone_reached: 24 * 3600,
@@ -148,6 +163,27 @@ export function isOverdue(dueDate: Date, now: Date, graceDays: number): boolean 
 /** Jours entiers de retard (pour le message « en retard de N jours »). */
 export function daysLate(dueDate: Date, now: Date): number {
   return Math.max(0, Math.floor((now.getTime() - dueDate.getTime()) / DAY_MS));
+}
+
+/**
+ * Lot 4.3 (AUTOPLAN_IMPROVEMENTS.md §4.3) — une tâche ALLOUÉE dont la fenêtre
+ * (fin de la dernière allocation posée dessus) est révolue depuis au moins
+ * `graceDays` jours et qui n'a JAMAIS quitté TODO. Signal fondé sur le
+ * STATUT, jamais le pointage (une timesheet vide est le cas nominal sans
+ * saisie quotidienne — une règle « aucun temps loggé » serait morte à la
+ * livraison). Pure : le caller résout `allocWindowEnd` = MAX(endDate) des
+ * allocations de la tâche, et ne fournit `taskStatus` que pour ce garde —
+ * la requête SQL a déjà filtré sur `status='TODO'` en amont dans le cas
+ * courant, ce paramètre protège les appels qui ne l'auraient pas fait.
+ */
+export function isAllocationWindowMissed(
+  allocWindowEnd: Date,
+  now: Date,
+  taskStatus: string,
+  graceDays: number,
+): boolean {
+  if (taskStatus !== 'TODO') return false;
+  return now.getTime() - allocWindowEnd.getTime() >= graceDays * DAY_MS;
 }
 
 /** Jours entiers restants avant `date` (0 si déjà passée). */

@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -17,6 +18,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { IsBoolean, IsIn, IsOptional, IsString, IsUUID, Length, ValidateIf } from 'class-validator';
 import { ProjectDocumentKind } from '@db';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
@@ -35,6 +37,25 @@ import { AssignManagerDto } from './dto/assign-manager.dto';
 import { AssignMemberDto, UpdateProjectMemberDto } from './dto/assign-member.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
 import { RefuseOfferDto, EmailOfferDto } from './dto/offer.dto';
+import {
+  agentCharterView,
+  EMPTY_AGENT_CHARTER_VIEW,
+} from '../agents/context/agent-charter-view';
+import { MAX_TEXT_DOC_BYTES, textMimeFor } from './text-document';
+
+/**
+ * Refus commun aux surfaces du charter qui rendent le document ENTIER (export
+ * Word, PDF signé) : contrairement à `GET /charter`, elles ne peuvent pas être
+ * filtrées rubrique par rubrique — un charter partiel au format Word n'a pas de
+ * sens. On les ferme donc aux jetons d'API, qui gardent la vue filtrée JSON.
+ */
+function assertNotApiToken(user: AuthUser): void {
+  if (user.viaApiToken) {
+    throw new ForbiddenException(
+      "Le charter complet (export Word / document signé) n'est pas accessible via un jeton d'API. Utiliser GET /projects/:id/charter.",
+    );
+  }
+}
 
 const MAX_CHARTER_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 const charterKey = (projectId: string, filename: string) => `${projectId}/${filename}`;
@@ -71,6 +92,83 @@ const ALLOWED_DOC_MIME = new Set([
 ]);
 /** Clé S3 d'un document projet : préfixe `offers/` sous le dossier du projet. */
 const docKey = (projectId: string, storedName: string) => `${projectId}/offers/${storedName}`;
+
+/** Corps du dépôt texte (route JSON). */
+class CreateTextDocumentDto {
+  @IsString()
+  @Length(1, 200)
+  name!: string;
+
+  @IsString()
+  @Length(1, MAX_TEXT_DOC_BYTES)
+  content!: string;
+
+  @IsOptional()
+  @IsIn(['OFFER', 'OTHER'])
+  kind?: 'OFFER' | 'OTHER';
+
+  @IsOptional()
+  @IsUUID()
+  folderId?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  aiContext?: boolean;
+
+  /**
+   * Homonyme dans le dossier cible : `replace` (défaut) réécrit la note
+   * existante, `create` force un second document. Le défaut est `replace` parce
+   * qu'un agent sans `docId` reposterait sinon la même note à chaque passage.
+   */
+  @IsOptional()
+  @IsIn(['replace', 'create'])
+  onDuplicate?: 'replace' | 'create';
+}
+
+/** Corps du PATCH d'un document (déplacement / bascule « contexte IA »). */
+class UpdateProjectDocumentDto {
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsUUID()
+  folderId?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  aiContext?: boolean;
+}
+
+/** Corps de création d'un dossier. */
+class CreateFolderDto {
+  @IsString()
+  @Length(1, 120)
+  name!: string;
+
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsUUID()
+  parentId?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  aiContext?: boolean;
+}
+
+/** Corps de mise à jour d'un dossier (renommage / déplacement / contexte IA). */
+class UpdateFolderDto {
+  @IsOptional()
+  @IsString()
+  @Length(1, 120)
+  name?: string;
+
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsUUID()
+  parentId?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  aiContext?: boolean;
+}
 
 @ApiTags('projects')
 @ApiBearerAuth()
@@ -363,13 +461,29 @@ export class ProjectsController {
   // Project charter (initiation : DRAFT → CHARTER_REVIEW → ACTIVE)
   // ----------------------------------------------------------------
 
+  /**
+   * Charter du projet. Un **jeton d'API** (PAT agent / clé org) n'en reçoit que
+   * la vue filtrée `AGENT_CHARTER_FIELDS` : le budget estimé, les parties
+   * prenantes, le sponsor et les risques ne sortent jamais par cette porte
+   * (cf. `agents/context/agent-charter-view.ts`). Les sessions navigateur (JWT)
+   * ne sont pas affectées.
+   */
   @Get(':projectId/charter')
   @RequirePermissions('project:view')
-  getCharter(
+  @ProjectAccess(fromProjectParam('projectId'))
+  async getCharter(
     @CurrentUser() user: AuthUser,
     @Param('projectId', ParseUUIDPipe) projectId: string,
   ) {
-    return this.projects.getCharter(user.orgId, projectId, user.userId, user.isAdmin);
+    const charter = await this.projects.getCharter(
+      user.orgId,
+      projectId,
+      user.userId,
+      user.isAdmin,
+    );
+    if (!user.viaApiToken) return charter;
+    // `null` sérialiserait en corps VIDE — une route REST doit rendre un objet.
+    return agentCharterView(charter) ?? EMPTY_AGENT_CHARTER_VIEW;
   }
 
   @Put(':projectId/charter')
@@ -388,11 +502,14 @@ export class ProjectsController {
    */
   @Get(':projectId/charter.docx')
   @RequirePermissions('project:view')
+  @ProjectAccess(fromProjectParam('projectId'))
   async exportCharterDocx(
     @CurrentUser() user: AuthUser,
     @Param('projectId', ParseUUIDPipe) projectId: string,
     @Res() res: Response,
   ) {
+    // Le .docx rend TOUTES les rubriques (budget compris) : pas filtrable.
+    assertNotApiToken(user);
     const { buffer, project } = await this.projects.exportCharterDocx(
       user.orgId,
       projectId,
@@ -418,11 +535,14 @@ export class ProjectsController {
    */
   @Get(':projectId/charter/signed-document')
   @RequirePermissions('project:view')
+  @ProjectAccess(fromProjectParam('projectId'))
   async downloadSignedCharter(
     @CurrentUser() user: AuthUser,
     @Param('projectId', ParseUUIDPipe) projectId: string,
     @Res() res: Response,
   ) {
+    // Le charter signé est le document ENTIER, en pièce jointe : pas filtrable.
+    assertNotApiToken(user);
     const charter = await this.projects.getCharter(
       user.orgId,
       projectId,
@@ -534,6 +654,90 @@ export class ProjectsController {
     });
   }
 
+  /**
+   * Variante **JSON** de l'upload : le contenu arrive en texte dans le body, le
+   * fichier est fabriqué côté serveur.
+   *
+   * Raison d'être : un client MCP ne parle que JSON — l'`ApiClient` du serveur
+   * MCP n'émet pas de multipart. Sans cette route, une IA (ou un agent
+   * autonome) ne peut rien déposer dans l'espace documents, alors que c'est
+   * précisément là que se rangent transcripts, notes et contexte IA.
+   *
+   * **Même garde que la route multipart** (`project:view` = plancher membre,
+   * décision 2026-07-19) : on n'élargit pas la surface, on change de transport.
+   * Restreint aux types **texte** — pas question de reconstituer un binaire
+   * depuis une chaîne.
+   */
+  @Post(':projectId/documents/text')
+  @RequirePermissions('project:view')
+  async uploadTextDocument(
+    @CurrentUser() user: AuthUser,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Body() dto: CreateTextDocumentDto,
+  ) {
+    const content = dto?.content ?? '';
+    const bytes = Buffer.byteLength(content, 'utf8');
+    if (!dto?.name?.trim()) throw new BadRequestException('Nom de document manquant.');
+    if (!content.trim()) throw new BadRequestException('Contenu vide.');
+    if (bytes > MAX_TEXT_DOC_BYTES) {
+      throw new BadRequestException(
+        `Contenu trop volumineux (${Math.round(bytes / 1024)} Ko, maximum ${MAX_TEXT_DOC_BYTES / 1024} Ko).`,
+      );
+    }
+    const mimeType = textMimeFor(dto.name);
+    if (!mimeType) {
+      throw new BadRequestException(
+        'Extension non autorisée pour un dépôt texte (.md, .txt, .csv, .json, .yaml, .html).',
+      );
+    }
+    // Upsert par nom : le service réécrit la note homonyme du dossier cible
+    // plutôt que d'empiler un doublon (le blob S3 et la clé sont gérés là-bas —
+    // une création frappe une clé neuve, un remplacement réutilise l'existante).
+    return this.projects.upsertTextDocument(user.orgId, projectId, user.userId, user.isAdmin, {
+      filename: dto.name,
+      mimeType,
+      content,
+      kind: dto.kind === 'OFFER' ? ProjectDocumentKind.OFFER : ProjectDocumentKind.OTHER,
+      folderId: dto.folderId || null,
+      // Défaut `true` : un document déposé par l'IA a vocation à servir de
+      // contexte. L'appelant peut le refuser explicitement.
+      aiContext: dto.aiContext !== false,
+      onDuplicate: dto.onDuplicate ?? 'replace',
+      storageKeyFor: (storedName) => docKey(projectId, `${randomUUID()}-${storedName}`),
+    });
+  }
+
+  /**
+   * Remplace le **contenu** d'un document texte existant, en place. Complète la
+   * route de création : un contexte IA se maintient à jour en étant réécrit,
+   * pas en empilant des versions homonymes dans l'espace documents.
+   */
+  @Put(':projectId/documents/:docId/text')
+  @RequirePermissions('project:view')
+  replaceTextDocument(
+    @CurrentUser() user: AuthUser,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('docId', ParseUUIDPipe) docId: string,
+    @Body() dto: { content?: string },
+  ) {
+    const content = dto?.content ?? '';
+    if (!content.trim()) throw new BadRequestException('Contenu vide.');
+    const bytes = Buffer.byteLength(content, 'utf8');
+    if (bytes > MAX_TEXT_DOC_BYTES) {
+      throw new BadRequestException(
+        `Contenu trop volumineux (${Math.round(bytes / 1024)} Ko, maximum ${MAX_TEXT_DOC_BYTES / 1024} Ko).`,
+      );
+    }
+    return this.projects.replaceDocumentText(
+      user.orgId,
+      projectId,
+      user.userId,
+      user.isAdmin,
+      docId,
+      content,
+    );
+  }
+
   /** Déplacer un document (folderId, null = racine) / toggle « Contexte IA ». */
   @Patch(':projectId/documents/:docId')
   @RequirePermissions('project:view')
@@ -541,7 +745,7 @@ export class ProjectsController {
     @CurrentUser() user: AuthUser,
     @Param('projectId', ParseUUIDPipe) projectId: string,
     @Param('docId', ParseUUIDPipe) docId: string,
-    @Body() dto: { folderId?: string | null; aiContext?: boolean },
+    @Body() dto: UpdateProjectDocumentDto,
   ) {
     return this.projects.updateDocument(user.orgId, projectId, user.userId, user.isAdmin, docId, {
       folderId: dto.folderId,
@@ -562,7 +766,7 @@ export class ProjectsController {
   createFolder(
     @CurrentUser() user: AuthUser,
     @Param('projectId', ParseUUIDPipe) projectId: string,
-    @Body() dto: { name: string; parentId?: string | null },
+    @Body() dto: CreateFolderDto,
   ) {
     return this.projects.createFolder(user.orgId, projectId, user.userId, user.isAdmin, dto);
   }
@@ -573,7 +777,7 @@ export class ProjectsController {
     @CurrentUser() user: AuthUser,
     @Param('projectId', ParseUUIDPipe) projectId: string,
     @Param('folderId', ParseUUIDPipe) folderId: string,
-    @Body() dto: { name?: string; parentId?: string | null },
+    @Body() dto: UpdateFolderDto,
   ) {
     return this.projects.updateFolder(user.orgId, projectId, user.userId, user.isAdmin, folderId, dto);
   }

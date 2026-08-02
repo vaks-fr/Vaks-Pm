@@ -8,6 +8,7 @@ import {
   normalizeAgentPolicies,
 } from '@vaks-pm/shared';
 import { AdminSettingsService } from '../admin/admin-settings.service';
+import { DEFAULT_EXECUTION_LEASE_MINUTES, resolveLeaseMinutes } from './agent-budget';
 
 /**
  * Moteur de policies agents (AGENTS_ARCHITECTURE.md chantier 3). Les règles
@@ -33,6 +34,8 @@ export class PolicyEngineService {
       backpressureMax: number;
       requireRunDeclaration: boolean;
       preauthorizeBudget: boolean;
+      executionLeaseMinutes: number;
+      budgetBreaker: boolean;
       expires: number;
     }
   >();
@@ -46,6 +49,8 @@ export class PolicyEngineService {
     backpressureMax: number;
     requireRunDeclaration: boolean;
     preauthorizeBudget: boolean;
+    executionLeaseMinutes: number;
+    budgetBreaker: boolean;
   }> {
     const now = Date.now();
     const hit = this.cache.get(orgId);
@@ -60,6 +65,13 @@ export class PolicyEngineService {
     // Défaut OFF : ne bloque pas un claim sur une estimation tant que l'admin
     // ne l'a pas activé (les enveloppes dures restent le filet par défaut).
     let preauthorizeBudget = false;
+    // Défaut ARMÉ (30 min) : contrairement aux autres réglages ci-dessus, le bail
+    // d'exécution n'est pas une contrainte de gouvernance mais un filet — une
+    // tâche bloquée par un agent mort ne profite à personne. `0` le désarme.
+    let executionLeaseMinutes = DEFAULT_EXECUTION_LEASE_MINUTES;
+    // Défaut OFF : dépasser l'enveloppe alerte toujours (audit + owner), mais
+    // ARRACHER la tâche à l'agent en plein travail est un choix de l'admin.
+    let budgetBreaker = false;
     try {
       const all = await this.settings.getAll(orgId);
       const raw = all['agents.policies'];
@@ -70,6 +82,10 @@ export class PolicyEngineService {
       if (Number.isInteger(bp) && bp >= 0 && bp <= 1000) backpressureMax = bp;
       requireRunDeclaration = all['agents.requireRunDeclaration'] === true;
       preauthorizeBudget = all['agents.preauthorizeBudget'] === true;
+      if ('agents.executionLeaseMinutes' in all) {
+        executionLeaseMinutes = resolveLeaseMinutes(all['agents.executionLeaseMinutes']);
+      }
+      budgetBreaker = all['agents.budgetBreaker'] === true;
     } catch (e) {
       // Fail-safe : on garde les défauts plutôt que de crasher un claim.
       this.log.warn(`[policy] lecture settings échouée org=${orgId}: ${String(e)}`);
@@ -79,6 +95,8 @@ export class PolicyEngineService {
       backpressureMax,
       requireRunDeclaration,
       preauthorizeBudget,
+      executionLeaseMinutes,
+      budgetBreaker,
       expires: now + this.CACHE_TTL_MS,
     };
     this.cache.set(orgId, entry);
@@ -116,10 +134,23 @@ export class PolicyEngineService {
     return preauthorizeBudget;
   }
 
-  /** Règles effectives (défauts inclus) — pour l'UI / le diagnostic. */
-  async getRules(orgId: string): Promise<AgentPolicyRule[]> {
-    const { rules } = await this.load(orgId);
-    return rules;
+  /**
+   * Durée du bail d'exécution en minutes (lot A §1). `0` = mécanisme désactivé
+   * (aucun bail posé, aucun balayage). Défaut 30 min.
+   */
+  async getExecutionLeaseMinutes(orgId: string): Promise<number> {
+    const { executionLeaseMinutes } = await this.load(orgId);
+    return executionLeaseMinutes;
+  }
+
+  /**
+   * Vrai si un dépassement d'enveloppe constaté EN COURS de tâche (à la
+   * déclaration d'un run) doit retirer la tâche à l'agent, et pas seulement
+   * l'alerter. Opt-in : le retrait fait perdre le travail en cours.
+   */
+  async getBudgetBreaker(orgId: string): Promise<boolean> {
+    const { budgetBreaker } = await this.load(orgId);
+    return budgetBreaker;
   }
 
   /** Invalide le cache d'une org (après édition des policies). */

@@ -11,6 +11,7 @@ import {
   daysLate,
   daysUntil,
   highestTierCrossed,
+  isAllocationWindowMissed,
   isDueWithin,
   isoWeekKey,
   isoWeekRange,
@@ -115,6 +116,9 @@ export class AutomationsEvaluatorService {
     }
     if (s.budgetThreshold.enabled || s.forecastOverrun.enabled) {
       await this.runFinanceRules(orgId, s, counters);
+    }
+    if (s.allocationWindowMissed.enabled) {
+      await this.runAllocationWindowMissed(orgId, s, now, counters);
     }
 
     return counters;
@@ -1167,6 +1171,115 @@ export class AutomationsEvaluatorService {
         },
         projectId: p.id,
         url: this.projectUrl(p.id),
+      });
+      this.bump(counters, outcome);
+    }
+  }
+
+  // ============================================================
+  // Absorber l'imprévu — règle Lot 4.3 (AUTOPLAN_IMPROVEMENTS.md §4.3)
+  // ============================================================
+
+  /**
+   * Tâche ALLOUÉE dont la fenêtre (fin de la dernière allocation posée
+   * dessus) est révolue et qui n'a JAMAIS quitté TODO → assignés (les users
+   * alloués) + PM du projet. Signal fondé sur le STATUT (fiable sans aucune
+   * saisie) : « aucun temps loggé » serait mort à la livraison, l'absence de
+   * pointage quotidien étant le cas nominal.
+   *
+   * Deux passes : (1) `groupBy` pour trouver, PAR TÂCHE, la fin de fenêtre la
+   * plus tardive parmi ses allocations (sans ça, filtrer au niveau ligne
+   * ferait passer une tâche dont UNE allocation est ancienne mais une autre
+   * encore ouverte) ; (2) chargement des libellés + résolution des
+   * destinataires uniquement pour les candidats retenus (cap anti-tempête).
+   */
+  private async runAllocationWindowMissed(
+    orgId: string,
+    s: AutomationsSettings,
+    now: Date,
+    counters: RunCounters,
+  ): Promise<void> {
+    const grouped = await this.prisma.allocation.groupBy({
+      by: ['taskId'],
+      where: {
+        organizationId: orgId,
+        task: {
+          status: 'TODO',
+          deletedAt: null,
+          project: { deletedAt: null, status: 'ACTIVE' as const, kind: 'STANDARD' as const },
+        },
+      },
+      _max: { endDate: true },
+    });
+    const candidates = grouped.filter(
+      (g): g is typeof g & { _max: { endDate: Date } } =>
+        !!g._max.endDate &&
+        isAllocationWindowMissed(g._max.endDate, now, 'TODO', s.allocationWindowMissed.graceDays),
+    );
+    if (!candidates.length) return;
+    if (candidates.length > MAX_ALERTS_PER_RULE_PER_TICK) {
+      counters.capped += 1;
+      this.log.warn(
+        `rule=allocation_window_missed org=${orgId}: more than ${MAX_ALERTS_PER_RULE_PER_TICK} candidates — capped this tick, remainder picked up on later ticks`,
+      );
+    }
+    const capped = candidates.slice(0, MAX_ALERTS_PER_RULE_PER_TICK);
+    const taskIds = capped.map((c) => c.taskId);
+    const endByTask = new Map(capped.map((c) => [c.taskId, c._max.endDate] as const));
+
+    const [tasks, allocUsers] = await Promise.all([
+      this.prisma.task.findMany({
+        where: { id: { in: taskIds }, organizationId: orgId },
+        select: { id: true, title: true, project: { select: { id: true, name: true } } },
+      }),
+      this.prisma.allocation.findMany({
+        where: { taskId: { in: taskIds }, organizationId: orgId },
+        select: { taskId: true, userId: true },
+      }),
+    ]);
+    const usersByTask = new Map<string, Set<string>>();
+    for (const a of allocUsers) {
+      let set = usersByTask.get(a.taskId);
+      if (!set) {
+        set = new Set();
+        usersByTask.set(a.taskId, set);
+      }
+      set.add(a.userId);
+    }
+
+    for (const task of tasks) {
+      const endDate = endByTask.get(task.id);
+      if (!endDate) continue;
+      const allocatedUserIds = Array.from(usersByTask.get(task.id) ?? []);
+      const [assignees, pms] = await Promise.all([
+        allocatedUserIds.length
+          ? this.prisma.user.findMany({
+              where: {
+                id: { in: allocatedUserIds },
+                organizationId: orgId,
+                kind: 'HUMAN',
+                status: 'ACTIVE',
+                deletedAt: null,
+              },
+              select: { id: true, name: true, email: true, preferredLanguage: true },
+            })
+          : Promise.resolve([]),
+        this.recipients.projectPMs(task.project.id),
+      ]);
+      const to = this.recipients.merge(assignees, pms);
+      if (!to.length) continue;
+      const outcome = await this.actions.emit(orgId, {
+        kind: 'allocation_window_missed',
+        entityId: task.id,
+        recipients: to,
+        params: {
+          taskTitle: task.title,
+          projectName: task.project.name,
+          days: daysLate(endDate, now),
+        },
+        taskId: task.id,
+        projectId: task.project.id,
+        url: this.taskUrl(task.id),
       });
       this.bump(counters, outcome);
     }

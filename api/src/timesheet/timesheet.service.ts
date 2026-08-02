@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { HolidaysService } from '../holidays/holidays.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { TimesheetQueryDto } from './dto/timesheet.dto';
+import { dateIso } from '../workload/scheduling';
 
 const MS_PER_DAY = 86_400_000;
 
@@ -384,9 +385,6 @@ function toDateOnly(iso: string): Date {
   const d = new Date(s);
   d.setUTCHours(0, 0, 0, 0);
   return d;
-}
-function dateIso(d: Date): string {
-  return d.toISOString().slice(0, 10);
 }
 function weekdayMonFirst(d: Date): number {
   return (d.getUTCDay() + 6) % 7;

@@ -16,6 +16,14 @@ export interface OAuthClient {
   redirectUris: string[];
   clientName: string;
   createdAt: number;
+  /**
+   * OIDC Dynamic Registration / spec MCP 2026-07-28 : `native` = application
+   * desktop/CLI (redirections loopback à port variable, RFC 8252), `web` =
+   * application serveur (correspondance **exacte** du redirect_uri).
+   * `undefined` = client enregistré avant l'introduction du champ : on conserve
+   * l'ancien comportement permissif pour ne pas casser les connexions en place.
+   */
+  applicationType?: 'native' | 'web';
   /** Client **confidentiel** (pré-enregistré, ex. Copilot Studio) : porte un
    *  secret. Les clients DCR (Claude/ChatGPT) sont publics (PKCE, pas de secret). */
   confidential?: boolean;
@@ -35,6 +43,14 @@ export interface PendingAuthorization {
   state: string | null;
   /** RFC 8707 : ressource visée (l'URL du serveur MCP). */
   resource: string | null;
+  /**
+   * RFC 9207 : émetteur (issuer) qui a démarré ce flux, renvoyé tel quel dans la
+   * réponse d'autorisation. Stocké ici plutôt que recalculé au consentement :
+   * c'est ce qui garantit que l'`iss` annoncé au client est bien celui qui a
+   * émis le code, y compris si la requête de consentement arrivait par un autre
+   * hôte. `null` = transaction créée avant cette version (rétrocompatibilité).
+   */
+  issuer?: string | null;
   createdAt: number;
 }
 

@@ -42,7 +42,7 @@ export async function processEmail(job: EmailJob): Promise<void> {
   // et le mot de passe d'env (Swarm secret). En pooled, le producteur (API)
   // attache `job.smtp` résolu pour le BON tenant : on la fait primer pour les
   // champs de transport, en gardant l'env comme fallback de mot de passe.
-  const base = await getSmtpConfig();
+  const base = await getSmtpConfig(job.tenantSlug);
   const cfg: SmtpConfig =
     job.smtp && job.smtp.host
       ? {
@@ -115,7 +115,7 @@ export async function processEmail(job: EmailJob): Promise<void> {
     console.error(`[email:fail] ${job.to} | ${msg}`);
     // Invalide le cache : un host/port changé entre temps doit être repris au
     // prochain retry BullMQ sans attendre 60 s.
-    invalidateSmtpCache();
+    invalidateSmtpCache(job.tenantSlug);
     if (job.deliveryId) await reportDelivery(job.deliveryId, 'FAILED', msg, job.tenantSlug);
     throw err; // pour que BullMQ déclenche le retry
   }

@@ -40,6 +40,11 @@ export class TenancyService {
     return this.config.get('deployment').customDomains ?? {};
   }
 
+  /** Domaines de base des serveurs MCP publics (`<slug>.<mcpDomain>`). */
+  private get mcpDomains(): string[] {
+    return this.config.get('deployment').mcpDomains ?? [];
+  }
+
   /** Normalise un Host : minuscule, sans port. */
   private normalizeHost(host?: string): string | null {
     if (!host) return null;
@@ -47,14 +52,31 @@ export class TenancyService {
     return h || null;
   }
 
-  /** Extrait le slug d'un Host `<slug>.<baseDomain>` (ignore `www` et l'apex). */
-  private slugFromHost(host: string): string | null {
-    const base = this.baseDomain;
+  /** Extrait le premier label d'un Host sous `base` (`<label>.….<base>`). */
+  private labelUnder(host: string, base: string): string | null {
     if (!base || !host.endsWith(`.${base}`)) return null;
     const sub = host.slice(0, host.length - base.length - 1);
     const label = sub.split('.')[0];
     if (!label || label === 'www') return null;
     return label;
+  }
+
+  /** Extrait le slug d'un Host `<slug>.<baseDomain>` (ignore `www` et l'apex). */
+  private slugFromHost(host: string): string | null {
+    return this.labelUnder(host, this.baseDomain);
+  }
+
+  /**
+   * Slug depuis un Host servi par un serveur MCP public (`<slug>.<mcpDomain>`).
+   * Le premier label EST le slug : une seule entrée de config couvre tous les
+   * tenants. Utilisé quand le domaine public du MCP diffère du domaine interne.
+   */
+  private slugFromMcpHost(host: string): string | null {
+    for (const d of this.mcpDomains) {
+      const label = this.labelUnder(host, d);
+      if (label) return label;
+    }
+    return null;
   }
 
   /**
@@ -75,7 +97,12 @@ export class TenancyService {
     if (custom) return { id: custom, slug: custom };
     // 2) Sous-domaine `<slug>.<baseDomain>`.
     const slug = this.slugFromHost(h);
-    if (!slug) return null;
-    return { id: slug, slug };
+    if (slug) return { id: slug, slug };
+    // 3) Domaine public d'un serveur MCP (`<slug>.<mcpDomain>`). Couvre le MCP
+    //    en DMZ dont le domaine diffère de l'interne : le Host public est relayé
+    //    tel quel par le MCP, on résout le slug sur son premier label.
+    const mcpSlug = this.slugFromMcpHost(h);
+    if (mcpSlug) return { id: mcpSlug, slug: mcpSlug };
+    return null;
   }
 }

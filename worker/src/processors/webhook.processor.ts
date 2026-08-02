@@ -127,9 +127,12 @@ const AUTOMATION_KIND_LABELS: Record<string, string> = {
   parent_ready: '✅ Tâche parente prête à revoir',
   agent_budget: "🤖 Budget d'agent IA",
   agent_run_anomaly: '🕵️ Déclaration de coût agent suspecte',
+  agent_blocked: '🆘 Agent IA bloqué',
   deliverable_stale: '📄 Livrable en attente de revue',
   timeoff_conflict: '🌴 Congé vs plan de charge',
   autoplan_overflow: '📐 Plan hors échéance',
+  // Lot 4.3 auto-plan (2026-08-02) — allocation dont la fenêtre est passée, tâche jamais sortie de TODO
+  allocation_window_missed: '🗓️ Allouée mais jamais démarrée',
   // Feed sponsor (2026-07-18)
   milestone_reached: '🏆 Jalon atteint',
   project_status_changed: '📁 Statut du projet modifié',

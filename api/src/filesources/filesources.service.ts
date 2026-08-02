@@ -111,11 +111,22 @@ export class FileSourcesService {
   // Audience HUMAINE — navigation dans l'UI projet
   // ------------------------------------------------------------
 
-  /** Sources dispo (gates + appartenance team) pour un projet — pilote l'affichage de l'onglet. */
+  /**
+   * Sources dispo (gates + appartenance team) pour un projet — pilote
+   * l'affichage de l'onglet.
+   *
+   * `audience` : `'human'` (défaut) applique en plus l'appartenance à la team
+   * Microsoft de l'appelant. `'agent'` répond à une autre question — « qu'est-ce
+   * qu'un AGENT verrait sur ce projet ? » — et saute donc ce contrôle, qui n'a
+   * pas de sens pour un principal non humain. Sert l'écran de prévisualisation
+   * du contexte agent, où l'on veut afficher le motif exact (`FS_GRANT_PENDING`…)
+   * tel que l'agent le rencontre.
+   */
   async availabilityForProject(
     orgId: string,
     projectId: string,
-    userId: string,
+    userId: string | null,
+    audience: 'human' | 'agent' = 'human',
   ): Promise<{ source: string; label: string; available: boolean; reason?: string }[]> {
     const project = await this.projectById(orgId, projectId).catch(() => null);
     const out: { source: string; label: string; available: boolean; reason?: string }[] = [];
@@ -126,11 +137,14 @@ export class FileSourcesService {
         reason = 'FS_SOURCE_UNAVAILABLE';
       } else {
         try {
-          await this.assertGates(orgId, project, desc.source, 'human');
-          // Appartenance à la team Microsoft = gate SPÉCIFIQUE à SharePoint. Les
-          // sources autonomes (Google Drive, …) se contentent de l'accès projet
-          // (déjà imposé par le controller : @ProjectAccess + project:view).
-          if (desc.source === 'sharepoint') await this.assertHumanMembership(orgId, projectId, userId);
+          await this.assertGates(orgId, project, desc.source, audience);
+          // Appartenance à la team Microsoft = gate SPÉCIFIQUE à SharePoint, et
+          // spécifique à un humain. Les sources autonomes (Google Drive, …) se
+          // contentent de l'accès projet (déjà imposé par le controller :
+          // @ProjectAccess + project:view).
+          if (audience === 'human' && desc.source === 'sharepoint' && userId) {
+            await this.assertHumanMembership(orgId, projectId, userId);
+          }
           available = true;
         } catch (e) {
           reason = e instanceof FileSourceError ? e.code : 'FS_FORBIDDEN';

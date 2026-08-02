@@ -1,10 +1,11 @@
 import { Worker, Job, ConnectionOptions } from 'bullmq';
 import { URL } from 'url';
-import { QUEUES, EmailJob, WebhookJob, AuditSyslogJob, TeamsJob } from './queues';
+import { QUEUES, EmailJob, WebhookJob, AuditSyslogJob, TeamsJob, ExportJob } from './queues';
 import { processEmail } from './processors/email.processor';
 import { processWebhook } from './processors/webhook.processor';
 import { processAuditSyslog } from './processors/audit-syslog.processor';
 import { processTeams } from './processors/teams.processor';
+import { processExport } from './processors/export.processor';
 
 const redisUrl = new URL(process.env.REDIS_URL ?? 'redis://redis:6379');
 const connection: ConnectionOptions = {
@@ -48,17 +49,31 @@ const auditSyslogWorker = new Worker(
 const teamsWorker = new Worker(
   QUEUES.TEAMS,
   async (job: Job<TeamsJob>) => {
-    await processTeams(job.data);
+    // attempts = nb de tentatives BullMQ configuré côté producteur (défaut 5) ;
+    // sert au processor pour marquer `terminal:true` à l'épuisement des retries.
+    const maxAttempts = job.opts.attempts ?? 5;
+    await processTeams(job.data, job.attemptsMade + 1, maxAttempts);
   },
   { connection },
 );
 
-for (const w of [emailWorker, webhookWorker, auditSyslogWorker, teamsWorker]) {
+// Exports longs (PDF/XLSX/RGPD) : le worker ne fait que déclencher le rendu
+// côté API. Concurrence bornée à 2 — un rendu PDF consomme de la mémoire dans
+// le conteneur API, en lancer dix en parallèle le ferait tomber en OOM.
+const exportWorker = new Worker(
+  QUEUES.EXPORT,
+  async (job: Job<ExportJob>) => {
+    await processExport(job.data);
+  },
+  { connection, concurrency: 2 },
+);
+
+for (const w of [emailWorker, webhookWorker, auditSyslogWorker, teamsWorker, exportWorker]) {
   w.on('completed', (job) => console.log(`[${w.name}] job ${job.id} OK`));
   w.on('failed', (job, err) => console.error(`[${w.name}] job ${job?.id} KO: ${err.message}`));
 }
 
-console.log('Worker BullMQ démarré (files: email, webhook, audit-syslog, teams).');
+console.log('Worker BullMQ démarré (files: email, webhook, audit-syslog, teams, export).');
 
 async function shutdown() {
   await Promise.all([
@@ -66,6 +81,7 @@ async function shutdown() {
     webhookWorker.close(),
     auditSyslogWorker.close(),
     teamsWorker.close(),
+    exportWorker.close(),
   ]);
   process.exit(0);
 }

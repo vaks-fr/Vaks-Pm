@@ -285,9 +285,13 @@
     "task": "Aufgabe",
     "color": "Farbe",
     "parentGroup": "Übergeordnete Gruppe",
+
+    "parentTask": "Übergeordnete Aufgabe",
+
+    "breakdown": "Aufteilung",
     "noneRoot": "Keine (Wurzel)",
     "noneRootDash": "— Keine (Wurzel) —",
-    "noGroupAvailable": "Keine Gruppe verfügbar",
+    "noGroupAvailable": "Keine Aufgabe verfügbar",
     "milestone": "Meilenstein",
     "clickToToggle": "Klicken zum Umschalten",
     "yes": "Ja",
@@ -448,13 +452,15 @@
   },
   "dep": {
     "conflictTitle": "Abhängigkeitskonflikt",
-    "conflictTooltip": "Das Startdatum liegt vor der Fälligkeit einer Vorgängeraufgabe",
+    "conflictTooltip": "Das Startdatum verletzt eine Abhängigkeit zu einer Vorgängeraufgabe",
     "endsOn": "endet am",
+    "startsOn": "beginnt am",
     "lag": "(Lag {{lag}}T)",
     "expectedStart": "→ erwarteter Start frühestens am {{date}}.",
     "lateStartTitle": "Verspäteter Start",
-    "lateStartTooltip": "Die Aufgabe beginnt später als das Ende ihres Vorgängers",
+    "lateStartTooltip": "Die Aufgabe beginnt später, als eine Abhängigkeit es verlangt",
     "startsAfter": "Beginnt {{days}}T nach dem Ende von {{title}}",
+    "startsAfterStart": "Beginnt {{days}}T nach dem Beginn von {{title}}",
     "holidayTooltip": "Feiertag — die zuständige Person wird an diesem Tag wahrscheinlich nicht arbeiten.",
     "holiday": "Feiertag: {{holidays}}"
   },

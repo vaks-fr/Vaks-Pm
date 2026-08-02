@@ -113,6 +113,20 @@ export function evaluateTransition(
     // Ré-ouverture d'un approuvé (avant clôture) par un reviewer.
     case `${S.APPROVED}->${S.CHANGES_REQUESTED}`:
       return gate(!!actor.canReview, 'needs_review_permission');
+
+    // Mise en pause par le CLAIMANT — un agent bloqué (contexte manquant,
+    // compétence absente) doit pouvoir parquer sa tâche en disant pourquoi
+    // (`holdReason`) plutôt que rendre un livrable au jugé ou tenir la tâche
+    // indéfiniment. Réservé à celui qui la détient : personne ne met en pause
+    // le travail d'un autre par ce chemin (un humain `task:update` passe, lui,
+    // par la zone legacy ci-dessous).
+    case `${S.CLAIMED}->${S.ON_HOLD}`:
+    case `${S.IN_PROGRESS}->${S.ON_HOLD}`:
+      return gate(claimantOrTakeover, 'not_claimant');
+
+    // Reprise après pause par le claimant (le blocage est levé).
+    case `${S.ON_HOLD}->${S.IN_PROGRESS}`:
+      return gate(claimantOrTakeover, 'not_claimant');
   }
 
   // ---- 2. Zone humaine « legacy » (anti-régression Kanban/drag-drop) ----

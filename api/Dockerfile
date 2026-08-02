@@ -17,6 +17,10 @@ FROM node:22-alpine
 RUN apk add --no-cache openssl
 WORKDIR /app
 ENV NODE_ENV=production
+# Version de PUSH (convention yyyy-mm-dd-nbpushtoday) injectée au build et
+# exposée par GET /admin/diagnostics (carte Application). `dev` si non fournie.
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
 COPY --from=build /app/node_modules /app/node_modules
 COPY --from=build /app/packages/shared/dist /app/packages/shared/dist
 COPY --from=build /app/packages/shared/package.json /app/packages/shared/package.json

@@ -39,6 +39,12 @@ export interface AutomationsSettings {
   overload: { enabled: boolean; thresholdPct: number };
   underload: { enabled: boolean; thresholdPct: number; weeks: number };
   timeOffConflict: { enabled: boolean };
+  /**
+   * Lot 4.3 — tâche ALLOUÉE dont la fenêtre (fin de la dernière allocation) est
+   * passée depuis `graceDays` jours et qui n'a JAMAIS quitté TODO. Signal
+   * fondé sur le statut, jamais le pointage (cf. `isAllocationWindowMissed`).
+   */
+  allocationWindowMissed: { enabled: boolean; graceDays: number };
 
   // Timesheet
   timesheetReminder: { enabled: boolean; thresholdPct: number; weekday: number; hour: number };
@@ -92,6 +98,7 @@ export const DEFAULT_AUTOMATIONS_SETTINGS: AutomationsSettings = {
   overload: { enabled: true, thresholdPct: 100 },
   underload: { enabled: false, thresholdPct: 50, weeks: 2 },
   timeOffConflict: { enabled: true },
+  allocationWindowMissed: { enabled: true, graceDays: 1 },
   timesheetReminder: { enabled: true, thresholdPct: 80, weekday: 5, hour: 16 },
   overtime: { enabled: false, hoursPerWeek: 5 },
   utilization: { enabled: false, thresholdPct: 60 },
@@ -182,6 +189,18 @@ export function readAutomationsSettings(raw: Record<string, unknown>): Automatio
     timeOffConflict: {
       enabled: asBool(raw['automations.timeOffConflict.enabled'], D.timeOffConflict.enabled),
     },
+    allocationWindowMissed: {
+      enabled: asBool(
+        raw['automations.allocationWindowMissed.enabled'],
+        D.allocationWindowMissed.enabled,
+      ),
+      graceDays: asInt(
+        raw['automations.allocationWindowMissed.graceDays'],
+        D.allocationWindowMissed.graceDays,
+        0,
+        30,
+      ),
+    },
     timesheetReminder: {
       enabled: asBool(raw['automations.timesheetReminder.enabled'], D.timesheetReminder.enabled),
       thresholdPct: asInt(raw['automations.timesheetReminder.thresholdPct'], D.timesheetReminder.thresholdPct, 0, 100),
@@ -247,6 +266,7 @@ const INT_BOUNDS: Record<string, [number, number]> = {
   'automations.deliverableStale.hours': [1, 336],
   'automations.projectInactive.days': [1, 180],
   'automations.projectEndSoon.days': [1, 60],
+  'automations.allocationWindowMissed.graceDays': [0, 30],
 };
 
 /**

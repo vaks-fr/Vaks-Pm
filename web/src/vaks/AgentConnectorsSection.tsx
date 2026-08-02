@@ -162,6 +162,17 @@ export default function AgentConnectorsSection({ flash }: { flash: Flash }) {
       const r = await api.syncAgentConnector(c.id);
       if (r.ok) {
         flash(t('agents.syncDone', { created: r.created, updated: r.updated, suspended: r.suspended }));
+        // Débordement du plafond d'agents : le sync n'échoue pas, il rapporte les
+        // identités non créées faute de place (freemium).
+        if (r.skippedOverLimit && r.skippedOverLimit > 0) {
+          flash(
+            t('agents.syncOverLimit', {
+              defaultValue:
+                '{{count}} agent(s) not created — free agent limit reached. Upgrade to add more.',
+              count: r.skippedOverLimit,
+            }),
+          );
+        }
       } else {
         flash(t('agents.syncFailed', { message: r.error ?? '?' }));
       }

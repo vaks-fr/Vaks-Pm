@@ -48,6 +48,64 @@ const STATUS_META: Record<
 };
 
 const OK_GREEN = 'oklch(0.62 0.15 150)';
+const OVER_RED = 'oklch(0.63 0.18 25)';
+/** Portail d'essai (marketing). Pré-rempli du licenseId pour la demande. */
+const TRIAL_URL = 'https://vaks-pm.com/trial';
+
+/**
+ * Consommation « sièges & agents » sous le plafond effectif (gratuit ou licence).
+ * `limit == null` ⇒ illimité (licence). `used > limit` ⇒ sur-cap : les comptes
+ * existants restent actifs, seule la création est bloquée (freemium) → on avertit
+ * et on propose l'essai. Rendu compact, réutilise les tokens de thème.
+ */
+function Capacity({ status }: { status: LicenseStatusDto }) {
+  const { t } = useTranslation('admin');
+  const rows: Array<{ label: string; used: number | null | undefined; limit: number | null | undefined }> = [
+    { label: t('license.seats', { defaultValue: 'Seats' }), used: status.seatsUsed, limit: status.seatLimit },
+    { label: t('license.agents', { defaultValue: 'AI agents' }), used: status.agentsUsed, limit: status.agentLimit },
+  ];
+  const anyOver = rows.some((r) => r.limit != null && (r.used ?? 0) > r.limit);
+  const trialHref = status.organizationId
+    ? `${TRIAL_URL}?licenseId=${encodeURIComponent(status.organizationId)}`
+    : TRIAL_URL;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+        {rows.map((r) => {
+          const unlimited = r.limit == null;
+          const over = !unlimited && (r.used ?? 0) > (r.limit as number);
+          return (
+            <span key={r.label} style={{ fontSize: 13, color: over ? OVER_RED : 'var(--text)' }}>
+              {r.label}{' '}
+              <b>{r.used ?? 0}</b>
+              {unlimited ? (
+                <span style={{ color: 'var(--text-3)' }}> / {t('license.unlimited')}</span>
+              ) : (
+                <span style={{ color: 'var(--text-3)' }}> / {r.limit}</span>
+              )}
+            </span>
+          );
+        })}
+      </div>
+      {anyOver && (
+        <div style={{ fontSize: 12, color: OVER_RED }}>
+          {t('license.overCap', {
+            defaultValue:
+              'Over the free plan — existing accounts keep working, but creating new ones is blocked until you upgrade.',
+          })}
+        </div>
+      )}
+      <a
+        href={trialHref}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={{ fontSize: 12.5, color: 'var(--accent)', textDecoration: 'none', marginTop: 2, width: 'fit-content' }}
+      >
+        {t('license.unlockCta', { defaultValue: 'Unlock more seats / agents — free trial →' })}
+      </a>
+    </div>
+  );
+}
 
 function fmtDate(iso: string | null): string {
   if (!iso) return '—';
@@ -215,6 +273,14 @@ export default function LicenseSection({ flash }: { flash: Flash }) {
             <>
               <dt style={{ color: 'var(--text-3)' }}>{t('license.notes')}</dt>
               <dd style={{ margin: 0 }}>{status.notes}</dd>
+            </>
+          )}
+          {status && (
+            <>
+              <dt style={{ color: 'var(--text-3)' }}>{t('license.capacity', { defaultValue: 'Usage' })}</dt>
+              <dd style={{ margin: 0 }}>
+                <Capacity status={status} />
+              </dd>
             </>
           )}
           {status?.organizationId && (

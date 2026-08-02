@@ -16,6 +16,7 @@ import {
   ALL_STATUSES,
   STATUS_META,
   StatusPill,
+  VirtualList,
   avatarUser,
   colorFromKey,
   daysLeft,
@@ -24,6 +25,7 @@ import {
 } from './shared';
 import { ManageModal } from './ManageModal';
 import { CreateDraftModal, CopyPickerModal } from './CreateDraftModal';
+import { useIsMobile } from '../useIsMobile';
 
 /* ============================ Project card ============================ */
 
@@ -193,6 +195,49 @@ function ProjectCard({ p, onManage, onOpen }: ProjectCardProps) {
   );
 }
 
+/**
+ * One collapsible row inside the narrow-screen consolidated filters panel.
+ * Closed by default (per-section, tracked by the caller) so a user scanning
+ * for one filter doesn't have to page past four fully-expanded others; the
+ * collapsed header still shows the current value so the state is visible
+ * without opening it.
+ */
+function FilterAccordionSection({
+  title,
+  valueLabel,
+  isOpen,
+  onToggle,
+  children,
+}: {
+  title: string;
+  valueLabel?: string;
+  isOpen: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="pj-filter-section">
+      <button type="button" className="pj-filter-section-head" onClick={onToggle}>
+        <span className="pj-filter-section-title">{title}</span>
+        <span className="row" style={{ gap: 6, alignItems: 'center', minWidth: 0 }}>
+          {valueLabel && <span className="pj-filter-section-value truncate">{valueLabel}</span>}
+          <span
+            style={{
+              opacity: 0.6,
+              display: 'inline-block',
+              transform: isOpen ? 'rotate(180deg)' : 'none',
+              transition: 'transform .15s ease',
+            }}
+          >
+            ▾
+          </span>
+        </span>
+      </button>
+      {isOpen && <div className="pj-filter-section-body">{children}</div>}
+    </div>
+  );
+}
+
 /* ============================ Panel root ============================ */
 
 export interface ProjectsPanelProps {
@@ -305,6 +350,22 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
   const [error, setError] = useState<string | null>(null);
   const [visibleStatuses, setVisibleStatuses] = useState<Set<ProjectStatus>>(() => loadStatusFilter());
   const [filterOpen, setFilterOpen] = useState(false);
+  // Below this width the 5 individual filter dropdown buttons no longer fit
+  // the toolbar on one line and become unreadable — collapse them into a
+  // single "Filters" button opening one consolidated panel instead.
+  const isNarrowToolbar = useIsMobile('(max-width: 1080px)');
+  const [filtersMenuOpen, setFiltersMenuOpen] = useState(false);
+  // Which sections of the consolidated mobile filters panel are expanded —
+  // all closed by default each time the panel is (re)opened.
+  const [openFilterSections, setOpenFilterSections] = useState<Set<string>>(() => new Set());
+  function toggleFilterSection(key: string) {
+    setOpenFilterSections((curr) => {
+      const next = new Set(curr);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
   // Client filter: 'ALL' | 'INTERNAL' (no client) | a clientId.
   const [clientFilter, setClientFilter] = useState<string>('ALL');
   const [clientMenuOpen, setClientMenuOpen] = useState(false);
@@ -494,6 +555,26 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
     ? fiscalLabel(fyStartMonth, tfGran, tfPeriod)
     : t('panel.anyTimeframe');
 
+  const isDefaultStatusFilter =
+    visibleStatuses.size === DEFAULT_VISIBLE_STATUSES.length &&
+    DEFAULT_VISIBLE_STATUSES.every((s) => visibleStatuses.has(s));
+  // Count of filter dimensions that differ from their default — shown as a
+  // badge on the consolidated "Filters" button on narrow screens.
+  const activeFilterCount =
+    (clientFilter !== 'ALL' ? 1 : 0) +
+    (managerFilter !== 'ALL' ? 1 : 0) +
+    (billableFilter !== 'ALL' ? 1 : 0) +
+    (tfActive ? 1 : 0) +
+    (isDefaultStatusFilter ? 0 : 1);
+
+  function resetAllFilters() {
+    setClientFilter('ALL');
+    setManagerFilter('ALL');
+    setBillableFilter('ALL');
+    setTfActive(false);
+    setVisibleStatuses(new Set(DEFAULT_VISIBLE_STATUSES));
+  }
+
   function toggleStatus(s: ProjectStatus) {
     setVisibleStatuses((curr) => {
       const next = new Set(curr);
@@ -524,7 +605,7 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
           </button>
         </div>
       )}
-      {(clientOptions.list.length > 0 || clientOptions.hasInternal) && (
+      {!isNarrowToolbar && (clientOptions.list.length > 0 || clientOptions.hasInternal) && (
         <div style={{ position: 'relative' }}>
           <button
             className="btn btn-ghost"
@@ -590,11 +671,16 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
                       {t('panel.internalOnly')}
                     </button>
                   )}
-                  {clientOptions.list
-                    .filter((c) => c.name.toLowerCase().includes(clientQuery.trim().toLowerCase()))
-                    .map((c) => (
+                  <VirtualList
+                    key={clientQuery}
+                    items={clientOptions.list.filter((c) =>
+                      c.name.toLowerCase().includes(clientQuery.trim().toLowerCase()),
+                    )}
+                    itemHeight={34}
+                    visibleCount={5}
+                    keyFn={(c) => c.id}
+                    renderItem={(c) => (
                       <button
-                        key={c.id}
                         className="dd-item truncate"
                         style={{ width: '100%', textAlign: 'left', fontWeight: clientFilter === c.id ? 700 : 400 }}
                         onClick={() => {
@@ -604,7 +690,8 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
                       >
                         {c.name}
                       </button>
-                    ))}
+                    )}
+                  />
                 </div>
               </div>
             </>
@@ -613,7 +700,7 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
       )}
 
       {/* ---- Project manager filter ---- */}
-      {(managerOptions.list.length > 0 || managerOptions.hasNone) && (
+      {!isNarrowToolbar && (managerOptions.list.length > 0 || managerOptions.hasNone) && (
         <div style={{ position: 'relative' }}>
           <button
             className="btn btn-ghost"
@@ -679,11 +766,16 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
                       {t('panel.noManager')}
                     </button>
                   )}
-                  {managerOptions.list
-                    .filter((m) => m.name.toLowerCase().includes(managerQuery.trim().toLowerCase()))
-                    .map((m) => (
+                  <VirtualList
+                    key={managerQuery}
+                    items={managerOptions.list.filter((m) =>
+                      m.name.toLowerCase().includes(managerQuery.trim().toLowerCase()),
+                    )}
+                    itemHeight={34}
+                    visibleCount={5}
+                    keyFn={(m) => m.id}
+                    renderItem={(m) => (
                       <button
-                        key={m.id}
                         className="dd-item truncate"
                         style={{ width: '100%', textAlign: 'left', fontWeight: managerFilter === m.id ? 700 : 400 }}
                         onClick={() => {
@@ -693,7 +785,8 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
                       >
                         {m.name}
                       </button>
-                    ))}
+                    )}
+                  />
                 </div>
               </div>
             </>
@@ -702,6 +795,7 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
       )}
 
       {/* ---- Billable filter ---- */}
+      {!isNarrowToolbar && (
       <div style={{ position: 'relative' }}>
         <button
           className="btn btn-ghost"
@@ -747,8 +841,10 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
           </>
         )}
       </div>
+      )}
 
       {/* ---- Fiscal timeframe filter ---- */}
+      {!isNarrowToolbar && (
       <div style={{ position: 'relative' }}>
         <button
           className="btn btn-ghost"
@@ -849,7 +945,9 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
           </>
         )}
       </div>
+      )}
 
+      {!isNarrowToolbar && (
       <div style={{ position: 'relative' }}>
         <button
           className="btn btn-ghost"
@@ -924,6 +1022,287 @@ export function ProjectsPanel({ pushToast, onOpenProject, search = '' }: Project
           </>
         )}
       </div>
+      )}
+
+      {/* ---- Narrow screens: all 5 filters collapsed into one panel ---- */}
+      {isNarrowToolbar && (
+        <div style={{ position: 'relative' }}>
+          <button
+            className="btn btn-ghost"
+            onClick={() =>
+              setFiltersMenuOpen((o) => {
+                if (!o) setOpenFilterSections(new Set());
+                return !o;
+              })
+            }
+            title={t('panel.filters')}
+          >
+            <Icon name="filter" size={13} style={{ verticalAlign: '-2px', marginRight: 4 }} />
+            {activeFilterCount > 0
+              ? t('panel.filtersActive', { count: activeFilterCount })
+              : t('panel.filters')}{' '}
+            <span style={{ opacity: 0.6 }}>▾</span>
+          </button>
+          {filtersMenuOpen && (
+            <>
+              <div
+                onClick={() => setFiltersMenuOpen(false)}
+                style={{ position: 'fixed', inset: 0, zIndex: 100 }}
+              />
+              <div
+                className="dd-menu"
+                style={{
+                  position: 'absolute',
+                  right: 0,
+                  top: 'calc(100% + 4px)',
+                  width: 300,
+                  maxWidth: 'calc(100vw - 24px)',
+                  maxHeight: '75vh',
+                  overflowY: 'auto',
+                  padding: 10,
+                  zIndex: 101,
+                  display: 'flex',
+                  flexDirection: 'column',
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {(clientOptions.list.length > 0 || clientOptions.hasInternal) && (
+                  <FilterAccordionSection
+                    title={t('panel.sectionClient')}
+                    valueLabel={selectedClientLabel}
+                    isOpen={openFilterSections.has('client')}
+                    onToggle={() => toggleFilterSection('client')}
+                  >
+                    <input
+                      className="input"
+                      placeholder={t('panel.searchClient')}
+                      value={clientQuery}
+                      onChange={(e) => setClientQuery(e.target.value)}
+                      style={{ marginBottom: 6, width: '100%' }}
+                    />
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      <button
+                        className="dd-item"
+                        style={{ width: '100%', textAlign: 'left', fontWeight: clientFilter === 'ALL' ? 700 : 400 }}
+                        onClick={() => setClientFilter('ALL')}
+                      >
+                        {t('panel.allClients')}
+                      </button>
+                      {clientOptions.hasInternal && (
+                        <button
+                          className="dd-item"
+                          style={{ width: '100%', textAlign: 'left', fontWeight: clientFilter === 'INTERNAL' ? 700 : 400 }}
+                          onClick={() => setClientFilter('INTERNAL')}
+                        >
+                          {t('panel.internalOnly')}
+                        </button>
+                      )}
+                      <VirtualList
+                        key={clientQuery}
+                        items={clientOptions.list.filter((c) =>
+                          c.name.toLowerCase().includes(clientQuery.trim().toLowerCase()),
+                        )}
+                        itemHeight={34}
+                        visibleCount={5}
+                        keyFn={(c) => c.id}
+                        renderItem={(c) => (
+                          <button
+                            className="dd-item truncate"
+                            style={{ width: '100%', textAlign: 'left', fontWeight: clientFilter === c.id ? 700 : 400 }}
+                            onClick={() => setClientFilter(c.id)}
+                          >
+                            {c.name}
+                          </button>
+                        )}
+                      />
+                    </div>
+                  </FilterAccordionSection>
+                )}
+
+                {(managerOptions.list.length > 0 || managerOptions.hasNone) && (
+                  <FilterAccordionSection
+                    title={t('panel.sectionManager')}
+                    valueLabel={selectedManagerLabel}
+                    isOpen={openFilterSections.has('manager')}
+                    onToggle={() => toggleFilterSection('manager')}
+                  >
+                    <input
+                      className="input"
+                      placeholder={t('panel.searchManager')}
+                      value={managerQuery}
+                      onChange={(e) => setManagerQuery(e.target.value)}
+                      style={{ marginBottom: 6, width: '100%' }}
+                    />
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      <button
+                        className="dd-item"
+                        style={{ width: '100%', textAlign: 'left', fontWeight: managerFilter === 'ALL' ? 700 : 400 }}
+                        onClick={() => setManagerFilter('ALL')}
+                      >
+                        {t('panel.allManagers')}
+                      </button>
+                      {managerOptions.hasNone && (
+                        <button
+                          className="dd-item"
+                          style={{ width: '100%', textAlign: 'left', fontWeight: managerFilter === 'NONE' ? 700 : 400 }}
+                          onClick={() => setManagerFilter('NONE')}
+                        >
+                          {t('panel.noManager')}
+                        </button>
+                      )}
+                      <VirtualList
+                        key={managerQuery}
+                        items={managerOptions.list.filter((m) =>
+                          m.name.toLowerCase().includes(managerQuery.trim().toLowerCase()),
+                        )}
+                        itemHeight={34}
+                        visibleCount={5}
+                        keyFn={(m) => m.id}
+                        renderItem={(m) => (
+                          <button
+                            className="dd-item truncate"
+                            style={{ width: '100%', textAlign: 'left', fontWeight: managerFilter === m.id ? 700 : 400 }}
+                            onClick={() => setManagerFilter(m.id)}
+                          >
+                            {m.name}
+                          </button>
+                        )}
+                      />
+                    </div>
+                  </FilterAccordionSection>
+                )}
+
+                <FilterAccordionSection
+                  title={t('panel.sectionBillable')}
+                  valueLabel={selectedBillableLabel}
+                  isOpen={openFilterSections.has('billable')}
+                  onToggle={() => toggleFilterSection('billable')}
+                >
+                  <div className="row" style={{ gap: 6 }}>
+                    {([
+                      ['ALL', t('panel.billableAll')],
+                      ['BILLABLE', t('panel.billableOnly')],
+                      ['NON_BILLABLE', t('panel.nonBillableOnly')],
+                    ] as [BillableFilter, string][]).map(([val, label]) => (
+                      <button
+                        key={val}
+                        className={'btn btn-sm ' + (billableFilter === val ? 'btn-accent' : 'btn-ghost')}
+                        style={{ flex: 1 }}
+                        onClick={() => setBillableFilter(val)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </FilterAccordionSection>
+
+                <FilterAccordionSection
+                  title={t('panel.sectionTimeframe')}
+                  valueLabel={tfLabel}
+                  isOpen={openFilterSections.has('timeframe')}
+                  onToggle={() => toggleFilterSection('timeframe')}
+                >
+                  <button
+                    className="dd-item"
+                    style={{ width: '100%', textAlign: 'left', fontWeight: !tfActive ? 700 : 400 }}
+                    onClick={() => setTfActive(false)}
+                  >
+                    {t('panel.anyTimeframe')}
+                  </button>
+                  <div className="row" style={{ gap: 6, margin: '8px 0' }}>
+                    {(['quarter', 'year'] as TimeframeGran[]).map((g) => (
+                      <button
+                        key={g}
+                        className={'btn btn-sm ' + (tfActive && tfGran === g ? 'btn-accent' : 'btn-ghost')}
+                        style={{ flex: 1 }}
+                        onClick={() => {
+                          setTfGran(g);
+                          setTfOffset(0);
+                          setTfActive(true);
+                        }}
+                      >
+                        {g === 'quarter' ? t('panel.timeframeQuarter') : t('panel.timeframeYear')}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="row" style={{ gap: 6, alignItems: 'center', justifyContent: 'space-between' }}>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      title={t('panel.prevPeriod')}
+                      onClick={() => {
+                        setTfActive(true);
+                        setTfOffset((o) => o - 1);
+                      }}
+                    >
+                      ‹
+                    </button>
+                    <span style={{ fontSize: 13, fontWeight: 700, minWidth: 90, textAlign: 'center' }}>
+                      {fiscalLabel(fyStartMonth, tfGran, tfPeriod)}
+                    </span>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      title={t('panel.nextPeriod')}
+                      onClick={() => {
+                        setTfActive(true);
+                        setTfOffset((o) => o + 1);
+                      }}
+                    >
+                      ›
+                    </button>
+                  </div>
+                  {tfActive && tfOffset !== 0 && (
+                    <button className="btn btn-ghost btn-sm" style={{ width: '100%', marginTop: 8 }} onClick={() => setTfOffset(0)}>
+                      {t('panel.thisPeriod')}
+                    </button>
+                  )}
+                </FilterAccordionSection>
+
+                <FilterAccordionSection
+                  title={t('panel.sectionStatus')}
+                  valueLabel={t('panel.status', { selected: visibleStatuses.size, total: ALL_STATUSES.length })}
+                  isOpen={openFilterSections.has('status')}
+                  onToggle={() => toggleFilterSection('status')}
+                >
+                  {ALL_STATUSES.map((s) => {
+                    const checked = visibleStatuses.has(s);
+                    const meta = STATUS_META[s];
+                    return (
+                      <label key={s} className="dd-item" style={{ cursor: 'pointer', gap: 8 }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleStatus(s)}
+                          style={{ accentColor: `oklch(0.55 0.15 ${meta.hue})` }}
+                        />
+                        <span className="pj-status-dot" style={{ background: `oklch(0.62 0.16 ${meta.hue})` }} />
+                        <span className="grow">{statusLabel(t, s)}</span>
+                      </label>
+                    );
+                  })}
+                  <div style={{ display: 'flex', gap: 6, fontSize: 11, marginTop: 4 }}>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setVisibleStatuses(new Set(DEFAULT_VISIBLE_STATUSES))}>
+                      {t('panel.resetHideArchived')}
+                    </button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setVisibleStatuses(new Set(ALL_STATUSES))}>
+                      {t('panel.showAll')}
+                    </button>
+                  </div>
+                </FilterAccordionSection>
+
+                <div style={{ display: 'flex', gap: 8, borderTop: '1px solid var(--border)', paddingTop: 10, marginTop: 10 }}>
+                  <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={resetAllFilters}>
+                    {t('panel.resetAllFilters')}
+                  </button>
+                  <button className="btn btn-accent btn-sm" style={{ flex: 1 }} onClick={() => setFiltersMenuOpen(false)}>
+                    {t('common.close')}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {canCreate && projects.length > 0 && (
         <button
           className="btn btn-ghost"

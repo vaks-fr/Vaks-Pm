@@ -8,6 +8,8 @@ import { api } from '../../api/client';
 import {
   AGENT_VERIFICATION_CAPABILITY_METHODS,
   ProjectStatus,
+  type AgentBriefDto,
+  type AgentContextPreviewDto,
   type ProjectDto,
   type SkillDto,
   type UpdateProjectDto,
@@ -198,12 +200,238 @@ interface ManageDraft {
   agentsEnabled: boolean;
   spContextEnabled: boolean;
   agentContext: string;
+  /** Brief structuré — 4 champs courts qui remplacent le pavé libre. */
+  agentBrief: { role: string; outputConventions: string; deliveryTarget: string; outOfScope: string };
   agentGuardrails: string;
   agentCostBudget: string;
   verificationCapabilities: string[];
   stakes: string;
   verificationMode: string;
+  /** Dépôt(s) CI autorisé(s), un par ligne (édition) — sérialisé en tableau au save. */
+  ciReposText: string;
   sponsorNotify: { milestoneReached: boolean; projectStatus: boolean; milestoneAtRisk: boolean; budgetThresholds: boolean };
+}
+
+/** Les 4 champs du brief structuré, dans l'ordre de saisie ET de rendu. */
+const BRIEF_FIELDS = ['role', 'outputConventions', 'deliveryTarget', 'outOfScope'] as const;
+
+/** Libellés de repli (anglais), si la clé i18n n'est pas encore traduite. */
+const BRIEF_FIELD_FALLBACK: Record<
+  (typeof BRIEF_FIELDS)[number],
+  { label: string; placeholder: string }
+> = {
+  // Les placeholders sont des EXEMPLES, pas des définitions : un champ vide est
+  // la première cause de livrable à côté de la plaque, et « qui est l'agent sur
+  // ce projet » ne dit pas quel niveau de précision on attend. On montre.
+  role: {
+    label: 'Role & mission',
+    placeholder:
+      'e.g. you write the SCCM to Intune migration sheets from tickets and workshop notes, one sheet per application batch.',
+  },
+  outputConventions: {
+    label: 'Output conventions',
+    placeholder:
+      'e.g. markdown, English, 2 pages max per sheet, a before/after table and a risks section. Always cite your sources.',
+  },
+  deliveryTarget: {
+    label: 'Where deliverables go',
+    placeholder:
+      'e.g. put the document in the task deliverable (content field). Do not create a SharePoint page, do not send email.',
+  },
+  outOfScope: {
+    label: 'Out of scope',
+    placeholder:
+      'e.g. do not change any SCCM collection, do not contact end users, never invent a figure — ask in a comment instead.',
+  },
+};
+type BriefField = (typeof BRIEF_FIELDS)[number];
+type BriefDraft = Record<BriefField, string>;
+
+/** Colonne `agentBrief` (Json) → brouillon éditable (chaînes, jamais null). */
+function readBriefDraft(raw: AgentBriefDto | null | undefined): BriefDraft {
+  return {
+    role: raw?.role ?? '',
+    outputConventions: raw?.outputConventions ?? '',
+    deliveryTarget: raw?.deliveryTarget ?? '',
+    outOfScope: raw?.outOfScope ?? '',
+  };
+}
+
+/**
+ * Brouillon → payload : champs trimés, vides à `null`, et brief entièrement
+ * vide → `null` (effacer). Le serveur re-normalise de toute façon ; on
+ * s'aligne ici pour que le diff « a-t-il changé ? » soit fiable.
+ */
+function normalizeBriefDraft(d: BriefDraft): AgentBriefDto | null {
+  const out: AgentBriefDto = {};
+  let has = false;
+  for (const f of BRIEF_FIELDS) {
+    const v = d[f].trim();
+    out[f] = v || null;
+    if (v) has = true;
+  }
+  return has ? out : null;
+}
+
+/**
+ * Rendu de l'aperçu « ce que voient les agents ».
+ *
+ * Purement présentationnel : tout vient du serveur, RIEN n'est recomposé ici.
+ * Si ce composant se mettait à reconstruire le brief, l'écran divergerait de ce
+ * que l'agent reçoit — exactement le problème qu'on cherche à supprimer.
+ */
+function AgentContextPreviewPanel({
+  preview,
+  t,
+}: {
+  preview: AgentContextPreviewDto;
+  t: (k: string, o?: Record<string, unknown>) => string;
+}) {
+  const { brief, facts, documents, contextSources, charter, guardrails } = preview;
+  // Rubriques du charter réellement transmises, dans l'ordre du pack agent.
+  const charterRows: [string, string][] = charter
+    ? (
+        [
+          ['projectPurpose', 'Purpose'],
+          ['objectives', 'Objectives'],
+          ['scopeIn', 'In scope'],
+          ['scopeOut', 'Out of scope'],
+          ['deliverables', 'Deliverables'],
+          ['constraints', 'Constraints'],
+          ['successCriteria', 'Success criteria'],
+        ] as const
+      )
+        .map(([key, fallback]) => {
+          const value = charter[key as keyof typeof charter];
+          return value
+            ? ([t(`manage.agents.charter.${key}`, { defaultValue: fallback }), value] as [
+                string,
+                string,
+              ])
+            : null;
+        })
+        .filter((r): r is [string, string] => r !== null)
+    : [];
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <pre
+        style={{
+          whiteSpace: 'pre-wrap',
+          background: 'var(--bg-subtle, rgba(127,127,127,.08))',
+          padding: 10,
+          borderRadius: 6,
+          fontSize: 12.5,
+          margin: 0,
+          maxHeight: 320,
+          overflow: 'auto',
+        }}
+      >
+        {brief.composed || t('manage.agents.previewEmpty', { defaultValue: '(empty brief)' })}
+      </pre>
+
+      {brief.orgDefaultApplied.length > 0 && (
+        <div className="md-hint">
+          {t('manage.agents.previewInherited', { defaultValue: 'Inherited from org default:' })}{' '}
+          {brief.orgDefaultApplied.join(', ')}
+        </div>
+      )}
+
+      <div className="md-hint">
+        {t('manage.agents.previewDocs', { defaultValue: 'Context documents:' })}{' '}
+        {documents.returned}/{documents.total}
+        {documents.truncated && (
+          <strong>
+            {' '}
+            — {t('manage.agents.previewTruncated', {
+              defaultValue: 'truncated, some documents are NOT sent to agents',
+            })}
+          </strong>
+        )}
+      </div>
+      {documents.items.length > 0 && (
+        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5 }}>
+          {documents.items.slice(0, 12).map((d) => (
+            <li key={d.id}>
+              {d.filename}
+              {d.source === 'folder' && (
+                <span className="md-hint">
+                  {' '}
+                  ({t('documents.aiInherited', { defaultValue: 'inherited' })})
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="md-hint">
+        {t('manage.agents.previewSources', { defaultValue: 'External sources:' })}{' '}
+        {contextSources.length === 0
+          ? t('manage.agents.previewNoSource', { defaultValue: 'none' })
+          : contextSources
+              .map((s) => `${s.label} — ${s.available ? 'OK' : (s.reason ?? 'unavailable')}`)
+              .join(' · ')}
+      </div>
+
+      {/* Garde-fous projet : l'agent les reçoit, donc l'écran doit les montrer.
+          Les résumer d'une ligne reviendrait à demander au PM de deviner. */}
+      {guardrails.project && (
+        <div>
+          <div className="md-hint" style={{ fontWeight: 600, marginBottom: 4 }}>
+            {t('manage.agents.previewGuardrails', { defaultValue: 'Guardrails sent to agents:' })}
+          </div>
+          <pre
+            style={{
+              whiteSpace: 'pre-wrap',
+              background: 'var(--bg-subtle, rgba(127,127,127,.08))',
+              padding: 8,
+              borderRadius: 6,
+              fontSize: 12.5,
+              margin: 0,
+            }}
+          >
+            {guardrails.project}
+          </pre>
+        </div>
+      )}
+
+      {/* Charter : on rend les rubriques RÉELLEMENT transmises. Une ligne
+          « inclus » obligerait à ouvrir un autre onglet pour savoir quoi. */}
+      <div>
+        <div className="md-hint" style={{ fontWeight: 600, marginBottom: 4 }}>
+          {t('manage.agents.previewCharter', { defaultValue: 'Project charter:' })}{' '}
+          {charterRows.length === 0 && (
+            <span style={{ fontWeight: 400 }}>
+              {t('manage.agents.previewCharterOff', { defaultValue: 'not filled in' })}
+            </span>
+          )}
+        </div>
+        {charterRows.length > 0 && (
+          <dl style={{ margin: 0, fontSize: 12.5 }}>
+            {charterRows.map(([label, value]) => (
+              <div key={label} style={{ marginBottom: 4 }}>
+                <dt style={{ fontWeight: 600, color: 'var(--text-3)' }}>{label}</dt>
+                <dd style={{ margin: '0 0 0 10px', whiteSpace: 'pre-wrap' }}>{value}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+        <div className="md-hint" style={{ marginTop: 4 }}>
+          {t('manage.agents.previewCharterFiltered', {
+            defaultValue:
+              'Budget, stakeholders and risks are never sent to agents — they stay out of this pack.',
+          })}
+        </div>
+      </div>
+
+      <div className="md-hint">
+        {t('manage.agents.previewReviewers', { defaultValue: 'Reviewers:' })}{' '}
+        {facts.reviewers.length
+          ? facts.reviewers.map((r) => r.name).join(', ')
+          : t('manage.agents.previewNoReviewer', { defaultValue: 'none' })}
+      </div>
+    </div>
+  );
 }
 
 /** Défauts serveur de `Project.sponsorNotify` (voir sponsor-notify.ts côté API). */
@@ -277,6 +505,12 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
     agentsEnabled: project.agentsEnabled ?? false,
     spContextEnabled: project.spContextEnabled ?? true,
     agentContext: project.agentContext ?? '',
+    agentBrief: {
+      role: project.agentBrief?.role ?? '',
+      outputConventions: project.agentBrief?.outputConventions ?? '',
+      deliveryTarget: project.agentBrief?.deliveryTarget ?? '',
+      outOfScope: project.agentBrief?.outOfScope ?? '',
+    },
     agentGuardrails: project.agentGuardrails ?? '',
     agentCostBudget: project.agentCostBudget != null ? String(project.agentCostBudget) : '',
     verificationCapabilities: Array.isArray(project.verificationCapabilities)
@@ -284,6 +518,7 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
       : [],
     stakes: project.stakes ?? '',
     verificationMode: project.verificationMode ?? '',
+    ciReposText: (project.ciRepos ?? []).join('\n'),
     sponsorNotify: readSponsorNotifyDraft(project.sponsorNotify),
   }));
   const [clients, setClients] = useState<Array<{ id: string; name: string; company: string | null }>>([]);
@@ -294,6 +529,12 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
     project.msSpGrantStatus ?? 'NONE',
   );
   const [spVerifying, setSpVerifying] = useState(false);
+  // Aperçu « ce que voient les agents » : chargé à l'ouverture du panneau (pas
+  // au montage — le pack coûte plus cher qu'un GET simple), jamais lié au draft.
+  const [preview, setPreview] = useState<AgentContextPreviewDto | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [members, setMembers] = useState<
     Array<{
       userId: string;
@@ -464,6 +705,11 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
         draft.agentContext !== (project.agentContext ?? '')
           ? draft.agentContext.trim() || null
           : undefined,
+      agentBrief:
+        JSON.stringify(normalizeBriefDraft(draft.agentBrief)) !==
+        JSON.stringify(normalizeBriefDraft(readBriefDraft(project.agentBrief)))
+          ? normalizeBriefDraft(draft.agentBrief)
+          : undefined,
       agentGuardrails:
         draft.agentGuardrails !== (project.agentGuardrails ?? '')
           ? draft.agentGuardrails.trim() || null
@@ -477,6 +723,10 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
       verificationMode:
         draft.verificationMode !== (project.verificationMode ?? '')
           ? (draft.verificationMode || null)
+          : undefined,
+      ciRepos:
+        draft.ciReposText !== (project.ciRepos ?? []).join('\n')
+          ? draft.ciReposText.split(/[\n,]/).map((r) => r.trim()).filter(Boolean)
           : undefined,
       agentCostBudget:
         draft.agentCostBudget !== (project.agentCostBudget != null ? String(project.agentCostBudget) : '')
@@ -492,8 +742,13 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
   );
   const hasChange = Object.values(patch).some((v) => v !== undefined);
   const nameInvalid = draft.name.trim().length === 0;
-  // Un projet ouvert aux agents doit porter un brief (contexte).
-  const agentInvalid = draft.agentsEnabled && draft.agentContext.trim().length === 0;
+  // Un projet ouvert aux agents doit porter un brief : le formulaire structuré
+  // OU les notes libres. L'un des deux suffit (les projets d'avant la refonte
+  // n'ont que les notes libres, on ne les invalide pas).
+  const agentInvalid =
+    draft.agentsEnabled &&
+    draft.agentContext.trim().length === 0 &&
+    normalizeBriefDraft(draft.agentBrief) === null;
 
   const filteredCandidates = useMemo(() => {
     const q = memberSearch.trim().toLowerCase();
@@ -905,26 +1160,72 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
 
             {draft.agentsEnabled && (
               <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {/* Brief STRUCTURÉ : 4 champs courts. Le serveur y ajoute tout
+                    seul ce qu'il sait déjà (reviewer, mode de vérification,
+                    enjeu, langue) — inutile de le retaper ici. */}
                 <div>
                   <div className="md-label">
-                    {t('manage.agents.context')}
+                    {t('manage.agents.brief', { defaultValue: 'Agent brief' })}
                     <span style={{ color: 'var(--danger, #f85149)' }}> *</span>
                   </div>
-                  <div className="md-hint" style={{ marginBottom: 6 }}>{t('manage.agents.contextHint')}</div>
-                  <textarea
-                    className="atext"
-                    value={draft.agentContext}
-                    onChange={(e) => set({ agentContext: e.target.value })}
-                    rows={6}
-                    placeholder={t('manage.agents.contextPlaceholder')}
-                    style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }}
-                  />
+                  <div className="md-hint" style={{ marginBottom: 8 }}>
+                    {t('manage.agents.briefHint', {
+                      defaultValue:
+                        'Fill in only what the app cannot know. Reviewer, verification mode, stakes and language are added automatically.',
+                    })}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {BRIEF_FIELDS.map((field) => (
+                      <div key={field}>
+                        <div className="md-hint" style={{ marginBottom: 4, fontWeight: 600 }}>
+                          {t(`manage.agents.brief.${field}`, {
+                            defaultValue: BRIEF_FIELD_FALLBACK[field].label,
+                          })}
+                        </div>
+                        <textarea
+                          className="atext"
+                          value={draft.agentBrief[field]}
+                          onChange={(e) =>
+                            set({ agentBrief: { ...draft.agentBrief, [field]: e.target.value } })
+                          }
+                          rows={field === 'role' ? 3 : 2}
+                          placeholder={t(`manage.agents.brief.${field}Placeholder`, {
+                            defaultValue: BRIEF_FIELD_FALLBACK[field].placeholder,
+                          })}
+                          style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }}
+                        />
+                      </div>
+                    ))}
+                  </div>
                   {agentInvalid && (
                     <div className="md-warn" style={{ marginTop: 6 }}>
                       <Icon name="warn" size={13} /> {t('manage.agents.contextRequired')}
                     </div>
                   )}
                 </div>
+
+                {/* Notes libres : l'ancien pavé, conservé et replié. Rendu EN
+                    DERNIER dans le brief composé, pour qu'il n'y ait jamais
+                    d'ambiguïté de préséance avec les champs structurés. */}
+                <details>
+                  <summary style={{ cursor: 'pointer' }} className="md-label">
+                    {t('manage.agents.freeNotes', { defaultValue: 'Free notes (optional)' })}
+                  </summary>
+                  <div className="md-hint" style={{ margin: '6px 0' }}>
+                    {t('manage.agents.freeNotesHint', {
+                      defaultValue:
+                        'Anything that does not fit the fields above. Rendered last in the composed brief.',
+                    })}
+                  </div>
+                  <textarea
+                    className="atext"
+                    value={draft.agentContext}
+                    onChange={(e) => set({ agentContext: e.target.value })}
+                    rows={5}
+                    placeholder={t('manage.agents.contextPlaceholder')}
+                    style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }}
+                  />
+                </details>
                 <div>
                   <div className="md-label">{t('manage.agents.guardrails')}</div>
                   <div className="md-hint" style={{ marginBottom: 6 }}>{t('manage.agents.guardrailsHint')}</div>
@@ -1089,6 +1390,71 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
                     <option value="enforce">{t('manage.agents.verifModeEnforce', { defaultValue: 'enforce — block + agent-validator auto-approve' })}</option>
                   </select>
                 </div>
+
+                <div>
+                  <div className="md-label">
+                    {t('manage.agents.ciRepos', { defaultValue: 'Allowed CI repositories' })}
+                  </div>
+                  <div className="md-hint" style={{ marginBottom: 6 }}>
+                    {t('manage.agents.ciReposHint', {
+                      defaultValue:
+                        "One repository per line (e.g. owner/repo). A ci_signed proof is only accepted when its signed CI build comes from one of these repositories — a green build from an unrelated repository can no longer pass a deliverable. Leave empty to keep the historical org-wide matching.",
+                    })}
+                  </div>
+                  <textarea
+                    className="atext"
+                    value={draft.ciReposText}
+                    onChange={(e) => set({ ciReposText: e.target.value })}
+                    rows={2}
+                    placeholder="owner/repo"
+                    style={{ width: '100%', fontFamily: 'monospace', fontSize: 12.5 }}
+                  />
+                </div>
+
+                {/* « Ce que voient les agents » — rendu par le SERVEUR, avec le
+                    même code que le work-context. Chargé à l'ouverture, jamais
+                    couplé au draft (sinon on afficherait du non-enregistré). */}
+                <details
+                  onToggle={(e) => {
+                    const open = (e.currentTarget as HTMLDetailsElement).open;
+                    setPreviewOpen(open);
+                    if (!open || preview || previewLoading) return;
+                    setPreviewLoading(true);
+                    setPreviewError(null);
+                    api
+                      .getAgentContextPreview(project.id)
+                      .then(setPreview)
+                      .catch((err: Error) => setPreviewError(err.message))
+                      .finally(() => setPreviewLoading(false));
+                  }}
+                >
+                  <summary style={{ cursor: 'pointer' }} className="md-label">
+                    <Icon name="eye" size={13} />{' '}
+                    {t('manage.agents.preview', { defaultValue: 'What agents actually see' })}
+                  </summary>
+                  <div className="md-hint" style={{ margin: '6px 0' }}>
+                    {t('manage.agents.previewHint', {
+                      defaultValue:
+                        'The exact context pack served to agents on this project — composed by the server.',
+                    })}
+                  </div>
+                  {previewOpen && hasChange && (
+                    <div className="md-warn" style={{ marginBottom: 8 }}>
+                      <Icon name="warn" size={13} />{' '}
+                      {t('manage.agents.previewStale', {
+                        defaultValue:
+                          'Showing the SAVED state — your unsaved edits are not reflected here.',
+                      })}
+                    </div>
+                  )}
+                  {previewLoading && (
+                    <div className="md-hint">{t('common.loading', { defaultValue: 'Loading…' })}</div>
+                  )}
+                  {previewError && <div className="md-warn">{previewError}</div>}
+                  {preview && !previewLoading && (
+                    <AgentContextPreviewPanel preview={preview} t={t} />
+                  )}
+                </details>
               </div>
             )}
           </div>

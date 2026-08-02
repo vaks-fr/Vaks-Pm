@@ -7,6 +7,8 @@ import { TaskTransitionService } from './task-transition.service';
 import { AgentsModule } from '../agents/agents.module';
 import { AgentDispatchService } from '../agents/agent-dispatch.service';
 import { AgentDispatchController } from '../agents/agent-dispatch.controller';
+import { AgentExecutionLeaseCronService } from './agent-execution-lease-cron.service';
+import { SubtreeVerificationService } from '../deliverables/subtree-verification.service';
 
 /**
  * Le dispatch « pull » des agents (chantier 4, `AgentDispatch*`) vit ici plutôt
@@ -16,8 +18,17 @@ import { AgentDispatchController } from '../agents/agent-dispatch.controller';
  */
 @Module({
   imports: [SkillsModule, AgentsModule],
-  providers: [TasksService, TaskTransitionService, AgentDispatchService],
+  providers: [
+    TasksService,
+    TaskTransitionService,
+    AgentDispatchService,
+    AgentExecutionLeaseCronService,
+    // Fourni ICI et pas dans DeliverablesModule : celui-ci importe déjà
+    // TasksModule, l'inverse ferait un cycle. Le service est autonome (Prisma +
+    // settings + logique pure de vérification).
+    SubtreeVerificationService,
+  ],
   controllers: [TasksController, MeTasksController, AgentDispatchController],
-  exports: [TasksService],
+  exports: [TasksService, SubtreeVerificationService],
 })
 export class TasksModule {}

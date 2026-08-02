@@ -38,6 +38,7 @@ import { DependencyType } from '@vaks-pm/shared';
 import { api } from '../api/client';
 import { useAuth, labelForLevel } from '../auth/AuthContext';
 import { useFormat } from '../lib/format';
+import { safeUrl } from '../lib/url';
 import SkillPicker from './SkillPicker';
 import {
   apiPatchTask,
@@ -595,7 +596,7 @@ function DependencyWarning({
   conflicts,
   monday,
 }: {
-  conflicts: { predTitle: string; predDue: number; minStart: number; lagDays: number }[];
+  conflicts: { predTitle: string; predDue: number; minStart: number; lagDays: number; anchorIsStart?: boolean }[];
   monday: Date;
 }) {
   if (conflicts.length === 0) return null;
@@ -625,7 +626,7 @@ function DependencyWarning({
       </div>
       {conflicts.map((c, i) => (
         <div key={i} style={{ marginTop: 2, color: 'var(--text-1)' }}>
-          <strong>{c.predTitle}</strong> {t('dep.endsOn')}{' '}
+          <strong>{c.predTitle}</strong> {t(c.anchorIsStart ? 'dep.startsOn' : 'dep.endsOn')}{' '}
           <span className="mono">{fmtOffset(c.predDue)}</span>
           {c.lagDays !== 0 && (
             <span className="mono" style={{ color: 'var(--text-3)' }}>
@@ -643,7 +644,7 @@ function DependencyGapWarning({
   gaps,
   monday,
 }: {
-  gaps: { predTitle: string; predDue: number; minStart: number; lagDays: number; gapDays: number }[];
+  gaps: { predTitle: string; predDue: number; minStart: number; lagDays: number; gapDays: number; anchorIsStart?: boolean }[];
   monday: Date;
 }) {
   if (gaps.length === 0) return null;
@@ -673,7 +674,7 @@ function DependencyGapWarning({
       </div>
       {gaps.map((g, i) => (
         <div key={i} style={{ marginTop: 2, color: 'var(--text-1)' }}>
-          {t('dep.startsAfter', { days: g.gapDays, title: g.predTitle })}
+          {t(g.anchorIsStart ? 'dep.startsAfterStart' : 'dep.startsAfter', { days: g.gapDays, title: g.predTitle })}
           {' '}<span className="mono" style={{ color: 'var(--text-3)' }}>({fmtOffset(g.predDue)})</span>.
         </div>
       ))}
@@ -1254,43 +1255,60 @@ export function TaskDetail({
     if (onMoveColumn) onMoveColumn(c.id, { completePredecessors });
   }
 
-  /** Analyse FS de la start date :
-   *   - violation (rouge) : start < pred.due + lag → contrainte non respectée
-   *   - gap (jaune)       : start > pred.due + lag → démarrage en retard
+  /** Analyse des 4 types de dépendance sur la start date (Lot 1c.3, généralise
+   *  l'ancien calcul FS-only) :
+   *   - violation (rouge) : start < plancher calculé → contrainte non respectée
+   *   - gap (jaune)       : start > plancher calculé → démarrage en retard
+   *  FS/SS contraignent directement le start ; FF/SF contraignent la due date
+   *  de CETTE tâche, ramenée à un plancher de start via sa propre durée
+   *  (approximation en jours calendaires, cohérente avec le reste de l'UI —
+   *  pas le CPM jours-ouvrés exact du backend). `predDue` porte l'ancre du
+   *  prédécesseur pertinente pour ce type (sa due date pour FS/FF, son start
+   *  pour SS/SF — `anchorIsStart` distingue les deux pour l'affichage).
    *  Calculé en une passe pour éviter de re-parcourir les deps deux fois. */
   const { startDateConflicts, startDateGaps } = useMemo(() => {
-    const conflicts: { predTitle: string; predDue: number; minStart: number; lagDays: number }[] = [];
-    const gaps: { predTitle: string; predDue: number; minStart: number; lagDays: number; gapDays: number }[] = [];
+    const conflicts: { predTitle: string; predDue: number; minStart: number; lagDays: number; anchorIsStart: boolean }[] = [];
+    const gaps: { predTitle: string; predDue: number; minStart: number; lagDays: number; gapDays: number; anchorIsStart: boolean }[] = [];
     if (task.start == null) return { startDateConflicts: conflicts, startDateGaps: gaps };
+    const myDuration = task.due != null ? Math.max(0, task.due - task.start) : 0;
     for (const d of taskDeps) {
       if (d.successorId !== task.id) continue;
-      if (d.type !== DependencyType.FS) continue;
       const pred = allTasks.find((x) => x.id === d.predecessorId);
-      if (!pred || pred.due == null) continue;
+      if (!pred) continue;
       const lag = d.lagDays ?? 0;
-      const minStart = pred.due + lag;
+      const anchorIsStart = d.type === DependencyType.SS || d.type === DependencyType.SF;
+      const predAnchor = anchorIsStart ? pred.start : pred.due;
+      if (predAnchor == null) continue;
+      const constrainsEnd = d.type === DependencyType.FF || d.type === DependencyType.SF;
+      const rawConstraint = predAnchor + lag;
+      const minStart = constrainsEnd ? rawConstraint - myDuration : rawConstraint;
       if (task.start < minStart) {
-        conflicts.push({ predTitle: pred.title, predDue: pred.due, minStart, lagDays: lag });
+        conflicts.push({ predTitle: pred.title, predDue: predAnchor, minStart, lagDays: lag, anchorIsStart });
       } else if (task.start > minStart) {
         gaps.push({
-          predTitle: pred.title, predDue: pred.due, minStart, lagDays: lag,
-          gapDays: task.start - minStart,
+          predTitle: pred.title, predDue: predAnchor, minStart, lagDays: lag,
+          gapDays: task.start - minStart, anchorIsStart,
         });
       }
     }
     return { startDateConflicts: conflicts, startDateGaps: gaps };
-  }, [task.id, task.start, taskDeps, allTasks]);
+  }, [task.id, task.start, task.due, taskDeps, allTasks]);
 
   /**
    * Quand la due date de cette tâche change, calcule la cascade complète des
    * décalages le long de la chaîne de dépendances FS.
    *
-   *  - On parcourt le graphe FS en ordre topologique (prédécesseurs avant
-   *    successeurs), en injectant la NOUVELLE due pour la tâche courante.
-   *  - Pour chaque tâche, contrainte = max sur ses prédécesseurs FS de
-   *    (due_effective + lag). Si elle démarre trop tôt (ou n'a pas de start),
-   *    on la décale à cette contrainte ; sinon (gap volontaire) on la laisse —
-   *    et la cascade s'arrête sur cette branche (sa due ne bouge pas).
+   *  - On parcourt le graphe de dépendances (4 types, Lot 1c.3 — avant : FS
+   *    seul) en ordre topologique (prédécesseurs avant successeurs), en
+   *    injectant la NOUVELLE due pour la tâche courante.
+   *  - Pour chaque tâche, contrainte de START = max sur ses prédécesseurs de
+   *    l'ancre pertinente + lag (due effective pour FS, start effectif pour
+   *    SS ; pour FF/SF la contrainte porte sur la DUE de cette tâche,
+   *    ramenée à un plancher de start via sa propre durée — approximation
+   *    calendaire, cohérente avec le reste de l'UI). Si elle démarre trop tôt
+   *    (ou n'a pas de start), on la décale à cette contrainte ; sinon (gap
+   *    volontaire) on la laisse — et la cascade s'arrête sur cette branche
+   *    (sa due ne bouge pas).
    *  - Une tâche décalée CONSERVE sa durée : la due suit le start du même
    *    delta, ce qui propage le décalage à ses propres successeurs.
    *
@@ -1307,22 +1325,20 @@ export function TaskDetail({
     }[] = [];
     if (newDue == null) return out;
 
-    // Graphe FS limité aux tâches connues.
+    // Graphe limité aux tâches connues, TOUS types de dépendance (avant :
+    // FS seul — SS/FF/SF ne débloquaient/décalaient jamais rien).
     const known = new Set(allTasks.map((t) => t.id));
-    const fs = taskDeps.filter(
-      (d) =>
-        d.type === DependencyType.FS &&
-        known.has(d.predecessorId) &&
-        known.has(d.successorId),
+    const deps = taskDeps.filter(
+      (d) => known.has(d.predecessorId) && known.has(d.successorId),
     );
-    const predsOf = new Map<string, { pred: string; lag: number }[]>();
+    const predsOf = new Map<string, { pred: string; lag: number; type: DependencyType }[]>();
     const succsOf = new Map<string, string[]>();
     const indeg = new Map<string, number>();
     for (const id of known) indeg.set(id, 0);
-    for (const d of fs) {
+    for (const d of deps) {
       predsOf.set(d.successorId, [
         ...(predsOf.get(d.successorId) ?? []),
-        { pred: d.predecessorId, lag: d.lagDays ?? 0 },
+        { pred: d.predecessorId, lag: d.lagDays ?? 0, type: d.type },
       ]);
       succsOf.set(d.predecessorId, [...(succsOf.get(d.predecessorId) ?? []), d.successorId]);
       indeg.set(d.successorId, (indeg.get(d.successorId) ?? 0) + 1);
@@ -1343,27 +1359,42 @@ export function TaskDetail({
       }
     }
 
-    // Dues effectives propagées le long de la chaîne.
+    // Dues/starts effectifs propagés le long de la chaîne (SS/SF ont besoin du
+    // start effectif du prédécesseur, pas seulement de sa due).
     const effDue = new Map<string, number | null>();
-    for (const t of allTasks) effDue.set(t.id, t.due ?? null);
+    const effStart = new Map<string, number | null>();
+    for (const t of allTasks) {
+      effDue.set(t.id, t.due ?? null);
+      effStart.set(t.id, t.start ?? null);
+    }
     effDue.set(task.id, newDue);
+    const anchorFor = (predId: string, type: DependencyType): number | null =>
+      type === DependencyType.SS || type === DependencyType.SF
+        ? effStart.get(predId) ?? null
+        : effDue.get(predId) ?? null;
 
     for (const id of order) {
       if (id === task.id) continue; // sa due est fixée par l'utilisateur
       const preds = predsOf.get(id) ?? [];
       if (!preds.length) continue;
+      const t = allTasks.find((x) => x.id === id);
+      if (!t) continue;
+      // Durée courante de CETTE tâche (jours calendaires) — sert à convertir
+      // une contrainte FF/SF (posée sur sa due) en plancher de start.
+      const myDuration = t.start != null && t.due != null ? Math.max(0, t.due - t.start) : 0;
       let constraint: number | null = null;
-      for (const { pred, lag } of preds) {
-        const pd = effDue.get(pred) ?? null;
-        if (pd == null) continue;
-        const c = pd + lag;
+      for (const { pred, lag, type } of preds) {
+        const anchor = anchorFor(pred, type);
+        if (anchor == null) continue;
+        const raw = anchor + lag;
+        const constrainsEnd = type === DependencyType.FF || type === DependencyType.SF;
+        const c = constrainsEnd ? raw - myDuration : raw;
         if (constraint == null || c > constraint) constraint = c;
       }
       if (constraint == null) continue;
-      const t = allTasks.find((x) => x.id === id)!;
       const oldStart = t.start ?? null;
       // Gap volontaire : la tâche démarre déjà après la contrainte → on ne
-      // touche pas, et la cascade s'arrête ici (sa due reste inchangée).
+      // touche pas, et la cascade s'arrête ici (sa due ne bouge pas).
       if (oldStart != null && oldStart >= constraint) continue;
       const newStart = constraint;
       // Conserve la durée : décale la due du même delta (si start+due connus).
@@ -1371,6 +1402,7 @@ export function TaskDetail({
       const computedNewDue =
         oldStart != null && oldDue != null ? oldDue + (newStart - oldStart) : oldDue;
       effDue.set(id, computedNewDue);
+      effStart.set(id, newStart);
       out.push({ id, title: t.title, oldStart, newStart, oldDue, newDue: computedNewDue });
     }
     return out;
@@ -3705,8 +3737,8 @@ function DeliverablesSection({
               <div className="row gap2" style={{ alignItems: 'center' }}>
                 <Icon name="paperclip" size={15} />
                 <span className="grow truncate" style={{ fontWeight: 600 }}>
-                  {d.url ? (
-                    <a href={d.url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>
+                  {safeUrl(d.url) ? (
+                    <a href={safeUrl(d.url)} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>
                       {d.title}
                     </a>
                   ) : (
@@ -3890,7 +3922,11 @@ function GroupChildrenSection({ task, allTasks }: { task: Task; allTasks: Task[]
    ============================================================ */
 /** Forme minimale d'une tâche pour la résolution des libellés/pickers du
  *  panneau Planning (titres de prédécesseurs/successeurs, sélecteur parent). */
-type PlanTask = Pick<Task, 'id' | 'title' | 'isGroup' | 'parentTaskId'>;
+type PlanTask = Pick<Task, 'id' | 'title' | 'isGroup' | 'parentTaskId'> & {
+  /** Statut, pour afficher l'avancement du découpage. Absent des tâches venant
+   *  du board courant si la carte ne le porte pas — d'où l'optionalité. */
+  status?: string;
+};
 
 function PlanningSection({
   task,
@@ -3917,6 +3953,10 @@ function PlanningSection({
   const [tick, setTick] = useState(0);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
+  // Type du lien choisi dans chaque picker « Ajouter » (Lot 1c.3, défaut FS —
+  // rétro-compat avec le comportement historique).
+  const [predLinkType, setPredLinkType] = useState<DependencyType>(DependencyType.FS);
+  const [succLinkType, setSuccLinkType] = useState<DependencyType>(DependencyType.FS);
 
   // Charge les dépendances du PROJET DE LA TÂCHE (pas du premier projet actif —
   // sinon les prédécesseurs d'une tâche hors de ce projet n'apparaissent jamais
@@ -3989,7 +4029,10 @@ function PlanningSection({
   const incoming = deps.filter((d) => d.successorId === task.id);
   const outgoing = deps.filter((d) => d.predecessorId === task.id);
 
-  // Parent picker: exclude self + descendants and require parent to be a group.
+  // Parent picker : on exclut soi-même et ses descendants (anti-cycle). Depuis
+  // la séparation affichage/découpage, le parent n'a plus à être un « groupe » —
+  // une tâche ordinaire peut porter un découpage sans devenir un conteneur de
+  // board (elle resterait alors invisible dans sa colonne de statut).
   const forbiddenParents = useMemo(() => {
     const set = new Set<string>([task.id]);
     let added = true;
@@ -4005,9 +4048,11 @@ function PlanningSection({
     return set;
   }, [task.id, tasks]);
 
-  const candidateParents = tasks.filter(
-    (t) => !forbiddenParents.has(t.id) && t.isGroup === true,
-  );
+  // Les groupes d'abord (le cas le plus courant du rattachement manuel), puis
+  // les tâches ordinaires — l'ordre guide sans interdire.
+  const candidateParents = tasks
+    .filter((t) => !forbiddenParents.has(t.id))
+    .sort((a, b) => Number(!!b.isGroup) - Number(!!a.isGroup));
   const parentTask = task.parentTaskId
     ? tasks.find((t) => t.id === task.parentTaskId)
     : null;
@@ -4037,28 +4082,34 @@ function PlanningSection({
     return true;
   });
 
-  const hasChildren = useMemo(
-    () => tasks.some((t) => t.parentTaskId === task.id),
+  const childTasks = useMemo(
+    () => tasks.filter((t) => t.parentTaskId === task.id),
     [tasks, task.id],
   );
+  const hasChildren = childTasks.length > 0;
 
-  async function addPredecessor(predId: string) {
+  async function addPredecessor(predId: string, type: DependencyType = predLinkType) {
     setAdding(true);
     try {
       await api.createDependency({
         predecessorId: predId,
         successorId: task.id,
-        type: DependencyType.FS,
+        type,
       });
       // Aligne automatiquement la date de début sur la due date du
       // prédécesseur le plus tardif (max sur tous les prédécesseurs FS,
-      // lag inclus). Évite de créer d'emblée un conflit de contrainte
+      // lag inclus) — UNIQUEMENT pour les contraintes FS, les seules qui
+      // contraignent directement le start via due+lag (SS/FF/SF sont posées
+      // consciemment par l'utilisateur, pas d'auto-ajustement pour elles —
+      // Lot 1c.3). Évite de créer d'emblée un conflit de contrainte
       // (start < pred.due + lag). On ne tire PAS la date en arrière si
       // l'utilisateur a déjà posé un début plus tardif (gap volontaire),
       // et on ignore les prédécesseurs sans due date.
       const candidates = [
-        { id: predId, lag: 0 }, // la dépendance qu'on vient de créer (lag 0)
-        ...incoming.map((d) => ({ id: d.predecessorId, lag: d.lagDays ?? 0 })),
+        ...(type === DependencyType.FS ? [{ id: predId, lag: 0 }] : []), // dépendance qu'on vient de créer (lag 0)
+        ...incoming
+          .filter((d) => d.type === DependencyType.FS)
+          .map((d) => ({ id: d.predecessorId, lag: d.lagDays ?? 0 })),
       ]
         .map(({ id, lag }) => {
           const p = allTasks.find((t) => t.id === id);
@@ -4088,14 +4139,24 @@ function PlanningSection({
     }
   }
 
-  // Ajoute un successeur : cette tâche devient le prédécesseur FS de `succId`.
-  async function addSuccessor(succId: string) {
+  async function changeDepType(id: string, type: DependencyType) {
+    try {
+      await api.updateDependency(id, { type });
+      setTick((n) => n + 1);
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  }
+
+  // Ajoute un successeur : cette tâche devient le prédécesseur de `succId`
+  // (type choisi dans le picker, défaut FS — Lot 1c.3).
+  async function addSuccessor(succId: string, type: DependencyType = succLinkType) {
     setAdding(true);
     try {
       await api.createDependency({
         predecessorId: task.id,
         successorId: succId,
-        type: DependencyType.FS,
+        type,
       });
       setTick((n) => n + 1);
     } catch (e) {
@@ -4105,8 +4166,10 @@ function PlanningSection({
     }
   }
 
-  // Toggling group off requires the task to have no children (server enforces).
-  const groupToggleDisabled = task.isGroup && hasChildren;
+  // Dégrouper une tâche qui a des enfants est désormais légitime : elle redevient
+  // une tâche ordinaire portant un découpage (le serveur ne le refuse plus).
+  // Le drapeau `isGroup` ne pilote plus que l'affichage board.
+  const groupToggleDisabled = false;
 
   return (
     <div className="td-section">
@@ -4156,9 +4219,15 @@ function PlanningSection({
         </div>
       )}
 
-      {/* Parent group */}
+      {/* Rattachement : « Groupe parent » quand le parent EST un conteneur de
+          board, « Tâche parente » quand c'est une tâche ordinaire qui porte un
+          découpage. Le libellé doit dire la vérité de ce qu'on voit. */}
       <div className="td-prop" style={{ marginBottom: 8 }}>
-        <span className="td-plabel">{t('planning.parentGroup')}</span>
+        <span className="td-plabel">
+          {parentTask && !parentTask.isGroup
+            ? t('planning.parentTask', { defaultValue: 'Tâche parente' })
+            : t('planning.parentGroup')}
+        </span>
         <Dropdown
           width={260}
           trigger={
@@ -4207,7 +4276,7 @@ function PlanningSection({
               className="dd-item"
               onClick={() => onUpdate({ parentTaskId: t.id })}
             >
-              <Icon name="branch" size={13} />
+              <Icon name={t.isGroup ? 'branch' : 'list'} size={13} />
               <span className="grow truncate" style={{ textAlign: 'left' }}>
                 {t.title}
               </span>
@@ -4218,6 +4287,36 @@ function PlanningSection({
           ))}
         </Dropdown>
       </div>
+
+      {/* Découpage : les tâches enfants. Rendu dès qu'il y en a, que la tâche
+          soit un « groupe » de board ou une tâche ordinaire — c'est le pendant
+          descendant du rattachement ci-dessus, et sans lui une tâche découpée ne
+          montre nulle part qu'elle l'est. (À ne pas confondre avec la checklist,
+          appelée « sous-tâches » dans l'onglet Activité.) */}
+      {childTasks.length > 0 && (
+        <div className="td-prop td-prop-col" style={{ marginBottom: 8, display: 'block' }}>
+          <span className="td-plabel">
+            {t('planning.breakdown', { defaultValue: 'Découpage' })}{' '}
+            <span className="mono td-stcount">
+              {childTasks.filter((c) => c.status === 'DONE').length}/{childTasks.length}
+            </span>
+          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
+            {childTasks.map((c) => (
+              <div
+                key={c.id}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: 'var(--text-2)' }}
+              >
+                <Icon name="list" size={12} style={{ color: 'var(--text-3)', flexShrink: 0 }} />
+                <span className="truncate" style={{ flex: 1 }}>{c.title}</span>
+                <span style={{ color: 'var(--text-3)', fontSize: 11.5, whiteSpace: 'nowrap' }}>
+                  {c.status}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Milestone */}
       <div className="td-prop" style={{ marginBottom: 8 }}>
@@ -4278,6 +4377,7 @@ function PlanningSection({
               type={d.type}
               lagDays={d.lagDays}
               onRemove={() => removeDep(d.id)}
+              onChangeType={(nt) => changeDepType(d.id, nt)}
             />
           );
         })}
@@ -4292,6 +4392,7 @@ function PlanningSection({
             </button>
           }
         >
+          <DepTypePicker value={predLinkType} onChange={setPredLinkType} />
           {candidatePredecessors.length === 0 && (
             <div className="dd-item td-empty">{t('planning.noEligibleTask')}</div>
           )}
@@ -4343,6 +4444,7 @@ function PlanningSection({
               type={d.type}
               lagDays={d.lagDays}
               onRemove={() => removeDep(d.id)}
+              onChangeType={(nt) => changeDepType(d.id, nt)}
             />
           );
         })}
@@ -4357,6 +4459,7 @@ function PlanningSection({
             </button>
           }
         >
+          <DepTypePicker value={succLinkType} onChange={setSuccLinkType} />
           {candidateSuccessors.length === 0 && (
             <div className="dd-item td-empty">{t('planning.noEligibleTask')}</div>
           )}
@@ -4426,6 +4529,45 @@ function PlanSub({
   );
 }
 
+/** Petit sélecteur de type de dépendance (4 options + aide), utilisé au
+ *  moment de créer un lien (Lot 1c.3). Empêche le clic d'ouvrir/refermer le
+ *  `Dropdown` englobant (qui ferme sur tout clic dans son menu). */
+function DepTypePicker({
+  value,
+  onChange,
+}: {
+  value: DependencyType;
+  onChange: (t: DependencyType) => void;
+}) {
+  const { t } = useTranslation('tasks');
+  return (
+    <div
+      className="dd-item"
+      style={{ cursor: 'default', gap: 8 }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}>
+        {t('common:depType.pickerLabel')}
+      </span>
+      <select
+        className="td-select-inline"
+        value={value}
+        title={t(`common:depType.${value}.help`)}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => onChange(e.target.value as DependencyType)}
+        style={{ marginLeft: 'auto' }}
+      >
+        {(['FS', 'SS', 'FF', 'SF'] as const).map((dt) => (
+          <option key={dt} value={dt}>
+            {t(`common:depType.${dt}.label`)}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 function DepRow({
   icon,
   title,
@@ -4433,6 +4575,7 @@ function DepRow({
   type,
   lagDays,
   onRemove,
+  onChangeType,
   muted,
 }: {
   icon: string;
@@ -4441,6 +4584,9 @@ function DepRow({
   type: string;
   lagDays: number;
   onRemove?: () => void;
+  /** Change le type d'un lien EXISTANT (Lot 1c.3). Absent = affichage figé
+   *  (compat. avec d'éventuels appelants read-only futurs). */
+  onChangeType?: (type: DependencyType) => void;
   muted?: boolean;
 }) {
   const { t } = useTranslation('tasks');
@@ -4474,13 +4620,36 @@ function DepRow({
       >
         {title}
       </span>
-      <span
-        className="mono"
-        style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}
-      >
-        {type}
-        {lagDays ? ` +${lagDays}d` : ''}
-      </span>
+      {onChangeType ? (
+        <span className="row gap1" style={{ flexShrink: 0, alignItems: 'center' }}>
+          <select
+            className="mono td-select-inline"
+            value={type}
+            title={t(`common:depType.${type}.help`)}
+            onChange={(e) => onChangeType(e.target.value as DependencyType)}
+            style={{ fontSize: 11, color: 'var(--text-3)' }}
+          >
+            {(['FS', 'SS', 'FF', 'SF'] as const).map((dt) => (
+              <option key={dt} value={dt}>
+                {dt}
+              </option>
+            ))}
+          </select>
+          {lagDays !== 0 && (
+            <span className="mono" style={{ fontSize: 11, color: 'var(--text-3)' }}>
+              {`+${lagDays}d`}
+            </span>
+          )}
+        </span>
+      ) : (
+        <span
+          className="mono"
+          style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0 }}
+        >
+          {type}
+          {lagDays ? ` +${lagDays}d` : ''}
+        </span>
+      )}
       {onRemove && (
         <button
           className="icon-btn"

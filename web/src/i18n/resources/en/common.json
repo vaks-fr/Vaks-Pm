@@ -66,6 +66,11 @@
   "shell.demoResetTitle": "Reset the demo to the initial dataset",
   "shell.demoResetConfirm": "Reset the demo? All your changes will be lost.",
   "shell.demoReset": "Reset",
+  "shell.demoWelcomeEyebrow": "Demo",
+  "shell.demoWelcomeTitle": "You're exploring a demo that runs in your browser",
+  "shell.demoWelcomeBody": "This version runs entirely in your browser to give you a sense of the interface and what VAKS PM can do. It isn't connected to a real instance and may not reflect every latest feature. Some behavior may look off or incomplete — feel free to ask us for a demo to go over the details.",
+  "shell.demoWelcomeCta": "Request a demo",
+  "shell.demoWelcomeDismiss": "Got it",
   "shell.everyone": "Everyone",
   "shell.taskCount": "{{count}} tasks",
   "shell.createFirstProject": "Create your first project",
@@ -207,5 +212,15 @@
   "noSeat.title": "No license seat",
   "noSeat.body": "Your account doesn't have a license seat yet, so you can't access the app. Please ask an administrator to assign you a seat.",
   "noSeat.signedInAs": "Signed in as {{email}}",
-  "nav.agents": "AI Agents"
+  "nav.agents": "AI Agents",
+  "depType.pickerLabel": "Dependency type",
+  "depType.changeLabel": "Change the dependency type",
+  "depType.FS.label": "Finish → Start",
+  "depType.FS.help": "The successor can only start once the predecessor is finished.",
+  "depType.SS.label": "Start → Start",
+  "depType.SS.help": "The successor can only start once the predecessor has started (they can run in parallel).",
+  "depType.FF.label": "Finish → Finish",
+  "depType.FF.help": "The successor can only finish once the predecessor is finished — the two finish together.",
+  "depType.SF.label": "Start → Finish",
+  "depType.SF.help": "The successor can only finish once the predecessor has started — rare, used to cap a handover."
 }

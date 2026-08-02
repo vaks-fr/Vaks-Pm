@@ -63,12 +63,57 @@ const ACTION_COLORS: Record<AgentPolicyAction, string> = {
  * backpressure (plafond de la file de revue). Persisté dans
  * `OrgSetting agents.policies` / `agents.backpressure.maxPendingReviews`.
  */
+/** Les 4 champs du brief agent, dans l'ordre de rendu du brief composé. */
+const BRIEF_FIELDS = ['role', 'outputConventions', 'deliveryTarget', 'outOfScope'] as const;
+type BriefField = (typeof BRIEF_FIELDS)[number];
+
+const BRIEF_FIELD_LABEL: Record<BriefField, string> = {
+  role: 'Role & mission',
+  outputConventions: 'Output conventions',
+  deliveryTarget: 'Where deliverables go',
+  outOfScope: 'Out of scope',
+};
+
+/**
+ * Exemples affichés en placeholder. Un champ de brief vide est la première cause
+ * de livrable à côté de la plaque : sans modèle sous les yeux, on écrit « fais
+ * de la doc » et l'agent invente le reste. Ces exemples montrent le **niveau de
+ * précision attendu** — ils ne sont jamais enregistrés, seulement suggérés.
+ */
+const BRIEF_FIELD_PLACEHOLDER: Record<BriefField, string> = {
+  role:
+    'Ex. : tu rédiges la documentation technique interne. Tu pars de sources existantes ' +
+    '(tickets, notes de réunion, code) et tu ne fais jamais de recherche externe.',
+  outputConventions:
+    'Ex. : français, markdown, titres en phrase (pas de majuscule à chaque mot). ' +
+    'Cite systématiquement tes sources en fin de document. Pas de tableau de plus de 5 colonnes.',
+  deliveryTarget:
+    "Ex. : dépose le document dans le livrable de la tâche (champ « contenu »). " +
+    "Ne crée pas de page SharePoint et n'envoie pas d'e-mail.",
+  outOfScope:
+    "Ex. : ne touche à aucune configuration de production. N'invente pas de chiffre : " +
+    "si une donnée manque, pose la question en commentaire et attends la réponse.",
+};
+
 export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
   const { t } = useTranslation('admin');
   const [rules, setRules] = useState<AgentPolicyRule[]>([]);
   const [backpressure, setBackpressure] = useState(5);
   const [requireRun, setRequireRun] = useState(false);
   const [preauthorize, setPreauthorize] = useState(false);
+  const [leaseMinutes, setLeaseMinutes] = useState(30);
+  const [budgetBreaker, setBudgetBreaker] = useState(false);
+  /**
+   * Brief agent par défaut de l'organisation. Hérité CHAMP PAR CHAMP par les
+   * projets : les conventions maison (langue, format des livrables) se règlent
+   * une fois ici au lieu d'être retapées dans chaque projet.
+   */
+  const [briefDefault, setBriefDefault] = useState<Record<BriefField, string>>({
+    role: '',
+    outputConventions: '',
+    deliveryTarget: '',
+    outOfScope: '',
+  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -83,6 +128,17 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
         setBackpressure(Number.isInteger(bp) && bp >= 0 ? bp : 5);
         setRequireRun(s['agents.requireRunDeclaration'] === true);
         setPreauthorize(s['agents.preauthorizeBudget'] === true);
+        // Clé jamais posée = filet armé au défaut serveur (30 min), pas 0.
+        const lease = Number(s['agents.executionLeaseMinutes']);
+        setLeaseMinutes(Number.isInteger(lease) && lease >= 0 ? lease : 30);
+        setBudgetBreaker(s['agents.budgetBreaker'] === true);
+        const bd = (s['agents.briefDefault'] ?? null) as Record<string, unknown> | null;
+        setBriefDefault({
+          role: typeof bd?.role === 'string' ? bd.role : '',
+          outputConventions: typeof bd?.outputConventions === 'string' ? bd.outputConventions : '',
+          deliveryTarget: typeof bd?.deliveryTarget === 'string' ? bd.deliveryTarget : '',
+          outOfScope: typeof bd?.outOfScope === 'string' ? bd.outOfScope : '',
+        });
       } catch (e) {
         flash(t('agentPolicies.loadError', { defaultValue: 'Unable to load policies: {{message}}', message: (e as Error).message }));
       } finally {
@@ -119,6 +175,12 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
         'agents.backpressure.maxPendingReviews': backpressure,
         'agents.requireRunDeclaration': requireRun,
         'agents.preauthorizeBudget': preauthorize,
+        'agents.executionLeaseMinutes': leaseMinutes,
+        'agents.budgetBreaker': budgetBreaker,
+        // Tout-vide → `null` : pas de défaut org plutôt qu'un objet creux.
+        'agents.briefDefault': BRIEF_FIELDS.some((f) => briefDefault[f].trim())
+          ? Object.fromEntries(BRIEF_FIELDS.map((f) => [f, briefDefault[f].trim() || null]))
+          : null,
       } as Record<string, unknown>));
       const raw = s['agents.policies'];
       setRules(Array.isArray(raw) ? (raw as AgentPolicyRule[]) : []);
@@ -142,6 +204,42 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+      {/* Brief agent par défaut de l'organisation */}
+      <div style={cardStyle}>
+        <div style={{ fontWeight: 600, fontSize: 14 }}>
+          {t('agentPolicies.briefDefaultTitle', { defaultValue: 'Default agent brief' })}
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 3, lineHeight: 1.5, maxWidth: 620 }}>
+          {t('agentPolicies.briefDefaultDesc', {
+            defaultValue:
+              'House conventions inherited by every agent-enabled project, field by field: a project that fills a field wins, the others fall back here. Set your output language and format once instead of retyping them in each project.',
+          })}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12 }}>
+          {BRIEF_FIELDS.map((field) => (
+            <div key={field}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>
+                {t(`agentPolicies.briefDefault.${field}`, {
+                  defaultValue: BRIEF_FIELD_LABEL[field],
+                })}
+              </div>
+              <textarea
+                value={briefDefault[field]}
+                placeholder={t(`agentPolicies.briefPlaceholder.${field}`, {
+                  defaultValue: BRIEF_FIELD_PLACEHOLDER[field],
+                })}
+                onChange={(e) => {
+                  setBriefDefault((prev) => ({ ...prev, [field]: e.target.value }));
+                  setDirty(true);
+                }}
+                rows={2}
+                style={{ ...inputStyle, marginTop: 0, width: '100%', resize: 'vertical', fontFamily: 'inherit' }}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* Backpressure */}
       <div style={cardStyle}>
         <div style={{ fontWeight: 600, fontSize: 14 }}>{t('agentPolicies.backpressureTitle', { defaultValue: 'Review backpressure' })}</div>
@@ -220,6 +318,66 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
           <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
             {t('agentPolicies.preauthToggle', {
               defaultValue: 'Refuse claim when the estimated task cost would exceed the remaining budget',
+            })}
+          </span>
+        </label>
+      </div>
+
+      {/* Bail d'exécution (lot A) */}
+      <div style={cardStyle}>
+        <div style={{ fontWeight: 600, fontSize: 14 }}>
+          {t('agentPolicies.leaseTitle', { defaultValue: 'Execution lease' })}
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 3, lineHeight: 1.5, maxWidth: 620 }}>
+          {t('agentPolicies.leaseDesc', {
+            defaultValue:
+              'An agent that claims a task holds it only for this long, and extends the lease with a heartbeat while it works. If it dies (crash, lost connectivity) the lease lapses and the task is returned to the pool (back to TODO, retry count incremented) instead of staying blocked. Humans are never affected. 0 disables the mechanism.',
+          })}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
+          <input
+            type="number"
+            min={0}
+            max={1440}
+            step={5}
+            value={leaseMinutes}
+            onChange={(e) => {
+              const n = Math.max(0, Math.min(1440, Math.floor(Number(e.target.value) || 0)));
+              // Le serveur refuse 1–4 : on n'offre pas une valeur qui sera rejetée.
+              setLeaseMinutes(n > 0 && n < 5 ? 5 : n);
+              setDirty(true);
+            }}
+            style={{ ...inputStyle, width: 100, marginTop: 0 }}
+          />
+          <span style={{ fontSize: 12.5, color: 'var(--text-3)' }}>
+            {t('agentPolicies.leaseUnit', { defaultValue: 'minutes (0 = disabled, otherwise 5–1440)' })}
+          </span>
+        </div>
+      </div>
+
+      {/* Coupe-circuit budgétaire (lot A) */}
+      <div style={cardStyle}>
+        <div style={{ fontWeight: 600, fontSize: 14 }}>
+          {t('agentPolicies.breakerTitle', { defaultValue: 'Budget circuit breaker' })}
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 3, lineHeight: 1.5, maxWidth: 620 }}>
+          {t('agentPolicies.breakerDesc', {
+            defaultValue:
+              'Budget envelopes are checked at claim time, but a runaway agent burns them mid-task. Whenever an agent declares a run that consumes an envelope, its owner is alerted and the agent is told to stop. Enable this to also take the task away from it right there (claim and assignment removed, task waits for a human) — the work already produced stays attached to the task.',
+          })}
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={budgetBreaker}
+            onChange={(e) => {
+              setBudgetBreaker(e.target.checked);
+              setDirty(true);
+            }}
+          />
+          <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
+            {t('agentPolicies.breakerToggle', {
+              defaultValue: 'Take the task away from the agent when an envelope is exhausted',
             })}
           </span>
         </label>

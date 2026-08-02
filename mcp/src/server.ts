@@ -2,6 +2,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ApiClient } from './api-client.js';
 import { registerTools } from './tools.js';
 import { registerPrompts } from './prompts.js';
+import { registerResources } from './resources.js';
+import type { Lang } from './i18n.js';
 
 /**
  * Construit un `McpServer` **frais par requête** (mode stateless). Ses tools
@@ -10,12 +12,15 @@ import { registerPrompts } from './prompts.js';
  * du contexte `/me/mcp-context` : scopes d'écriture présents) pilote l'exposition
  * des tools d'écriture.
  */
-export function buildServer(api: ApiClient, allowWrite: boolean): McpServer {
+export function buildServer(api: ApiClient, allowWrite: boolean, lang: Lang = 'en'): McpServer {
   const server = new McpServer({
     name: 'vaks-pm',
     version: '0.1.0',
   });
   registerTools(server, api, allowWrite);
-  registerPrompts(server);
+  registerPrompts(server, api, allowWrite, lang);
+  // Resources = données passives attachées au contexte par l'utilisateur. En
+  // lecture seule par nature : aucun gating `allowWrite`.
+  registerResources(server, api);
   return server;
 }

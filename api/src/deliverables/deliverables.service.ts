@@ -26,6 +26,7 @@ import {
   VerificationMode,
   VERIFICATION_METHODS,
 } from './verification';
+import { normalizeStructuredOutputs, StructuredOutputsError } from './structured-outputs';
 
 /** Durée du bail de validation d'un agent validateur (§8.7). */
 const VALIDATION_LEASE_MS = 30 * 60 * 1000;
@@ -121,6 +122,7 @@ export class DeliverablesService {
         supersedesId: r.supersedesId,
         verification: r.verification,
         commitSha: r.commitSha,
+        structuredOutputs: r.structuredOutputs ?? null,
         author: { id: r.authorId, name: a?.name ?? 'Inconnu', isAgent: a?.kind === 'AGENT' },
         reviewedBy: r.reviewedById ? { id: r.reviewedById, name: rv?.name ?? 'Inconnu' } : null,
         reviewedAt: r.reviewedAt,
@@ -134,7 +136,7 @@ export class DeliverablesService {
   private async loadTask(orgId: string, taskId: string) {
     const task = await this.prisma.task.findFirst({
       where: { id: taskId, organizationId: orgId, deletedAt: null },
-      select: { id: true, status: true, projectId: true },
+      select: { id: true, status: true, projectId: true, project: { select: { ciRepos: true } } },
     });
     if (!task) throw new NotFoundException('Tâche introuvable');
     return task;
@@ -217,11 +219,12 @@ export class DeliverablesService {
   private async buildVerification(
     orgId: string,
     dto: CreateDeliverableDto,
+    allowedRepos: string[] = [],
   ): Promise<Prisma.InputJsonValue | typeof Prisma.JsonNull> {
     if (!dto.verification) return Prisma.JsonNull;
     const v: Record<string, unknown> = { ...dto.verification };
     if (dto.verification.method === 'ci_signed') {
-      const corr = await this.ci.corroborate(orgId, dto.commitSha);
+      const corr = await this.ci.corroborate(orgId, dto.commitSha, allowedRepos);
       v.status = corr.status; // vérité serveur, écrase le status déclaré
       v.ci = {
         corroborated: corr.corroborated,
@@ -229,6 +232,7 @@ export class DeliverablesService {
         conclusion: corr.conclusion,
         runUrl: corr.runUrl,
         reason: corr.reason,
+        repo: corr.repo,
       };
     }
     return v as Prisma.InputJsonValue;
@@ -294,7 +298,24 @@ export class DeliverablesService {
     // dérive du résultat CI signé reçu par webhook, matché sur `commitSha`. Aucun
     // résultat trouvé ⇒ `pending` (le webhook peut arriver plus tard, re-corroboré
     // au gate de revue).
-    const verificationToStore = await this.buildVerification(orgId, dto);
+    const verificationToStore = await this.buildVerification(
+      orgId,
+      dto,
+      (task as { project?: { ciRepos?: string[] } }).project?.ciRepos ?? [],
+    );
+
+    // Sorties structurées (lot B) : validées ICI, pas dans la ValidationPipe —
+    // le message doit dire à l'agent CE qu'il doit corriger, pas « objet
+    // invalide ». Un refus laisse le reste du livrable non écrit (rien de
+    // partiel n'est persisté).
+    let structuredOutputs: Prisma.InputJsonValue | undefined;
+    try {
+      const norm = normalizeStructuredOutputs(dto.structuredOutputs);
+      if (norm) structuredOutputs = norm as unknown as Prisma.InputJsonValue;
+    } catch (e) {
+      if (e instanceof StructuredOutputsError) throw new BadRequestException(e.message);
+      throw e;
+    }
 
     const created = await this.prisma.deliverable.create({
       data: {
@@ -307,6 +328,7 @@ export class DeliverablesService {
         justification: dto.justification?.trim() || null,
         verification: verificationToStore,
         commitSha: dto.commitSha?.trim() || null,
+        ...(structuredOutputs !== undefined ? { structuredOutputs } : {}),
         supersedesId: previous?.id ?? null,
         version: (previous?.version ?? 0) + 1,
       },
@@ -353,6 +375,19 @@ export class DeliverablesService {
     const approved = dto.decision === ReviewDecision.APPROVE;
     const reviewStatus = approved ? 'APPROVED' : 'CHANGES_REQUESTED';
 
+    // Transition de statut de la tâche D'ABORD (point de passage unique + autorité
+    // de la matrice). Elle valide que la tâche est bien IN_REVIEW et lève
+    // NOT_IN_REVIEW sinon. On ne mute le livrable qu'APRÈS : ainsi un échec de
+    // transition (tâche pas/plus en revue, course concurrente) ne laisse jamais un
+    // livrable orphelin marqué APPROVED terminal alors que la tâche n'a pas bougé
+    // (audit sécu 2026-08-01, finding #2).
+    const task = await this.tasks.applyReviewDecision(
+      orgId,
+      taskId,
+      approved ? 'APPROVED' : 'CHANGES_REQUESTED',
+      { userId: reviewer.userId, canReview: true, reviewingOwnWork: false },
+    );
+
     await this.prisma.deliverable.update({
       where: { id: deliverableId },
       data: {
@@ -362,14 +397,6 @@ export class DeliverablesService {
         reviewNote: dto.note?.trim() || null,
       },
     });
-
-    // Transition de statut de la tâche (point de passage unique).
-    const task = await this.tasks.applyReviewDecision(
-      orgId,
-      taskId,
-      approved ? 'APPROVED' : 'CHANGES_REQUESTED',
-      { userId: reviewer.userId, canReview: true, reviewingOwnWork: false },
-    );
 
     // Journal vivant (chantier 2c.2) : SEUL un livrable APPROUVÉ contribue au
     // contexte des agents suivants (garde-fou anti-poisoning — la sortie validée
@@ -434,7 +461,7 @@ export class DeliverablesService {
       const task = await this.prisma.task.findUnique({
         where: { id: taskId },
         select: {
-          project: { select: { verificationCapabilities: true, stakes: true } },
+          project: { select: { verificationCapabilities: true, stakes: true, ciRepos: true } },
         },
       });
       // Auteur : trust de l'agent (humain → pas de dérivation trust-dépendante).
@@ -459,7 +486,11 @@ export class DeliverablesService {
       let effectiveVer = ver;
       let ciCorr: Awaited<ReturnType<CiWebhooksService['corroborate']>> | null = null;
       if (ver?.method === 'ci_signed') {
-        ciCorr = await this.ci.corroborate(orgId, deliverable.commitSha);
+        ciCorr = await this.ci.corroborate(
+          orgId,
+          deliverable.commitSha,
+          (task?.project?.ciRepos as string[] | undefined) ?? [],
+        );
         effectiveVer = { ...ver, status: ciCorr.status };
       }
       const verdict = evaluateVerification({ verification: effectiveVer, requiredFloor: req.floor, mode });
@@ -717,6 +748,11 @@ export class DeliverablesService {
         reviewStatus: 'PENDING',
         validatorClaimedById: caller.userId,
         validatorLeaseExpiresAt: { gt: now },
+        // Cohérent avec claimValidation : un projet désactivé pour les agents entre
+        // le claim et le heartbeat fait retomber le bail comme perdu (LEASE_LOST)
+        // plutôt que de laisser un validateur prolonger sur un projet où les agents
+        // ont été coupés (audit sécu 2026-08-01, finding #4).
+        task: { project: { agentsEnabled: true } },
       },
       data: { validatorLeaseExpiresAt: leaseUntil },
     });
@@ -771,9 +807,21 @@ export class DeliverablesService {
       select: {
         status: true,
         projectId: true,
-        project: { select: { stakes: true, verificationCapabilities: true, verificationMode: true } },
+        project: {
+          select: { stakes: true, verificationCapabilities: true, verificationMode: true, agentsEnabled: true },
+        },
       },
     });
+    // Cohérent avec claimValidation (qui filtre `project: { agentsEnabled: true }`
+    // dès le tirage) : refuser tout verdict — même simplement enregistré, a fortiori
+    // auto-approuvant en enforce — sur un projet où les agents ont été désactivés
+    // depuis le claim (audit sécu 2026-08-01, finding #4).
+    if (!task?.project?.agentsEnabled) {
+      throw new ConflictException({
+        code: 'AGENTS_DISABLED',
+        message: 'Les agents IA sont désactivés sur ce projet.',
+      });
+    }
     const req = await this.floorForDeliverable(orgId, d.authorId, task?.project ?? {});
     const author = await this.prisma.user.findUnique({ where: { id: d.authorId }, select: { trustLevel: true } });
     const mode = await this.effectiveMode(orgId, task?.project?.verificationMode);
@@ -792,6 +840,22 @@ export class DeliverablesService {
       }
     }
 
+    // Auto-transition serveur D'ABORD quand une transition est décidée (autorité
+    // de la matrice, valide IN_REVIEW) : on ne marque le livrable revu qu'APRÈS
+    // une transition réussie — sinon un échec (course, tâche sortie de revue entre
+    // la lecture du statut et ici) laissait un livrable APPROVED orphelin sans
+    // transition de tâche correspondante (audit sécu 2026-08-01, finding #2). Le
+    // validateur agent porte l'autorité du gate (canReview:true, reviewingOwnWork:
+    // false garanti par les checks ci-dessus).
+    let taskResult: unknown = null;
+    if (transition) {
+      taskResult = await this.tasks.applyReviewDecision(orgId, taskId, transition, {
+        userId: caller.userId,
+        canReview: true,
+        reviewingOwnWork: false,
+      });
+    }
+
     const reviewStatus = transition === 'APPROVED' ? 'APPROVED' : transition === 'CHANGES_REQUESTED' ? 'CHANGES_REQUESTED' : 'PENDING';
     await this.prisma.deliverable.update({
       where: { id: deliverableId },
@@ -806,29 +870,21 @@ export class DeliverablesService {
       },
     });
 
-    let taskResult: unknown = null;
+    if (transition === 'APPROVED') {
+      await this.prisma.agentJournalEntry
+        .create({
+          data: {
+            organizationId: orgId,
+            projectId: (taskResult as { projectId: string }).projectId ?? task!.projectId,
+            taskId,
+            deliverableId,
+            title: d.title,
+            summary: d.justification ?? null,
+          },
+        })
+        .catch(() => undefined);
+    }
     if (transition) {
-      // Auto-transition serveur — le validateur agent porte l'autorité du gate
-      // (canReview:true, reviewingOwnWork:false garanti par les checks ci-dessus).
-      taskResult = await this.tasks.applyReviewDecision(orgId, taskId, transition, {
-        userId: caller.userId,
-        canReview: true,
-        reviewingOwnWork: false,
-      });
-      if (transition === 'APPROVED') {
-        await this.prisma.agentJournalEntry
-          .create({
-            data: {
-              organizationId: orgId,
-              projectId: (taskResult as { projectId: string }).projectId ?? task!.projectId,
-              taskId,
-              deliverableId,
-              title: d.title,
-              summary: d.justification ?? null,
-            },
-          })
-          .catch(() => undefined);
-      }
       void this.webhooks.dispatch(
         orgId,
         'deliverable.reviewed',

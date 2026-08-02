@@ -109,18 +109,15 @@ export class OAuthService {
   }
 
   /**
-   * Le connecteur MCP est **disponible** pour ce tenant si DEUX conditions sont
-   * réunies : (1) l'admin l'a activé (`mcp.enabled`, opt-in par tenant) ET (2) la
-   * licence du tenant accorde la feature premium `mcp` (open-core). L'un OU
-   * l'autre manquant ⇒ aucun jeton émis. `hasFeature` lit la licence du tenant
-   * courant (contexte tenant déjà posé sur la requête de consentement).
+   * Le connecteur MCP conversationnel humain est désormais **core/gratuit** : sa
+   * disponibilité ne dépend plus que du toggle admin `mcp.enabled` (opt-in strict
+   * par tenant, défaut OFF). La feature licence `mcp` n'est plus requise (elle
+   * gardait ce connecteur derrière le paywall — inversé au profit des agents, qui
+   * sont désormais le palier payant). Les écritures/finances restent bornées par
+   * `mcp.allowWrites`/`mcp.allowFinance` + l'intersection RBAC de l'utilisateur.
    */
   private async mcpAvailable(orgId: string): Promise<boolean> {
-    const [enabled, licensed] = await Promise.all([
-      this.settings.getMcpEnabled(orgId),
-      this.licenses.hasFeature('mcp'),
-    ]);
-    return enabled && licensed;
+    return this.settings.getMcpEnabled(orgId);
   }
 
   private slug(): string | undefined {
@@ -180,6 +177,10 @@ export class OAuthService {
       ],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
+      // RFC 9207 : on renvoie `iss` dans la réponse d'autorisation (succès ET
+      // erreur), ce qui permet à un client connecté à plusieurs AS de détecter
+      // une attaque de mix-up. Exigé par la spec MCP 2026-07-28.
+      authorization_response_iss_parameter_supported: true,
     };
   }
 
@@ -188,6 +189,7 @@ export class OAuthService {
   async registerClient(dto: {
     redirect_uris?: unknown;
     client_name?: unknown;
+    application_type?: unknown;
   }): Promise<Record<string, unknown>> {
     const uris = Array.isArray(dto.redirect_uris)
       ? dto.redirect_uris.filter((u): u is string => typeof u === 'string')
@@ -196,6 +198,32 @@ export class OAuthService {
       throw new BadRequestException('redirect_uris requis');
     }
     for (const u of uris) this.assertSafeRedirectUri(u);
+    // `application_type` (OIDC DCR, repris par la spec MCP 2026-07-28) : `native`
+    // = client desktop/CLI qui écoute sur un port loopback choisi au lancement.
+    // Absent ⇒ on ne stocke rien, et le client garde le comportement historique
+    // (cf. `redirectAllowed`) — ne pas basculer les clients existants.
+    let applicationType: 'native' | 'web' | undefined;
+    if (dto.application_type !== undefined && dto.application_type !== null) {
+      if (dto.application_type !== 'native' && dto.application_type !== 'web') {
+        // Refus explicite plutôt qu'ignoré en silence : une valeur non reconnue
+        // signifie que le client attend un comportement qu'on ne lui donnera pas.
+        throw new BadRequestException('application_type doit valoir "native" ou "web".');
+      }
+      applicationType = dto.application_type;
+    }
+    if (applicationType === 'web') {
+      // Un client qui se déclare `web` n'a aucune raison de rediriger vers une
+      // boucle locale ; le refuser ici évite d'enregistrer une souplesse qu'on
+      // s'apprête justement à ne pas lui accorder.
+      for (const u of uris) {
+        const h = new URL(u).hostname;
+        if (h === '127.0.0.1' || h === 'localhost') {
+          throw new BadRequestException(
+            `redirect_uri loopback interdit pour un client application_type=web : ${u}`,
+          );
+        }
+      }
+    }
     const client: OAuthClient = {
       clientId: `vaks_mcpc_${randomBytes(16).toString('base64url')}`,
       redirectUris: uris,
@@ -203,6 +231,7 @@ export class OAuthService {
         typeof dto.client_name === 'string' && dto.client_name.trim()
           ? dto.client_name.trim().slice(0, 120)
           : 'MCP client',
+      applicationType,
       createdAt: Date.now(),
     };
     await this.store.saveClient(this.slug(), client);
@@ -216,6 +245,9 @@ export class OAuthService {
       response_types: ['code'],
       token_endpoint_auth_method: 'none',
       client_id_issued_at: Math.floor(client.createdAt / 1000),
+      // Renvoyé seulement s'il a été demandé : un client qui ne l'envoie pas ne
+      // doit pas croire qu'un type lui a été attribué.
+      ...(client.applicationType ? { application_type: client.applicationType } : {}),
     };
   }
 
@@ -366,9 +398,21 @@ export class OAuthService {
     return { revoked: await this.store.deleteConnection(this.slug(), conn.userId, connId) };
   }
 
-  /** Validation stricte du redirect_uri : exact, ou loopback à port variable. */
+  /**
+   * Validation du redirect_uri : correspondance **exacte**, ou loopback à port
+   * variable pour les clients natifs (RFC 8252 — une appli desktop/CLI écoute
+   * sur un port choisi au lancement, elle ne peut donc pas l'enregistrer).
+   *
+   * La souplesse loopback est réservée aux clients qui ne se déclarent PAS
+   * `web`. Un client `application_type=web` n'obtient que la correspondance
+   * exacte : c'est le garde-fou anti redirection ouverte, et il n'a de toute
+   * façon aucune raison de rediriger vers une boucle locale.
+   * `applicationType` absent = client enregistré avant l'introduction du champ
+   * ⇒ comportement historique conservé (ne pas casser les connexions en place).
+   */
   private redirectAllowed(client: OAuthClient, presented: string): boolean {
     if (client.redirectUris.includes(presented)) return true;
+    if (client.applicationType === 'web') return false;
     let p: URL;
     try {
       p = new URL(presented);
@@ -465,6 +509,9 @@ export class OAuthService {
       scope: q.scope ?? null,
       state: q.state ?? null,
       resource: q.resource ?? null,
+      // RFC 9207 : on fige l'émetteur ici, au démarrage du flux, pour le
+      // renvoyer inchangé dans la réponse d'autorisation.
+      issuer: requestOrigin,
     });
     return { tx };
   }
@@ -493,10 +540,27 @@ export class OAuthService {
     if (!pending) throw new BadRequestException('Demande expirée ou inconnue. Relancer la connexion.');
 
     const url = new URL(pending.redirectUri);
+    /**
+     * RFC 9207 — identification de l'émetteur dans la réponse d'autorisation.
+     *
+     * Un client IA parle à plusieurs serveurs d'autorisation (un par tenant
+     * Vaks-PM, plus ceux des autres outils). Sans `iss`, rien ne lui permet de
+     * détecter qu'un code lui a été renvoyé par un émetteur autre que celui
+     * qu'il a sollicité — c'est l'attaque de **mix-up** d'AS. On renvoie donc
+     * `iss` sur la réponse de succès **comme sur celle d'erreur** (§2 : le
+     * paramètre s'applique aux deux).
+     *
+     * `pending.issuer` peut être absent pour une transaction créée avant cette
+     * version : on omet alors le paramètre plutôt que d'en inventer un.
+     */
+    const withIss = (u: URL) => {
+      if (pending.issuer) u.searchParams.set('iss', pending.issuer);
+      return u;
+    };
     if (!approve) {
       url.searchParams.set('error', 'access_denied');
       if (pending.state) url.searchParams.set('state', pending.state);
-      return { redirect: url.toString() };
+      return { redirect: withIss(url).toString() };
     }
 
     const code = await this.store.createCode(this.slug(), {
@@ -510,7 +574,7 @@ export class OAuthService {
     });
     url.searchParams.set('code', code);
     if (pending.state) url.searchParams.set('state', pending.state);
-    return { redirect: url.toString() };
+    return { redirect: withIss(url).toString() };
   }
 
   // -------------------- /token --------------------

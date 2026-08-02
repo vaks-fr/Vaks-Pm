@@ -48,6 +48,7 @@ export type EmailTemplateKey =
   | 'offer'
   | 'security_alert'
   | 'backup_failed'
+  | 'teams_provision_failed'
   | 'billing_export'
   | 'automation'
   | 'announcement'
@@ -847,6 +848,91 @@ export function renderBackupAlert(
       ${p.tier ? `<tr><td style="padding:2px 18px 2px 0">${escape(t.rowTier)}</td><td style="padding:2px 0"><strong style="color:#fff">${escape(p.tier)}</strong></td></tr>` : ''}
       <tr><td style="padding:2px 18px 2px 0">${escape(t.rowWhen)}</td><td style="padding:2px 0"><strong style="color:#fff">${escape(p.at)}</strong></td></tr>
       <tr><td style="padding:2px 18px 2px 0;vertical-align:top">${escape(t.rowError)}</td><td style="padding:2px 0"><strong style="color:#fff">${escape(p.message)}</strong></td></tr>
+    </table>
+    <p style="margin:16px 0 0;color:#c4c4d4">${t.footer1}</p>
+    <p style="margin:20px 0 0;font-size:12px;color:#8a8a99">${t.footer2}</p>`;
+  return { subject: t.subject, html: shell(ctx, body, t.subject), text: t.text };
+}
+
+/** Payload du mail d'alerte « échec définitif de provisioning Teams » envoyé aux admins du tenant. */
+export interface TeamsProvisionFailedPayload {
+  /** Nom du projet concerné. */
+  projectName: string;
+  /** Action qui a échoué (provision / archive / unarchive / reconcile). */
+  action: string;
+  /** Nombre de tentatives effectuées avant l'abandon. */
+  attempts: number;
+  /** Message d'erreur remonté par le worker / Graph. */
+  error: string;
+}
+
+export function renderTeamsProvisionFailed(
+  ctx: TemplateContext,
+  p: TeamsProvisionFailedPayload,
+): RenderedEmail {
+  const t = L(ctx.lang, {
+    en: {
+      subject: `⛔ Microsoft Teams provisioning failed — ${p.projectName}`,
+      heading: 'Microsoft Teams provisioning failed',
+      hello: `Hello ${escape(ctx.recipientName)},`,
+      body: `The Microsoft Teams provisioning for project <strong style="color:#fff">${escape(p.projectName)}</strong> <strong style="color:#fff">failed</strong> after ${p.attempts} attempt${p.attempts !== 1 ? 's' : ''} and will not be retried automatically. The team may be missing or out of sync — check the configuration (Entra membership, Graph credentials) and retry manually from the project's Integrations tab.`,
+      rowProject: 'Project',
+      rowAction: 'Action',
+      rowAttempts: 'Attempts',
+      rowError: 'Error',
+      footer1: 'Details are recorded in Admin &gt; Security &amp; Compliance &gt; Audit log.',
+      footer2: `You receive this message because you are an administrator of ${escape(ctx.orgName)}.`,
+      text: `Microsoft Teams provisioning failed for ${p.projectName} (action: ${p.action}, ${p.attempts} attempt(s)): ${p.error}. See Admin > Audit log.`,
+    },
+    fr: {
+      subject: `⛔ Échec du provisioning Microsoft Teams — ${p.projectName}`,
+      heading: 'Échec du provisioning Microsoft Teams',
+      hello: `Bonjour ${escape(ctx.recipientName)},`,
+      body: `Le provisioning Microsoft Teams du projet <strong style="color:#fff">${escape(p.projectName)}</strong> a <strong style="color:#fff">échoué</strong> après ${p.attempts} tentative${p.attempts !== 1 ? 's' : ''} et ne sera plus relancé automatiquement. L'équipe est peut-être absente ou désynchronisée — vérifiez la configuration (membres liés à Entra, identifiants Graph) et relancez manuellement depuis l'onglet Intégrations du projet.`,
+      rowProject: 'Projet',
+      rowAction: 'Action',
+      rowAttempts: 'Tentatives',
+      rowError: 'Erreur',
+      footer1: "Le détail est tracé dans Admin &gt; Security &amp; Compliance &gt; Journal d'audit.",
+      footer2: `Vous recevez ce message car vous êtes administrateur de ${escape(ctx.orgName)}.`,
+      text: `Échec du provisioning Microsoft Teams pour ${p.projectName} (action : ${p.action}, ${p.attempts} tentative(s)) : ${p.error}. Voir Admin > Journal d'audit.`,
+    },
+    it: {
+      subject: `⛔ Provisioning Microsoft Teams non riuscito — ${p.projectName}`,
+      heading: 'Provisioning Microsoft Teams non riuscito',
+      hello: `Buongiorno ${escape(ctx.recipientName)},`,
+      body: `Il provisioning Microsoft Teams del progetto <strong style="color:#fff">${escape(p.projectName)}</strong> <strong style="color:#fff">non è riuscito</strong> dopo ${p.attempts} tentativo/i e non verrà ritentato automaticamente. Il team potrebbe mancare o essere disallineato — controlla la configurazione (membri collegati a Entra, credenziali Graph) e riprova manualmente dalla scheda Integrazioni del progetto.`,
+      rowProject: 'Progetto',
+      rowAction: 'Azione',
+      rowAttempts: 'Tentativi',
+      rowError: 'Errore',
+      footer1: "I dettagli sono registrati in Admin &gt; Security &amp; Compliance &gt; Registro di audit.",
+      footer2: `Ricevi questo messaggio perché sei amministratore di ${escape(ctx.orgName)}.`,
+      text: `Provisioning Microsoft Teams non riuscito per ${p.projectName} (azione: ${p.action}, ${p.attempts} tentativo/i): ${p.error}. Vedi Admin > Registro di audit.`,
+    },
+    de: {
+      subject: `⛔ Microsoft-Teams-Provisioning fehlgeschlagen — ${p.projectName}`,
+      heading: 'Microsoft-Teams-Provisioning fehlgeschlagen',
+      hello: `Hallo ${escape(ctx.recipientName)},`,
+      body: `Das Microsoft-Teams-Provisioning für das Projekt <strong style="color:#fff">${escape(p.projectName)}</strong> ist nach ${p.attempts} Versuch(en) <strong style="color:#fff">fehlgeschlagen</strong> und wird nicht automatisch wiederholt. Das Team fehlt möglicherweise oder ist nicht synchron — prüfen Sie die Konfiguration (Entra-Mitgliedschaft, Graph-Zugangsdaten) und starten Sie es manuell im Reiter „Integrationen“ des Projekts erneut.`,
+      rowProject: 'Projekt',
+      rowAction: 'Aktion',
+      rowAttempts: 'Versuche',
+      rowError: 'Fehler',
+      footer1: 'Details werden unter Admin &gt; Security &amp; Compliance &gt; Audit-Protokoll erfasst.',
+      footer2: `Sie erhalten diese Nachricht, weil Sie Administrator von ${escape(ctx.orgName)} sind.`,
+      text: `Microsoft-Teams-Provisioning fehlgeschlagen für ${p.projectName} (Aktion: ${p.action}, ${p.attempts} Versuch(e)): ${p.error}. Siehe Admin > Audit-Protokoll.`,
+    },
+  });
+  const body = `
+    <h2 style="margin:0 0 12px;font-size:18px;color:#fff">${escape(t.heading)}</h2>
+    <p style="margin:0 0 16px;color:#c4c4d4">${t.hello}</p>
+    <p style="margin:0 0 16px;color:#c4c4d4">${t.body}</p>
+    <table cellpadding="0" cellspacing="0" style="margin:0 0 8px;background:#1c1c28;border-radius:8px;padding:12px 14px;color:#d4d4e0;font-size:13px">
+      <tr><td style="padding:2px 18px 2px 0">${escape(t.rowProject)}</td><td style="padding:2px 0"><strong style="color:#fff">${escape(p.projectName)}</strong></td></tr>
+      <tr><td style="padding:2px 18px 2px 0">${escape(t.rowAction)}</td><td style="padding:2px 0"><strong style="color:#fff">${escape(p.action)}</strong></td></tr>
+      <tr><td style="padding:2px 18px 2px 0">${escape(t.rowAttempts)}</td><td style="padding:2px 0"><strong style="color:#fff">${p.attempts}</strong></td></tr>
+      <tr><td style="padding:2px 18px 2px 0;vertical-align:top">${escape(t.rowError)}</td><td style="padding:2px 0"><strong style="color:#fff">${escape(p.error)}</strong></td></tr>
     </table>
     <p style="margin:16px 0 0;color:#c4c4d4">${t.footer1}</p>
     <p style="margin:20px 0 0;font-size:12px;color:#8a8a99">${t.footer2}</p>`;

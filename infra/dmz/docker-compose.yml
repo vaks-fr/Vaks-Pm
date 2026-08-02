@@ -59,14 +59,24 @@ services:
     environment:
       PORT: "8080"
       # Edge interne joignable depuis la DMZ (cf. .env). Le serveur MCP y relaie
-      # les appels de tools (me/mcp-context + lectures/écritures), avec le Host
-      # tenant reconstitué — l'API résout l'org depuis ce Host.
+      # ses appels (me/mcp-context + lectures/écritures) EN PRÉSERVANT le Host
+      # public entrant — l'API résout l'org depuis ce Host.
       VAKS_API_URL: ${INTERNAL_EDGE_URL}
       VAKS_API_PREFIX: api/v1
-      # Layout host : <slug>.mcp.<base> → label `mcp` en INFIXE (un seul wildcard
-      # *.mcp.<base> couvre tous les tenants). Le label est retiré pour
-      # reconstituer le Host tenant <slug>.<base> passé à l'API.
-      VAKS_MCP_LABEL: mcp
+      #
+      # ── Résolution du tenant : RIEN à configurer ici en multi-tenant ──────
+      # Le MCP relaie le Host public tel quel (ex. `acme.mcp.exemple.fr`). C'est
+      # l'API qui le rattache à une org : déclarer le domaine public MCP côté API
+      # via TENANCY_MCP_DOMAINS (une valeur couvre tous les tenants — voir le
+      # manifeste `mcp.publicDomains`, ou docker-stack.yml). Le nom public du MCP
+      # est indépendant du nom interne de l'instance (app sur `vaks.local`, MCP
+      # sur `acme.mcp.exemple.fr` : parfaitement valide).
+      #
+      # ── Mono-tenant, sans sous-domaine par tenant ────────────────────────
+      # Si cette box ne sert qu'UNE org et qu'il n'y a pas de `<slug>.` distinct,
+      # épingler le Host tenant interne ici. ⚠️ Force TOUTES les requêtes sur ce
+      # tenant → jamais sur une DMZ multi-tenant.
+      # VAKS_TENANT_HOST: vaks.local
       # AS annoncé aux clients IA = CE serveur MCP (la box DMZ forwarde l'auth
       # vers l'API interne). NE PAS mettre `tenant` ici (exposerait le domaine
       # interne, qui n'est pas joignable d'Internet dans ce scénario).

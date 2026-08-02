@@ -216,7 +216,7 @@ export class AgentSelfAuthService {
 
     const orgId = row!.organizationId;
 
-    if (!(await this.licenses.hasFeature('agent-federation'))) {
+    if (!(await this.licenses.hasFeature('agents'))) {
       await this.denied(orgId, row!.agentId, 'license_missing');
       throw new UnauthorizedException({
         error: 'invalid_client',

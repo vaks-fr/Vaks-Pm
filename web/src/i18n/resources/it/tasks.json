@@ -285,9 +285,13 @@
     "task": "Attività",
     "color": "Colore",
     "parentGroup": "Gruppo padre",
+
+    "parentTask": "Attività padre",
+
+    "breakdown": "Suddivisione",
     "noneRoot": "Nessuno (radice)",
     "noneRootDash": "— Nessuno (radice) —",
-    "noGroupAvailable": "Nessun gruppo disponibile",
+    "noGroupAvailable": "Nessuna attività disponibile",
     "milestone": "Milestone",
     "clickToToggle": "Clicchi per cambiare",
     "yes": "Sì",
@@ -448,13 +452,15 @@
   },
   "dep": {
     "conflictTitle": "Conflitto di dipendenza",
-    "conflictTooltip": "La data di inizio è precedente alla scadenza di un'attività predecessore",
+    "conflictTooltip": "La data di inizio viola una dipendenza con un'attività predecessore",
     "endsOn": "termina il",
+    "startsOn": "inizia il",
     "lag": "(lag {{lag}}g)",
     "expectedStart": "→ inizio previsto non prima del {{date}}.",
     "lateStartTitle": "Avvio in ritardo",
-    "lateStartTooltip": "L'attività inizia più tardi della fine del suo predecessore",
+    "lateStartTooltip": "L'attività inizia più tardi di quanto richiesto da una dipendenza",
     "startsAfter": "Inizia {{days}}g dopo la fine di {{title}}",
+    "startsAfterStart": "Inizia {{days}}g dopo l'inizio di {{title}}",
     "holidayTooltip": "Giorno festivo — l'assegnatario probabilmente non lavorerà quel giorno.",
     "holiday": "Festività: {{holidays}}"
   },

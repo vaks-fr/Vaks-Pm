@@ -46,6 +46,7 @@ import { GoogleChatProvisioningModule } from './google-chat-provisioning/google-
 import { GoogleDriveProvisioningModule } from './google-drive-provisioning/google-drive-provisioning.module';
 import { CollabSpacesModule } from './collab-spaces/collab-spaces.module';
 import { FileSourcesModule } from './filesources/filesources.module';
+import { AgentContextModule } from './agent-context/agent-context.module';
 import { TicketingModule } from './ticketing/ticketing.module';
 import { AgentsModule } from './agents/agents.module';
 import { CiWebhooksModule } from './ci-webhooks/ci-webhooks.module';
@@ -55,6 +56,8 @@ import { CustomFieldsModule } from './custom-fields/custom-fields.module';
 import { CustomStatusesModule } from './custom-statuses/custom-statuses.module';
 import { OAuthModule } from './oauth/oauth.module';
 import { AgentSelfAuthModule } from './agents/self-auth/agent-self-auth.module';
+import { McpModule } from './mcp/mcp.module';
+import { ExportsModule } from './exports/exports.module';
 import { TenancyModule } from './tenancy/tenancy.module';
 import { TenantMiddleware } from './tenancy/tenant.middleware';
 import { CommonModule } from './common/common.module';
@@ -147,6 +150,7 @@ import { APP_GUARD, DiscoveryModule } from '@nestjs/core';
     GoogleDriveProvisioningModule,
     CollabSpacesModule,
     FileSourcesModule,
+    AgentContextModule,
     TicketingModule,
     AgentsModule,
     CiWebhooksModule,
@@ -156,6 +160,8 @@ import { APP_GUARD, DiscoveryModule } from '@nestjs/core';
     CustomStatusesModule,
     OAuthModule,
     AgentSelfAuthModule,
+    McpModule,
+    ExportsModule,
   ],
   // ApiThrottlerGuard en APP_GUARD : limite globale par IP + budget par jeton
   // d'API, distribué via Redis, plus les @Throttle() par route (ex. /auth/login).

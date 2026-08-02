@@ -83,6 +83,42 @@ http:
       priority: 100
       middlewares: [security-headers, compress]
       tls: {}
+    # --- Serveur MCP (connecteur IA) ---
+    # Priorité 150 EXPLICITE, ne pas la « simplifier ». La priorité par défaut
+    # de Traefik est la longueur de règle, or PathPrefix(`/api`) et
+    # PathPrefix(`/mcp`) font tous deux 18 caractères : l'ordre serait une
+    # égalité non déterministe qu'une simple édition de l'une des deux chaînes
+    # changerait silencieusement. 150 se place sous `internal-deny` (200, donc
+    # /api/v1/internal reste refusé au bord) et au-dessus de `api` et du
+    # catch-all `web`.
+    mcp:
+      rule: "PathPrefix(`/mcp`)"
+      entryPoints: [web, websecure]
+      service: mcp
+      priority: 150
+      # Pas de `compress` : le transport MCP est du streaming (même raison que
+      # le router `ws`).
+      middlewares: [security-headers]
+      tls: {}
+    # RFC 9728 — Protected Resource Metadata, servi par le serveur MCP : c'est
+    # ainsi que les clients IA découvrent QUEL serveur d'autorisation interroger.
+    mcp-meta:
+      rule: "PathPrefix(`/.well-known/oauth-protected-resource`)"
+      entryPoints: [web, websecure]
+      service: mcp
+      priority: 150
+      middlewares: [security-headers]
+      tls: {}
+    # RFC 8414 — Authorization Server Metadata, servie par le control-plane
+    # (c'est lui qui héberge la façade OAuth). Sans ce router, la découverte
+    # tomberait dans le catch-all `web` et renverrait l'app React.
+    oauth-meta:
+      rule: "PathPrefix(`/.well-known/oauth-authorization-server`)"
+      entryPoints: [web, websecure]
+      service: controlplane
+      priority: 150
+      middlewares: [security-headers]
+      tls: {}
     api:
       rule: "PathPrefix(`/api`)"
       entryPoints: [web, websecure]
@@ -120,6 +156,15 @@ http:
       loadBalancer:
         servers:
           - url: "http://web:80"
+    # Un seul server entry : c'est le VIP Swarm qui équilibre entre les réplicas
+    # `mcp`. D'où l'absence de `loadBalancer.healthCheck` ici — Traefik ne voit
+    # que le VIP, jamais les réplicas individuels, donc une sonde Traefik ne
+    # pourrait que marquer le service entier up/down. La santé par réplica est
+    # gérée par le healthcheck Swarm (docker-stack.yml).
+    mcp:
+      loadBalancer:
+        servers:
+          - url: "http://mcp:8080"
 
 # TLS : certificat wildcard `*.vaks-pm.com` (self-signed on-premise) servi par
 # défaut sur l'entrypoint websecure (:443). Permet le routing par sous-domaine

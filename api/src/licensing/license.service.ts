@@ -39,6 +39,20 @@ const DEFAULT_OFFLINE_DAYS = Math.max(1, Number(process.env.LICENSE_OFFLINE_GRAC
  */
 const CACHE_TTL_MS = 60 * 1000;
 
+/** Parse un plafond depuis l'env (entier ≥ 0), sinon défaut. Autorise un 0 explicite. */
+function envLimit(raw: string | undefined, def: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : def;
+}
+/**
+ * **Plafonds gratuits (freemium)** appliqués **en l'absence de licence payante
+ * vivante**. La licence les lève : `maxUsers`/`maxAgents` (paliers métrés) ou la
+ * feature `agents` (agents illimités). On ne borne QUE la création — les
+ * comptes/agents déjà existants ne sont jamais coupés (cf. `assert*SlotAvailable`).
+ */
+const FREE_SEAT_LIMIT = envLimit(process.env.FREE_SEAT_LIMIT, 10);
+const FREE_AGENT_LIMIT = envLimit(process.env.FREE_AGENT_LIMIT, 5);
+
 /** Résultat évalué d'une licence pour le tenant courant. */
 export interface EvaluatedLicense {
   status: LicenseStatus;
@@ -197,19 +211,83 @@ export class LicenseService {
    * comptes `licensed=false` et NE passe donc PAS par ici (pas de 403 vers l'IdP).
    */
   async assertSeatAvailable(orgId: string, adding = 1): Promise<void> {
-    const e = await this.evaluate();
-    if (e.maxUsers == null) return; // illimité
-    // Plafond appliqué uniquement sous licence payante vivante (active/grace).
-    // Hors licence (none/expired/invalid/suspended) ⇒ mode core, pas de plafond.
-    if (e.status !== 'active' && e.status !== 'grace') return;
+    const cap = await this.seatLimit();
+    if (cap == null) return; // illimité (licence payante sans plafond)
     const active = await this.prisma.user.count({
       where: { organizationId: orgId, deletedAt: null, licensed: true },
     });
-    if (active + adding > e.maxUsers) {
-      throw new ForbiddenException(
-        `Limite de licences atteinte : ${e.maxUsers} siège(s). ` +
+    if (active + adding > cap) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'SEAT_LIMIT_REACHED',
+        message:
+          `Limite de licences atteinte : ${cap} siège(s). ` +
           `Désactivez un utilisateur ou augmentez la licence avant d'en ajouter.`,
-      );
+      });
+    }
+  }
+
+  /**
+   * **Plafond effectif de sièges humains** : sous licence payante vivante →
+   * `maxUsers` (peut être `null` = illimité) ; sinon le plafond gratuit
+   * `FREE_SEAT_LIMIT`. Sert à `assertSeatAvailable` et à l'affichage UI.
+   */
+  async seatLimit(): Promise<number | null> {
+    const e = await this.evaluate();
+    if (e.status === 'active' || e.status === 'grace') return e.maxUsers;
+    return FREE_SEAT_LIMIT;
+  }
+
+  /** Nombre d'identités agents **vivantes** (kind=AGENT, non supprimées, non
+   *  suspendues → une suspension libère un slot). Permissif (0 sur erreur). */
+  async agentsUsed(orgId: string): Promise<number> {
+    try {
+      return await this.prisma.user.count({
+        where: {
+          organizationId: orgId,
+          deletedAt: null,
+          kind: 'AGENT',
+          status: { not: 'SUSPENDED' },
+        },
+      });
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * **Plafond effectif d'agents** (3 tiers) : licence vivante **et** feature
+   * `agents` → `null` (illimité) ; sinon licence vivante **et** `limits.maxAgents`
+   * entier > 0 → ce palier métré ; sinon le plafond gratuit `FREE_AGENT_LIMIT`.
+   */
+  async agentLimit(): Promise<number | null> {
+    const e = await this.evaluate();
+    const live = e.status === 'active' || e.status === 'grace';
+    if (live && e.features.includes('agents')) return null; // illimité
+    const metered = e.payload?.limits?.maxAgents;
+    if (live && typeof metered === 'number' && Number.isInteger(metered) && metered > 0) {
+      return metered;
+    }
+    return FREE_AGENT_LIMIT;
+  }
+
+  /**
+   * Lève `ForbiddenException` (`AGENT_LIMIT_REACHED`) si créer `adding` identité(s)
+   * agent ferait dépasser le plafond effectif. Illimité (`agentLimit()===null`) ⇒
+   * ne borne rien. À appeler **avant toute création** d'identité agent.
+   */
+  async assertAgentSlotAvailable(orgId: string, adding = 1): Promise<void> {
+    const cap = await this.agentLimit();
+    if (cap == null) return; // illimité
+    const used = await this.agentsUsed(orgId);
+    if (used + adding > cap) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'AGENT_LIMIT_REACHED',
+        message:
+          `Limite d'agents atteinte : ${cap} agent(s). ` +
+          `Suspendez/supprimez un agent, ou activez une licence Agents pour en créer d'autres.`,
+      });
     }
   }
 
@@ -338,17 +416,18 @@ export class LicenseService {
   }
 
   /**
-   * Sièges restants sous le plafond `maxUsers` de la licence active : `null` =
-   * illimité (pas de plafond, ou pas de licence payante vivante → mode core).
-   * Sinon `max(0, maxUsers - seatsUsed)`. Sert à l'attribution **best-effort**
-   * en lot (auto-licence d'un groupe) sans jamais dépasser le plafond.
+   * Sièges restants sous le **plafond effectif** (`seatLimit()` : `maxUsers` sous
+   * licence, sinon le plafond gratuit `FREE_SEAT_LIMIT`) : `null` = illimité
+   * (licence payante sans plafond). Sinon `max(0, cap - seatsUsed)`. Sert à
+   * l'attribution **best-effort** en lot (auto-licence d'un groupe) sans jamais
+   * dépasser le plafond — y compris l'offre gratuite (pas de contournement via
+   * l'auto-licence d'équipe).
    */
   async seatsRemaining(orgId: string): Promise<number | null> {
-    const e = await this.evaluate();
-    if (e.maxUsers == null) return null;
-    if (e.status !== 'active' && e.status !== 'grace') return null;
+    const cap = await this.seatLimit();
+    if (cap == null) return null;
     const used = await this.seatsUsed(orgId);
-    return Math.max(0, e.maxUsers - used);
+    return Math.max(0, cap - used);
   }
 
   /** Nombre de sièges occupés (utilisateurs `licensed=true` non supprimés) pour
@@ -372,6 +451,8 @@ export class LicenseService {
     // eu lieu. Les sièges, eux, restent comptés sur l'id réel (FK User).
     const licenseId = await this.currentLicenseId();
     const seatsUsed = organizationId ? await this.seatsUsed(organizationId) : null;
+    const agentsUsed = organizationId ? await this.agentsUsed(organizationId) : null;
+    const [seatLimit, agentLimit] = await Promise.all([this.seatLimit(), this.agentLimit()]);
     const daysRemaining =
       e.expiresAt && !Number.isNaN(e.expiresAt.getTime())
         ? Math.ceil((e.expiresAt.getTime() - Date.now()) / DAY_MS)
@@ -389,6 +470,9 @@ export class LicenseService {
       requireOnline: e.requireOnline,
       organizationId: licenseId ?? organizationId,
       seatsUsed,
+      seatLimit,
+      agentsUsed,
+      agentLimit,
     };
   }
 }

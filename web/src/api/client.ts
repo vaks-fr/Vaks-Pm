@@ -1,5 +1,6 @@
 import type {
   AllocationDto,
+  AgentWorkloadDto,
   AutoplanRequestDto,
   AutoplanResultDto,
   AuthTokens,
@@ -18,6 +19,7 @@ import type {
   ConnectorTestResultDto,
   AgentDto,
   AgentRunSummaryDto,
+  AgentRunsPageDto,
   TaskAgentActivityDto,
   CreateAgentDto,
   UpdateAgentDto,
@@ -53,6 +55,7 @@ import type {
   ProjectCharterDto,
   ProjectDocumentDto,
   ProjectDocumentFolderDto,
+  AgentContextPreviewDto,
   ProjectCreationCapabilitiesDto,
   UpsertProjectCharterDto,
   UpdateProjectDto,
@@ -96,6 +99,7 @@ import type {
   AuditLogListQuery,
   AuditLogListResponse,
   WorkloadGridDto,
+  PlanStatusDto,
   OrgSettingsDto,
   CreateUserDto,
   UpdateUserDto,
@@ -699,6 +703,15 @@ export const api = {
       method: 'DELETE',
     }),
   getAgentRuns: (id: string) => request<AgentRunSummaryDto>(`/admin/agents/${id}/runs`),
+  /** Journal transverse des runs d'agent (Admin > Agents > Runs d'agents). */
+  listAgentRuns: (q: Record<string, string | number | boolean | undefined>) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) {
+      if (v !== undefined && v !== '' && v !== false) p.set(k, String(v));
+    }
+    const qs = p.toString();
+    return request<AgentRunsPageDto>(`/admin/agent-runs${qs ? `?${qs}` : ''}`);
+  },
   getTaskAgentActivity: (taskId: string) =>
     request<TaskAgentActivityDto>(`/tasks/${taskId}/agent-activity`),
   listAgentConnectorProviders: () =>
@@ -1035,7 +1048,10 @@ export const api = {
   // ---- project document folders (espace documents) ----
   listProjectFolders: (projectId: string) =>
     request<ProjectDocumentFolderDto[]>(`/projects/${projectId}/folders`),
-  createProjectFolder: (projectId: string, dto: { name: string; parentId?: string | null }) =>
+  createProjectFolder: (
+    projectId: string,
+    dto: { name: string; parentId?: string | null; aiContext?: boolean },
+  ) =>
     request<ProjectDocumentFolderDto>(`/projects/${projectId}/folders`, {
       method: 'POST',
       body: JSON.stringify(dto),
@@ -1043,7 +1059,7 @@ export const api = {
   updateProjectFolder: (
     projectId: string,
     folderId: string,
-    dto: { name?: string; parentId?: string | null },
+    dto: { name?: string; parentId?: string | null; aiContext?: boolean },
   ) =>
     request<ProjectDocumentFolderDto>(`/projects/${projectId}/folders/${folderId}`, {
       method: 'PATCH',
@@ -1051,6 +1067,13 @@ export const api = {
     }),
   deleteProjectFolder: (projectId: string, folderId: string) =>
     request<{ removed: true }>(`/projects/${projectId}/folders/${folderId}`, { method: 'DELETE' }),
+
+  /**
+   * « Ce que voient les agents » : le pack de contexte exact, composé par le
+   * MÊME code que le work-context servi aux agents. App-privé (jamais un jeton).
+   */
+  getAgentContextPreview: (projectId: string) =>
+    request<AgentContextPreviewDto>(`/projects/${projectId}/agent-context-preview`),
 
   // ---- documents externes (SharePoint de la team provisionnée) — lecture seule ----
   projectContextSources: (projectId: string) =>
@@ -1502,6 +1525,7 @@ export const api = {
       skillsLevelScale: Array<{ level: number; label: string }>;
       skillsLevelInputMode: 'number' | 'scale';
       fiscalYearStartMonth: number;
+      autoplanConcentration: 'focus' | 'balanced' | 'spread';
     }>('/admin/settings/public'),
   // ---- licence (open-core, SPEC §16) ----
   /** État de la licence du tenant — lisible par tout user authentifié (FeatureGate + bandeau). */
@@ -1523,6 +1547,9 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  /** Usage MCP par tool sur la fenêtre courante (temps réel, tous jetons). */
+  getMcpToolUsage: () =>
+    request<{ windowSec: number; tools: Array<{ tool: string; count: number }> }>('/admin/mcp/tool-usage'),
   /** Upload du logo de l'organisation (PNG/JPEG/SVG/WebP/GIF, max 1 MB). */
   uploadOrgLogo: (file: File) =>
     multipartUpload<{ url: string; mime: string; sizeBytes: number }>(
@@ -1922,6 +1949,13 @@ export const api = {
     request<WorkloadGridDto>(`/workload${qs(q)}`),
   autoplan: (dto: AutoplanRequestDto) =>
     request<AutoplanResultDto>('/workload/autoplan', { method: 'POST', body: JSON.stringify(dto) }),
+  /** Badge « plan obsolète » (Lot 3.3, AUTOPLAN_IMPROVEMENTS.md §3.3). */
+  getPlanStatus: (projectId: string) =>
+    request<PlanStatusDto>(`/workload/plan-status${qs({ projectId })}`),
+  /** Vue agrégée des agents IA (Lot 5, AUTOPLAN_IMPROVEMENTS.md §5.1) —
+   *  concurrence + budget (si `finance:view`) + file de revue. */
+  getAgentsWorkload: (q: { from?: string; to?: string; projectId?: string }) =>
+    request<AgentWorkloadDto>(`/workload/agents${qs(q)}`),
 
   // ---- teams ----
   listTeams: () => request<TeamDto[]>('/teams'),

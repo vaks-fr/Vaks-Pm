@@ -3,6 +3,18 @@ import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { AutomationsHooksService } from '../automations/automations-hooks.service';
 import { Prisma, ProjectStatus, TaskStatus, ProjectDocumentKind } from '@db';
+import { isBriefEmpty, normalizeAgentBrief } from '../agents/context/agent-brief';
+import {
+  documentAiSource,
+  effectiveAiFolderIds,
+  isDocumentAiContext,
+} from './document-context';
+import {
+  defaultContextFolderId,
+  findDuplicateTextDoc,
+  sanitizeDocName,
+  type OnDuplicate,
+} from './text-document';
 
 /**
  * Champs financiers sensibles du projet (budget + taux par défaut). Ils ne
@@ -34,6 +46,15 @@ function rethrowProjectNameConflict(e: unknown): never {
     }
   }
   throw e as Error;
+}
+
+/**
+ * Normalise la liste des dépôts CI autorisés d'un projet (onglet IA) : trim,
+ * retrait des vides, déduplication. Sert au binding `ci_signed` (finding #3).
+ */
+function normalizeCiRepos(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return [...new Set(v.map((r) => String(r ?? '').trim()).filter(Boolean))];
 }
 import { RbacService } from '../rbac/rbac.service';
 import { ProjectCreationPolicyService } from './project-creation-policy.service';
@@ -629,9 +650,18 @@ export class ProjectsService {
    * étende sa propre visibilité) ou qu'il crée un projet orphelin qu'il
    * serait ensuite seul à voir.
    */
-  /** Un projet agent-activé doit porter un brief (contexte agent) non vide. */
-  private assertAgentContext(agentsEnabled: boolean, agentContext: string | null): void {
-    if (agentsEnabled && !agentContext) {
+  /**
+   * Un projet agent-activé doit porter un brief non vide — structuré
+   * (`agentBrief`) **ou** en notes libres (`agentContext`). L'un OU l'autre
+   * suffit : les projets antérieurs à la refonte n'ont que les notes libres, et
+   * on ne les casse pas ; les nouveaux peuvent ne remplir que le formulaire.
+   */
+  private assertAgentContext(
+    agentsEnabled: boolean,
+    agentContext: string | null,
+    agentBrief: unknown = null,
+  ): void {
+    if (agentsEnabled && !agentContext && isBriefEmpty(agentBrief)) {
       throw new BadRequestException(
         "Un projet ouvert aux agents IA doit définir un contexte agent (brief). " +
           'Renseignez-le avant d\'activer les agents.',
@@ -656,7 +686,9 @@ export class ProjectsService {
     const agentsEnabled = dto.agentsEnabled ?? false;
     const agentContext = dto.agentContext?.trim() || null;
     const agentGuardrails = dto.agentGuardrails?.trim() || null;
-    this.assertAgentContext(agentsEnabled, agentContext);
+    const agentBrief = normalizeAgentBrief(dto.agentBrief);
+    const ciRepos = normalizeCiRepos(dto.ciRepos);
+    this.assertAgentContext(agentsEnabled, agentContext, agentBrief);
 
     const pmRole = await this.prisma.role.findFirstOrThrow({
       where: { organizationId: orgId, key: 'PROJECT_MANAGER' },
@@ -730,7 +762,9 @@ export class ProjectsService {
             billable,
             agentsEnabled,
             agentContext,
+            agentBrief: agentBrief ?? Prisma.DbNull,
             agentGuardrails,
+            ciRepos,
           },
         });
 
@@ -1157,20 +1191,27 @@ export class ProjectsService {
     if (
       dto.agentsEnabled !== undefined ||
       dto.agentContext !== undefined ||
+      dto.agentBrief !== undefined ||
       dto.agentGuardrails !== undefined
     ) {
       const cur = await this.prisma.project.findUnique({
         where: { id: projectId },
-        select: { agentsEnabled: true, agentContext: true },
+        select: { agentsEnabled: true, agentContext: true, agentBrief: true },
       });
       const nextEnabled = dto.agentsEnabled ?? cur?.agentsEnabled ?? false;
       const nextContext =
         dto.agentContext !== undefined
           ? dto.agentContext?.trim() || null
           : cur?.agentContext ?? null;
-      this.assertAgentContext(nextEnabled, nextContext);
+      const nextBrief =
+        dto.agentBrief !== undefined
+          ? normalizeAgentBrief(dto.agentBrief)
+          : normalizeAgentBrief(cur?.agentBrief);
+      this.assertAgentContext(nextEnabled, nextContext, nextBrief);
       if (dto.agentsEnabled !== undefined) data.agentsEnabled = nextEnabled;
       if (dto.agentContext !== undefined) data.agentContext = nextContext;
+      // `null` explicite = effacer le brief structuré (Prisma Json : DbNull).
+      if (dto.agentBrief !== undefined) data.agentBrief = nextBrief ?? Prisma.DbNull;
       if (dto.agentGuardrails !== undefined) data.agentGuardrails = dto.agentGuardrails?.trim() || null;
     }
     if (dto.agentAutoCloseOnApproval !== undefined) {
@@ -1192,6 +1233,7 @@ export class ProjectsService {
     }
     if (dto.stakes !== undefined) data.stakes = dto.stakes;
     if (dto.verificationMode !== undefined) data.verificationMode = dto.verificationMode || null;
+    if (dto.ciRepos !== undefined) data.ciRepos = normalizeCiRepos(dto.ciRepos);
     if (dto.sponsorNotify !== undefined) {
       if (dto.sponsorNotify === null) {
         data.sponsorNotify = Prisma.JsonNull;
@@ -1616,28 +1658,53 @@ export class ProjectsService {
   // ============================================================
   // Documents projet (offres commerciales, propositions…) — multi-docs
   // ============================================================
-  private serializeDoc(d: {
-    id: string;
-    kind: ProjectDocumentKind;
-    folderId: string | null;
-    aiContext: boolean;
-    filename: string;
-    mimeType: string;
-    sizeBytes: number;
-    uploadedAt: Date;
-    uploadedBy: { id: string; name: string } | null;
-  }) {
+  private serializeDoc(
+    d: {
+      id: string;
+      kind: ProjectDocumentKind;
+      folderId: string | null;
+      aiContext: boolean;
+      filename: string;
+      mimeType: string;
+      sizeBytes: number;
+      uploadedAt: Date;
+      contentUpdatedAt?: Date | null;
+      uploadedBy: { id: string; name: string } | null;
+    },
+    /**
+     * Dossiers effectivement « contexte IA » (cf. `document-context.ts`).
+     * Optionnel : passé par les listings qui ont déjà chargé l'arborescence.
+     * Absent → on ne prétend pas connaître l'héritage et on retombe sur le
+     * drapeau propre, plutôt que d'afficher un « non exposé » mensonger.
+     */
+    aiFolderIds?: ReadonlySet<string>,
+  ) {
+    const folders = aiFolderIds ?? new Set<string>();
     return {
       id: d.id,
       kind: d.kind,
       folderId: d.folderId,
       aiContext: d.aiContext,
+      /** Exposition RÉELLE = drapeau propre OU dossier « contexte IA » hérité. */
+      aiContextEffective: isDocumentAiContext(d, folders),
+      /** `own` | `folder` | `null` — pilote le badge « hérité » et le toggle. */
+      aiContextSource: documentAiSource(d, folders),
       filename: d.filename,
       mimeType: d.mimeType,
       sizeBytes: d.sizeBytes,
       uploadedAt: d.uploadedAt.toISOString(),
+      contentUpdatedAt: d.contentUpdatedAt ? d.contentUpdatedAt.toISOString() : null,
       uploadedBy: d.uploadedBy ? { id: d.uploadedBy.id, name: d.uploadedBy.name } : null,
     };
+  }
+
+  /** Dossiers « contexte IA » effectifs d'un projet (marqués + descendance). */
+  private async aiFolderIdsFor(orgId: string, projectId: string): Promise<Set<string>> {
+    const folders = await this.prisma.projectDocumentFolder.findMany({
+      where: { projectId, organizationId: orgId },
+      select: { id: true, parentId: true, aiContext: true },
+    });
+    return effectiveAiFolderIds(folders);
   }
 
   // ============================================================
@@ -1889,12 +1956,17 @@ export class ProjectsService {
 
   async listDocuments(orgId: string, projectId: string, userId: string, isAdmin: boolean) {
     await this.findOne(orgId, projectId, userId, isAdmin);
-    const docs = await this.prisma.projectDocument.findMany({
-      where: { projectId, organizationId: orgId },
-      orderBy: { uploadedAt: 'desc' },
-      include: { uploadedBy: { select: { id: true, name: true } } },
-    });
-    return docs.map((d) => this.serializeDoc(d));
+    // L'arborescence est chargée UNE fois puis appliquée à tous les documents :
+    // l'héritage « dossier contexte IA » se calcule en mémoire, pas par document.
+    const [docs, aiFolderIds] = await Promise.all([
+      this.prisma.projectDocument.findMany({
+        where: { projectId, organizationId: orgId },
+        orderBy: { uploadedAt: 'desc' },
+        include: { uploadedBy: { select: { id: true, name: true } } },
+      }),
+      this.aiFolderIdsFor(orgId, projectId),
+    ]);
+    return docs.map((d) => this.serializeDoc(d, aiFolderIds));
   }
 
   async recordDocument(
@@ -1929,7 +2001,7 @@ export class ProjectsService {
       },
       include: { uploadedBy: { select: { id: true, name: true } } },
     });
-    return this.serializeDoc(doc);
+    return this.serializeDoc(doc, await this.aiFolderIdsFor(orgId, projectId));
   }
 
   /** Renvoie la métadonnée brute (storageKey inclus) pour download/suppression. */
@@ -1953,17 +2025,26 @@ export class ProjectsService {
   // Espace documents — dossiers (arborescence libre par projet)
   // ============================================================
 
-  private serializeFolder(f: {
-    id: string;
-    parentId: string | null;
-    name: string;
-    createdAt: Date;
-    updatedAt: Date;
-  }) {
+  private serializeFolder(
+    f: {
+      id: string;
+      parentId: string | null;
+      name: string;
+      aiContext?: boolean;
+      createdAt: Date;
+      updatedAt: Date;
+    },
+    /** Ensemble effectif (marqués + descendance) — pour distinguer hérité/propre. */
+    aiFolderIds?: ReadonlySet<string>,
+  ) {
     return {
       id: f.id,
       parentId: f.parentId,
       name: f.name,
+      /** Drapeau propre du dossier (ce que le toggle UI écrit). */
+      aiContext: !!f.aiContext,
+      /** Exposition réelle : marqué OU descendant d'un dossier marqué. */
+      aiContextEffective: aiFolderIds ? aiFolderIds.has(f.id) : !!f.aiContext,
       createdAt: f.createdAt.toISOString(),
       updatedAt: f.updatedAt.toISOString(),
     };
@@ -2005,7 +2086,8 @@ export class ProjectsService {
       where: { projectId, organizationId: orgId },
       orderBy: { name: 'asc' },
     });
-    return folders.map((f) => this.serializeFolder(f));
+    const aiFolderIds = effectiveAiFolderIds(folders);
+    return folders.map((f) => this.serializeFolder(f, aiFolderIds));
   }
 
   async createFolder(
@@ -2013,7 +2095,7 @@ export class ProjectsService {
     projectId: string,
     userId: string,
     isAdmin: boolean,
-    dto: { name: string; parentId?: string | null },
+    dto: { name: string; parentId?: string | null; aiContext?: boolean },
   ) {
     await this.findOne(orgId, projectId, userId, isAdmin);
     const name = dto.name?.trim();
@@ -2022,9 +2104,15 @@ export class ProjectsService {
     if (parentId) await this.assertFolder(orgId, projectId, parentId);
     await this.assertFolderNameFree(orgId, projectId, parentId, name);
     const folder = await this.prisma.projectDocumentFolder.create({
-      data: { organizationId: orgId, projectId, parentId, name: name.slice(0, 120) },
+      data: {
+        organizationId: orgId,
+        projectId,
+        parentId,
+        name: name.slice(0, 120),
+        aiContext: dto.aiContext === true,
+      },
     });
-    return this.serializeFolder(folder);
+    return this.serializeFolder(folder, await this.aiFolderIdsFor(orgId, projectId));
   }
 
   async updateFolder(
@@ -2033,11 +2121,12 @@ export class ProjectsService {
     userId: string,
     isAdmin: boolean,
     folderId: string,
-    dto: { name?: string; parentId?: string | null },
+    dto: { name?: string; parentId?: string | null; aiContext?: boolean },
   ) {
     await this.findOne(orgId, projectId, userId, isAdmin);
     const folder = await this.assertFolder(orgId, projectId, folderId);
-    const data: { name?: string; parentId?: string | null } = {};
+    const data: { name?: string; parentId?: string | null; aiContext?: boolean } = {};
+    if (dto.aiContext !== undefined) data.aiContext = dto.aiContext;
     if (dto.name !== undefined) {
       const name = dto.name.trim();
       if (!name) throw new BadRequestException('Nom de dossier requis');
@@ -2079,7 +2168,7 @@ export class ProjectsService {
       where: { id: folderId },
       data,
     });
-    return this.serializeFolder(updated);
+    return this.serializeFolder(updated, await this.aiFolderIdsFor(orgId, projectId));
   }
 
   /** Suppression : le contenu (documents + sous-dossiers) REMONTE au parent. */
@@ -2107,6 +2196,148 @@ export class ProjectsService {
   }
 
   /** Déplacement (folderId, null = racine) et/ou toggle « Contexte IA ». */
+  /**
+   * Remplace le **contenu texte** d'un document existant, en place (même clé
+   * S3, donc même id et mêmes liens). Sert au maintien d'un contexte IA vivant :
+   * l'assistant réécrit la note plutôt que d'empiler des versions homonymes.
+   *
+   * Refuse les documents **non textuels** : on ne remplace pas un PDF ou un
+   * tableur par une chaîne de caractères. Le type MIME d'origine est conservé —
+   * cette route ne change pas la nature du document, seulement son contenu.
+   */
+  async replaceDocumentText(
+    orgId: string,
+    projectId: string,
+    userId: string,
+    isAdmin: boolean,
+    docId: string,
+    content: string,
+  ) {
+    const doc = await this.getDocumentRaw(orgId, projectId, userId, isAdmin, docId);
+    if (!doc.mimeType.startsWith('text/') && doc.mimeType !== 'application/json') {
+      throw new BadRequestException(
+        `Ce document n'est pas textuel (${doc.mimeType}) : son contenu ne peut pas être remplacé par du texte.`,
+      );
+    }
+    const buf = Buffer.from(content, 'utf8');
+    await this.s3.putObject(this.s3.buckets.charters, doc.storageKey, buf, doc.mimeType);
+    const updated = await this.prisma.projectDocument.update({
+      where: { id: docId },
+      // `contentUpdatedAt` : sans lui, une note réécrite continuait d'afficher
+      // la date de son PREMIER dépôt — la fraîcheur montrée était fausse.
+      data: { sizeBytes: buf.byteLength, contentUpdatedAt: new Date() },
+      include: { uploadedBy: { select: { id: true, name: true } } },
+    });
+    return this.serializeDoc(updated, await this.aiFolderIdsFor(orgId, projectId));
+  }
+
+  /**
+   * Dépôt d'une note TEXTE, en **upsert par nom** : si une note textuelle du
+   * même nom existe déjà dans le dossier cible, son contenu est remplacé au lieu
+   * de créer un homonyme.
+   *
+   * C'est ce qui empêche un agent sans `docId` d'empiler « decisions-archi.md »
+   * à chaque passage — l'empilement dégradait le contexte de tous les agents
+   * suivants (la description du tool MCP le déconseillait déjà en langue
+   * naturelle, sans que rien ne l'applique).
+   *
+   * Le `mimeType` du document remplacé est CONSERVÉ : renommer une note en
+   * `.json` ne doit pas changer la nature du document sous les pieds des agents.
+   */
+  async upsertTextDocument(
+    orgId: string,
+    projectId: string,
+    userId: string,
+    isAdmin: boolean,
+    input: {
+      filename: string;
+      mimeType: string;
+      content: string;
+      kind: ProjectDocumentKind;
+      folderId?: string | null;
+      aiContext?: boolean;
+      onDuplicate?: OnDuplicate;
+      /** Fabrique la clé S3 d'une création (le controller connaît la convention). */
+      storageKeyFor: (storedName: string) => string;
+    },
+  ) {
+    await this.findOne(orgId, projectId, userId, isAdmin);
+
+    const filename = sanitizeDocName(input.filename);
+    if (!filename) throw new BadRequestException('Nom de document requis');
+
+    // Dossier cible : celui demandé, sinon l'unique dossier « Contexte IA »
+    // racine s'il en existe un (et un seul), sinon la racine.
+    let folderId = input.folderId ?? null;
+    if (folderId) {
+      await this.assertFolder(orgId, projectId, folderId);
+    } else {
+      const folders = await this.prisma.projectDocumentFolder.findMany({
+        where: { projectId, organizationId: orgId },
+        select: { id: true, parentId: true, aiContext: true },
+      });
+      folderId = defaultContextFolderId(folders);
+    }
+
+    const buf = Buffer.from(input.content, 'utf8');
+    const existing = await this.prisma.projectDocument.findMany({
+      where: { projectId, organizationId: orgId, folderId },
+      select: {
+        id: true,
+        filename: true,
+        folderId: true,
+        mimeType: true,
+        uploadedAt: true,
+        storageKey: true,
+      },
+    });
+    const match = findDuplicateTextDoc(existing, filename, folderId, input.onDuplicate);
+
+    if (match) {
+      const target = existing.find((d) => d.id === match.target.id)!;
+      await this.s3.putObject(this.s3.buckets.charters, target.storageKey, buf, target.mimeType);
+      const updated = await this.prisma.projectDocument.update({
+        where: { id: target.id },
+        data: {
+          sizeBytes: buf.byteLength,
+          contentUpdatedAt: new Date(),
+          uploadedById: userId,
+          ...(input.aiContext !== undefined ? { aiContext: input.aiContext } : {}),
+        },
+        include: { uploadedBy: { select: { id: true, name: true } } },
+      });
+      return {
+        ...this.serializeDoc(updated, await this.aiFolderIdsFor(orgId, projectId)),
+        replaced: true,
+        /** > 1 = des homonymes préexistaient : ménage à faire côté humain. */
+        duplicates: match.duplicates,
+      };
+    }
+
+    const storageKey = input.storageKeyFor(filename);
+    await this.s3.putObject(this.s3.buckets.charters, storageKey, buf, input.mimeType);
+    const created = await this.prisma.projectDocument.create({
+      data: {
+        organizationId: orgId,
+        projectId,
+        kind: input.kind,
+        folderId,
+        aiContext: input.aiContext !== false,
+        filename,
+        mimeType: input.mimeType,
+        sizeBytes: buf.byteLength,
+        storageKey,
+        uploadedById: userId,
+      },
+      include: { uploadedBy: { select: { id: true, name: true } } },
+    });
+    return {
+      ...this.serializeDoc(created, await this.aiFolderIdsFor(orgId, projectId)),
+      replaced: false,
+      duplicates: 0,
+    };
+  }
+
   async updateDocument(
     orgId: string,
     projectId: string,
@@ -2125,6 +2356,6 @@ export class ProjectsService {
       },
       include: { uploadedBy: { select: { id: true, name: true } } },
     });
-    return this.serializeDoc(updated);
+    return this.serializeDoc(updated, await this.aiFolderIdsFor(orgId, projectId));
   }
 }

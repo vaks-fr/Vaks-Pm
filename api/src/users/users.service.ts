@@ -84,6 +84,29 @@ const PUBLIC_SELECT = {
   idpSource: true,
 } as const;
 
+/**
+ * Sélection ALLÉGÉE pour le picker public `GET /users` (tout membre / PAT
+ * `project:view`) : volontairement SANS les champs de posture sécurité/identité
+ * (`mfaEnabled`, `allowLocalLogin`, `authProvider`, `externalId`, `idpSource`,
+ * `employeeId`). Sinon un membre lambda (ou un jeton MCP) peut recenser l'annuaire
+ * pour repérer les comptes les plus faibles (MFA off / login local autorisé) ou
+ * moissonner les identifiants IdP/RH. Ces champs restent réservés à l'annuaire
+ * admin `GET /users/directory` (`member:manage`, cf. `PUBLIC_SELECT`).
+ * Audit sécu 2026-08-02.
+ */
+const PICKER_SELECT = {
+  id: true,
+  email: true,
+  name: true,
+  kind: true,
+  isAdmin: true,
+  licensed: true,
+  timezone: true,
+  status: true,
+  countryCode: true,
+  preferredLanguage: true,
+} as const;
+
 @Injectable()
 export class UsersService {
   constructor(
@@ -108,7 +131,7 @@ export class UsersService {
         ...(opts?.includeAgents ? {} : { kind: 'HUMAN' as const }),
       },
       select: {
-        ...PUBLIC_SELECT,
+        ...PICKER_SELECT,
         memberships: {
           where: { organizationId: orgId },
           select: { role: { select: { key: true, name: true } } },

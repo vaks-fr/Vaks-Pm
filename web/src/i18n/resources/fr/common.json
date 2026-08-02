@@ -66,6 +66,11 @@
   "shell.demoResetTitle": "Réinitialiser la démo au jeu de données initial",
   "shell.demoResetConfirm": "Réinitialiser la démo ? Toutes vos modifications seront effacées.",
   "shell.demoReset": "Réinitialiser",
+  "shell.demoWelcomeEyebrow": "Démonstration",
+  "shell.demoWelcomeTitle": "Vous explorez une démo dans votre navigateur",
+  "shell.demoWelcomeBody": "Cette version tourne entièrement dans votre navigateur pour vous donner une idée de l'interface et des possibilités de VAKS PM. Elle n'est reliée à aucune vraie instance et ne reflète pas forcément toutes les dernières fonctionnalités. Certains comportements peuvent sembler bizarres ou incomplets — n'hésitez pas à nous demander une démo pour en discuter en détail.",
+  "shell.demoWelcomeCta": "Demander une démo",
+  "shell.demoWelcomeDismiss": "J'ai compris",
   "shell.everyone": "Tout le monde",
   "shell.taskCount": "{{count}} tâches",
   "shell.createFirstProject": "Créez votre premier projet",
@@ -207,5 +212,15 @@
   "noSeat.title": "Aucun siège de licence",
   "noSeat.body": "Votre compte n'a pas encore de siège de licence : vous ne pouvez pas accéder à l'application. Demandez à un administrateur de vous attribuer un siège.",
   "noSeat.signedInAs": "Connecté en tant que {{email}}",
-  "nav.agents": "Agents IA"
+  "nav.agents": "Agents IA",
+  "depType.pickerLabel": "Type de dépendance",
+  "depType.changeLabel": "Changer le type de dépendance",
+  "depType.FS.label": "Fin → Début",
+  "depType.FS.help": "Le successeur ne peut démarrer qu'une fois le prédécesseur terminé.",
+  "depType.SS.label": "Début → Début",
+  "depType.SS.help": "Le successeur ne peut démarrer qu'une fois le prédécesseur démarré (ils peuvent avancer en parallèle).",
+  "depType.FF.label": "Fin → Fin",
+  "depType.FF.help": "Le successeur ne peut finir qu'une fois le prédécesseur terminé — les deux finissent ensemble.",
+  "depType.SF.label": "Début → Fin",
+  "depType.SF.help": "Le successeur ne peut finir qu'une fois le prédécesseur démarré — rare, sert à plafonner une passation."
 }

@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
+import { safeUrl } from '../lib/url';
 import { api } from '../api/client';
 import { apiGetTimesheet } from './api';
 import type {
@@ -1189,7 +1190,7 @@ export function TimesheetView({ monday }: Props) {
                           <a
                             className="ts-rkey mono"
                             style={{ color: `oklch(0.6 0.15 ${hue})` }}
-                            href={task.externalUrl}
+                            href={safeUrl(task.externalUrl)}
                             target="_blank"
                             rel="noreferrer"
                             title={t('timesheet.openExternal', {
@@ -1673,7 +1674,7 @@ function TimesheetMobile({
                     <a
                       className="tsm-task-key mono"
                       style={{ color: `oklch(0.6 0.15 ${hue})` }}
-                      href={task.externalUrl}
+                      href={safeUrl(task.externalUrl)}
                       target="_blank"
                       rel="noreferrer"
                     >

@@ -407,6 +407,53 @@ body.dragging-active { cursor: grabbing; user-select: none; }
 .wl-chip-proj { font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-3); }
 .wl-chip-rich .wl-chip-t { font-size: 11px; color: var(--text); font-weight: 500; }
 .wl-grid[data-viz="heatmap"] .wl-chip { background: color-mix(in oklch, var(--surface) 80%, transparent); }
+/* Lot 3.2 — distingue au premier coup d'œil ce que le PM a posé à la main
+   (bordure pleine, comportement par défaut) de ce que l'auto-plan a produit
+   (bordure pointillée). Cf. AUTO_WORKLOAD.md §6.2. */
+.wl-chip-auto { border-style: dashed; }
+.wl-legend-swatch { display: inline-block; width: 20px; height: 0; border-top-width: 2px; border-top-style: solid; border-top-color: var(--text-3); vertical-align: middle; margin-right: 4px; }
+.wl-legend-swatch.is-auto { border-top-style: dashed; }
+
+/* Menu ⋯ d'actions par personne (RowActions) — remplace les 2 icônes qui
+   tronquaient le nom. Déclencheur compact + menu à entrées texte. */
+.wl-rowactions-btn {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-3);
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--r-sm, 6px);
+}
+.wl-rowactions-btn:hover { background: var(--surface-3); color: var(--text-1); }
+/* Rendu dans un portal sur document.body → position:fixed en coordonnées écran
+   (échappe à l'overflow de la grille et aux contextes d'empilement des colonnes
+   figées). top/left/width sont posés inline par le composant. */
+.wl-rowactions-menu {
+  position: fixed;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 8px);
+  box-shadow: var(--shadow-2, 0 8px 24px rgba(0, 0, 0, 0.18));
+  z-index: 1000;
+  padding: 4px;
+}
+.wl-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-1);
+  padding: 8px 12px;
+  border-radius: var(--r-sm, 6px);
+  white-space: nowrap;
+}
+.wl-menu-item:hover { background: var(--surface-3); }
 
 .wl-bar { margin-top: auto; height: 4px; background: var(--surface-3); border-radius: var(--r-pill); overflow: hidden; }
 .wl-bar-fill { height: 100%; border-radius: var(--r-pill); }
@@ -486,7 +533,12 @@ body.dragging-active { cursor: grabbing; user-select: none; }
      laisse le fil d'Ariane rétrécir (son nom tronque) et on masque la pastille
      live (non essentielle sur téléphone). Le bouton « Suivre » est déjà en
      icône seule via `.only-wide`. */
-  .topbar { gap: 6px; padding: 10px 12px; overflow: hidden; }
+  /* ⚠️ `overflow: hidden` clippait aussi l'axe vertical → les menus déroulants
+     de la topbar (sélecteur de langue, notifications) étaient rognés sous la
+     barre et disparaissaient derrière le contenu. `overflow-x: clip` +
+     `overflow-y: visible` est le seul couple qui borne l'horizontal SANS
+     clipper le vertical (avec `hidden`, l'autre axe est forcé à `auto`). */
+  .topbar { gap: 6px; padding: 10px 12px; overflow-x: clip; overflow-y: visible; }
   .crumb { flex: 1 1 auto; min-width: 0; }
   .crumb-name { max-width: none; min-width: 0; flex: 1 1 auto; }
   .live-btn { display: none; }
@@ -531,6 +583,10 @@ body.dragging-active { cursor: grabbing; user-select: none; }
 .td-pval { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 600; color: var(--text); }
 .td-select { padding: 5px 9px; border-radius: var(--r-sm); transition: background var(--dur-1) var(--ease); }
 .td-select:hover { background: var(--surface-2); }
+/* Petit sélecteur de type de dépendance (Lot 1c.3) — DepRow / DepTypePicker. */
+.td-select-inline { font: inherit; background: var(--bg-2); border: 1px solid var(--border); border-radius: 4px;
+  padding: 1px 4px; cursor: pointer; }
+.td-select-inline:hover { border-color: var(--accent); }
 .td-empty { color: var(--text-faint); font-size: 13px; }
 .td-add-btn { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; border: 1px dashed var(--border-2); color: var(--text-3); transition: all var(--dur-1) var(--ease); }
 .td-add-btn:hover { border-color: var(--accent); color: var(--accent); }
@@ -798,6 +854,10 @@ input[type="number"]::-webkit-clear-button { display: none; }
 .gantt-dep { fill: none; stroke: var(--text-faint); stroke-width: 1.5; opacity: .7; }
 .gantt-dep.is-critical { stroke: oklch(0.65 0.18 25); stroke-width: 1.8; opacity: .9; }
 .gantt-dep-hit { fill: none; stroke: transparent; stroke-width: 10; pointer-events: stroke; cursor: pointer; }
+.gantt-dep-type-fo { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; pointer-events: auto; }
+.gantt-dep-type-select { width: 34px; height: 16px; padding: 0; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--surface); color: var(--text-2); font-size: 9px; line-height: 1; cursor: pointer; text-align: center; }
+.gantt-dep-type-select:hover { border-color: var(--accent); color: var(--text-1); }
 
 .gantt-row { position: relative; z-index: 2; display: grid; border-bottom: 1px solid color-mix(in oklch, var(--border) 55%, transparent); }
 .gantt-rlabel { position: sticky; left: 0; z-index: 7; flex-shrink: 0; display: flex; align-items: center; gap: 8px;
@@ -873,6 +933,8 @@ input[type="number"]::-webkit-clear-button { display: none; }
 .gantt-link-banner { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent);
   padding: 4px 10px; background: var(--accent-soft); border-radius: var(--r-pill); }
 .gantt-link-banner button { background: transparent; border: 0; color: inherit; cursor: pointer; text-decoration: underline; font: inherit; }
+.gantt-link-type-select { font: inherit; font-size: 11px; color: var(--accent); background: var(--surface);
+  border: 1px solid color-mix(in oklch, var(--accent) 40%, var(--border)); border-radius: 5px; padding: 2px 6px; cursor: pointer; }
 
 @media (max-width: 620px) {
   .gantt-wrap { padding-left: 12px; padding-right: 12px; }
@@ -886,6 +948,23 @@ input[type="number"]::-webkit-clear-button { display: none; }
 .pj-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 16px; }
 .pj-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
 .pj-foot { flex-shrink: 0; padding: 10px 0 14px; border-top: 1px solid var(--border); }
+/* Toolbar wraps rather than overflow — the narrow-screen "Filters" button
+   collapse (index.tsx, <1080px) already keeps the item count low, this just
+   catches the remaining combos (scope toggle + Filters + Copy + New draft)
+   on the narrowest widths. */
+.pj-toolbar { flex-wrap: wrap; }
+/* Collapsible sections inside the consolidated mobile filters panel — closed
+   by default, thin border between rows so the stacked filters stay scannable. */
+.pj-filter-section { border-top: 1px solid var(--border); padding: 8px 2px; }
+.pj-filter-section:first-child { border-top: none; padding-top: 2px; }
+.pj-filter-section-head {
+  display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 8px;
+  background: none; border: none; padding: 2px; margin: 0; cursor: pointer; text-align: left;
+  font: inherit; color: inherit;
+}
+.pj-filter-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--text-3); }
+.pj-filter-section-value { font-size: 12px; color: var(--text-2); max-width: 140px; }
+.pj-filter-section-body { margin-top: 8px; }
 
 .pj-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 16px 16px 14px;
   display: flex; flex-direction: column; gap: 12px; transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease); }

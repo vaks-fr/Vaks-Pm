@@ -1,5 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { McpConfig } from './config.js';
 
 /**
@@ -35,25 +36,87 @@ export class VaksApiError extends Error {
 export interface CallContext {
   tool?: string;
   justification?: string;
+  /**
+   * Jeton de confirmation d'une action destructrice, obtenu au premier appel
+   * (défi 409). Relayé en **en-tête** et jamais dans le corps : les routes
+   * DELETE n'ont pas de corps, et un champ supplémentaire collisionnerait avec
+   * la whitelist de validation de chaque DTO côté API.
+   */
+  confirmToken?: string;
+}
+
+/**
+ * Contexte d'audit de l'appel **en cours**.
+ *
+ * Pourquoi un `AsyncLocalStorage` plutôt qu'un champ d'instance : un `ApiClient`
+ * est bien construit par requête HTTP, mais une requête peut porter un **batch
+ * JSON-RPC** (plusieurs `tools/call` dans un seul POST — c'est légal et le
+ * transport le gère). Les handlers s'exécutent alors en concurrence sur le MÊME
+ * client : avec un champ mutable, le contexte posé par le second écrase celui du
+ * premier avant que sa requête sortante ne l'ait lu, et le journal d'audit
+ * attribue la mauvaise justification au mauvais tool.
+ *
+ * ⚠️ L'instance est au niveau module mais **immuable**, et chaque contexte async
+ * est isolé : ça n'introduit aucun état mutable partagé entre requêtes ou entre
+ * utilisateurs. L'invariant de statelessness du serveur (cf. `main.ts`) tient —
+ * ne pas prendre ce `const` pour une régression lors d'un prochain audit.
+ */
+const callContextStore = new AsyncLocalStorage<CallContext>();
+
+/**
+ * Exécute `fn` avec le contexte d'audit donné. À utiliser autour de TOUT
+ * handler qui déclenche des appels API (tools, resources, completions) — sans
+ * quoi les requêtes sortantes héritent du contexte d'un appel précédent.
+ */
+export function withCallContext<T>(ctx: CallContext, fn: () => T): T {
+  return callContextStore.run(ctx, fn);
 }
 
 export class ApiClient {
-  /** Contexte posé par le tool courant (client par requête MCP → pas de course). */
+  /**
+   * Repli si aucun contexte async n'est actif (appelant historique passant par
+   * `setCallContext`). Le chemin normal est `withCallContext`, qui est correct
+   * même quand plusieurs handlers tournent en concurrence sur ce client.
+   */
   private callContext: CallContext = {};
+
+  /**
+   * Langue de l'utilisateur, posée après lecture de `/me/mcp-context`. Sans
+   * elle, l'API retombait systématiquement sur l'anglais pour TOUT ce qui passe
+   * par l'IA : messages d'erreur traduits (`ExceptionI18nFilter`) et exports de
+   * rapports (`@CurrentLang()`) résolvent leur langue depuis `Accept-Language`,
+   * en-tête que ce client n'envoyait jamais.
+   */
+  private language: string | null = null;
 
   constructor(
     private readonly cfg: McpConfig,
     private readonly bearer: string,
     private readonly tenantHost: string | undefined,
+    /**
+     * `User-Agent` du client IA entrant (Claude Desktop, Copilot Studio…),
+     * relayé tel quel à l'API pour le journal d'audit. Déclaratif : c'est le
+     * client qui s'annonce, rien ne l'authentifie — comme `justification`.
+     */
+    private readonly clientUserAgent?: string,
   ) {}
 
   /**
-   * Pose le contexte d'audit du prochain appel (nom du tool + justification en
-   * langage naturel fournie par l'agent). Transmis à l'API via les headers
-   * `X-Vaks-Mcp-Tool` / `X-Vaks-Justification` → visibles dans le journal d'audit.
+   * Pose le contexte d'audit par défaut (nom du tool + justification en langage
+   * naturel fournie par l'agent), transmis à l'API via `X-Vaks-Mcp-Tool` /
+   * `X-Vaks-Justification` → visibles dans le journal d'audit.
+   *
+   * ⚠️ Préférer `withCallContext()` : ce setter mute l'instance et ne résiste
+   * donc pas à deux handlers concurrents sur le même client (batch JSON-RPC).
+   * Conservé comme repli pour les appels hors handler.
    */
   setCallContext(ctx: CallContext): void {
     this.callContext = ctx;
+  }
+
+  /** Pose la langue relayée à l'API via `Accept-Language` (étiquette IETF). */
+  setLanguage(lang: string | null): void {
+    this.language = lang;
   }
 
   private url(path: string, query?: Record<string, string | number | undefined>): string {
@@ -105,12 +168,26 @@ export class ApiClient {
       'x-vaks-agent': MCP_AGENT_ID,
       'user-agent': MCP_AGENT_ID,
     };
+    // Langue de l'utilisateur → messages d'erreur et exports dans SA langue.
+    if (this.language) headers['accept-language'] = this.language;
+    // Provenance : QUEL client IA est à l'origine de l'appel. Le `user-agent`
+    // ci-dessus identifie le serveur MCP lui-même, pas son appelant.
+    if (this.clientUserAgent) {
+      headers['x-vaks-mcp-client'] = this.clientUserAgent
+        .slice(0, 200)
+        // eslint-disable-next-line no-control-regex
+        .replace(/[^\x20-\x7E]/g, '?');
+    }
     // Contexte d'audit (chantier agents 1) : nom du tool + justification.
     // Headers ASCII only — on encode la justification en RFC 2047 n'étant pas
     // praticable côté serveur, on remplace les caractères non-latin1 (rare).
-    if (this.callContext.tool) headers['x-vaks-mcp-tool'] = this.callContext.tool.slice(0, 200);
-    if (this.callContext.justification) {
-      headers['x-vaks-justification'] = this.callContext.justification
+    // Contexte async d'abord (correct sous batch/concurrence), champ d'instance
+    // en repli — cf. `callContextStore`.
+    const ctx = callContextStore.getStore() ?? this.callContext;
+    if (ctx.tool) headers['x-vaks-mcp-tool'] = ctx.tool.slice(0, 200);
+    if (ctx.confirmToken) headers['x-vaks-confirm-token'] = ctx.confirmToken.slice(0, 200);
+    if (ctx.justification) {
+      headers['x-vaks-justification'] = ctx.justification
         .slice(0, 1000)
         // eslint-disable-next-line no-control-regex
         .replace(/[^\x20-\x7E -ÿ]/g, '?');

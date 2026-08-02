@@ -66,6 +66,11 @@
   "shell.demoResetTitle": "Reimposta la demo al set di dati iniziale",
   "shell.demoResetConfirm": "Reimpostare la demo? Tutte le tue modifiche andranno perse.",
   "shell.demoReset": "Reimposta",
+  "shell.demoWelcomeEyebrow": "Demo",
+  "shell.demoWelcomeTitle": "Stai esplorando una demo che gira nel tuo browser",
+  "shell.demoWelcomeBody": "Questa versione gira interamente nel tuo browser per darti un'idea dell'interfaccia e delle possibilità di VAKS PM. Non è collegata a nessuna istanza reale e potrebbe non riflettere tutte le funzionalità più recenti. Alcuni comportamenti potrebbero sembrare strani o incompleti — non esitare a chiederci una demo per approfondire.",
+  "shell.demoWelcomeCta": "Richiedi una demo",
+  "shell.demoWelcomeDismiss": "Ho capito",
   "shell.everyone": "Tutti",
   "shell.taskCount": "{{count}} attività",
   "shell.createFirstProject": "Crea il tuo primo progetto",
@@ -207,5 +212,15 @@
   "noSeat.title": "Nessuna postazione di licenza",
   "noSeat.body": "Il tuo account non ha ancora una postazione di licenza, quindi non puoi accedere all'app. Chiedi a un amministratore di assegnartene una.",
   "noSeat.signedInAs": "Connesso come {{email}}",
-  "nav.agents": "Agenti IA"
+  "nav.agents": "Agenti IA",
+  "depType.pickerLabel": "Tipo di dipendenza",
+  "depType.changeLabel": "Cambia il tipo di dipendenza",
+  "depType.FS.label": "Fine → Inizio",
+  "depType.FS.help": "Il successore può iniziare solo dopo la fine del predecessore.",
+  "depType.SS.label": "Inizio → Inizio",
+  "depType.SS.help": "Il successore può iniziare solo dopo l'inizio del predecessore (possono procedere in parallelo).",
+  "depType.FF.label": "Fine → Fine",
+  "depType.FF.help": "Il successore può finire solo insieme al predecessore — le due attività finiscono insieme.",
+  "depType.SF.label": "Inizio → Fine",
+  "depType.SF.help": "Il successore può finire solo dopo l'inizio del predecessore — raro, usato per limitare un passaggio di consegne."
 }

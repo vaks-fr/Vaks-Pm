@@ -55,6 +55,7 @@ const ICONS: Record<string, string> = {
   unlock: 'M5 11h14v10H5z M8 11V7a4 4 0 0 1 7.5-1.5',
   eye: 'M12 5c-5 0-9 4.5-10 7 1 2.5 5 7 10 7s9-4.5 10-7c-1-2.5-5-7-10-7zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   sliders: 'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6',
+  bot: 'M12 8V4H8M4 8h16v12H4zM2 14h2M20 14h2M9 13v2M15 13v2',
 };
 
 export function Icon({

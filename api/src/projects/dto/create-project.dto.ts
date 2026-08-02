@@ -3,6 +3,7 @@ import {
   ArrayUnique,
   IsArray,
   IsBoolean,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -65,9 +66,24 @@ export class CreateProjectDto {
   @Length(0, 20000)
   agentContext?: string | null;
 
+  /** Brief structuré — normalisé côté service (cf. `normalizeAgentBrief`). */
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsObject()
+  agentBrief?: Record<string, unknown> | null;
+
   @IsOptional()
   @ValidateIf((_, v) => v !== null)
   @IsString()
   @Length(0, 8000)
   agentGuardrails?: string | null;
+
+  /** Dépôt(s) CI autorisé(s) (ex. `["owner/repo"]`) — lie la preuve `ci_signed`
+   *  d'un livrable à ce dépôt (anti-réutilisation cross-dépôt). Vide = comportement
+   *  org-wide historique ; la protection s'active dès qu'un dépôt est renseigné. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @Length(1, 200, { each: true })
+  ciRepos?: string[];
 }

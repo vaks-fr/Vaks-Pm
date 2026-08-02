@@ -22,6 +22,8 @@ import { CurrentLang, reportT, type ReportLang } from '../common/i18n/report-i18
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../rbac/permissions.guard';
 import { ProjectAccessGuard } from '../rbac/project-access.guard';
+import { RbacService } from '../rbac/rbac.service';
+import { AdminSettingsService } from '../admin/admin-settings.service';
 import {
   ProjectAccess,
   fromProjectBody,
@@ -34,6 +36,7 @@ import { RequirePermissions, PublicApi } from '../rbac/require-permissions.decor
 import { CurrentUser, AuthUser, requesterOf } from '../auth/current-user.decorator';
 import { WorkloadService } from './workload.service';
 import { AutoplanService } from './autoplan.service';
+import { AgentsWorkloadService } from './agents-workload.service';
 import { AutoplanRequestDto } from './dto/autoplan.dto';
 import { UpsertWorkScheduleDto } from './dto/work-schedule.dto';
 import {
@@ -44,11 +47,13 @@ import {
   UpdateTimeOffDto,
 } from './dto/time-off.dto';
 import {
+  AgentWorkloadQuery,
   AutoSplitDto,
   AutoSplitMultiDto,
   CreateAllocationDto,
   ListAllocationsQuery,
   MoveAllocationDayDto,
+  PlanStatusQuery,
   UpdateAllocationDto,
   WorkloadGridQuery,
 } from './dto/allocation.dto';
@@ -66,6 +71,9 @@ export class WorkloadController {
   constructor(
     private readonly svc: WorkloadService,
     private readonly autoplan: AutoplanService,
+    private readonly agentsWorkload: AgentsWorkloadService,
+    private readonly rbac: RbacService,
+    private readonly adminSettings: AdminSettingsService,
   ) {}
 
   // -------- Autoplan --------
@@ -73,7 +81,7 @@ export class WorkloadController {
   @RequirePermissions('allocation:manage')
   @ProjectAccess(fromProjectBody('projectId'))
   runAutoplan(@CurrentUser() user: AuthUser, @Body() dto: AutoplanRequestDto) {
-    return this.autoplan.run(user.orgId, dto);
+    return this.autoplan.run(user.orgId, dto, { id: user.userId, email: user.email });
   }
 
   // -------- Work schedules --------
@@ -276,6 +284,49 @@ export class WorkloadController {
       { userId: user.userId, isAdmin: user.isAdmin },
       q,
     );
+  }
+
+  /** Badge « plan obsolète » (Lot 3.3, AUTOPLAN_IMPROVEMENTS.md §3.3) : les
+   *  tâches du projet ont-elles bougé depuis la dernière application de
+   *  l'auto-plan ? Comparaison synchrone, aucun job d'arrière-plan. */
+  @Get('workload/plan-status')
+  @RequirePermissions('report:view')
+  @ProjectAccess(fromProjectQuery('projectId'))
+  planStatus(@CurrentUser() user: AuthUser, @Query() q: PlanStatusQuery) {
+    return this.svc.planStatus(user.orgId, q.projectId);
+  }
+
+  /**
+   * Vue agrégée des agents IA (Lot 5, AUTOPLAN_IMPROVEMENTS.md §5.1) —
+   * concurrence + budget + file de revue. `enabled:false` (agents vide) si le
+   * scope demandé n'a aucun projet `agentsEnabled`. Les montants € sont OMIS
+   * (jamais un placeholder, jamais un 403) pour qui n'a pas `finance:view` —
+   * même discipline que `FinanceApiGateGuard` pour les jetons, appliquée ici
+   * en dégradation plutôt qu'en 403 pour ne jamais casser la vue d'un PM.
+   */
+  @Get('workload/agents')
+  @RequirePermissions('report:view')
+  @ProjectAccess(fromProjectQuery('projectId'))
+  async agentsWorkloadView(@CurrentUser() user: AuthUser, @Query() q: AgentWorkloadQuery) {
+    const canViewFinance = await this.resolveCanViewFinance(user, q.projectId);
+    return this.agentsWorkload.agentsView(user.orgId, requesterOf(user), q, canViewFinance);
+  }
+
+  /**
+   * Réplique la discipline de `FinanceApiGateGuard` (fail-closed pour les
+   * jetons, jamais pour une session navigateur) — mais en BOOLÉEN plutôt qu'en
+   * 403 : cet endpoint dégrade (omission des champs €), il ne bloque jamais.
+   */
+  private async resolveCanViewFinance(user: AuthUser, projectId?: string): Promise<boolean> {
+    if (user.viaApiToken) {
+      const hasScope = !!user.isOrgToken || !!user.tokenScopes?.includes('finance:view');
+      if (!hasScope) return false;
+      const all = await this.adminSettings.getAll(user.orgId);
+      return all['mcp.allowFinance'] === true;
+    }
+    if (user.isAdmin) return true;
+    const perms = await this.rbac.getEffectivePermissions(user.userId, user.orgId, projectId);
+    return perms.has('finance:view');
   }
 
   /** Export CSV de la charge : une ligne par utilisateur × jour. */

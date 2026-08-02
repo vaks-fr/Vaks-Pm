@@ -76,7 +76,7 @@ secrets:
 configs:
   # Bumper le suffixe v2/v3/… à chaque modification de traefik-dynamic.yml
   # (les configs Swarm sont immutables, seul un nom différent force le redéploiement).
-  traefik_dynamic_v9:
+  traefik_dynamic_v10:
     file: ./infra/traefik-dynamic.yml
   # Idem pour garage.toml : bumper le suffixe à chaque modif de la config.
   garage_config_v1:
@@ -110,7 +110,7 @@ services:
       - --accesslog.fields.headers.names.User-Agent=keep
       - --accesslog.fields.headers.names.X-Forwarded-For=keep
     configs:
-      - source: traefik_dynamic_v9
+      - source: traefik_dynamic_v10
         target: /etc/traefik/dynamic.yml
       - source: tls_cert_v1
         target: /certs/wildcard.crt
@@ -130,7 +130,7 @@ services:
         constraints: [node.role == manager]
 
   web:
-    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/thomasvaxelaire-vaks/vakspm}-web:${VAKS_TAG:-latest}
+    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/vaks-fr/vakspm}-web:${VAKS_TAG:-latest}
     networks: [vakspm]
     deploy:
       replicas: 2
@@ -150,7 +150,7 @@ services:
         - traefik.http.services.web.loadbalancer.server.port=80
 
   api:
-    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/thomasvaxelaire-vaks/vakspm}-api:${VAKS_TAG:-latest}
+    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/vaks-fr/vakspm}-api:${VAKS_TAG:-latest}
     environment:
       NODE_ENV: production
       API_PORT: "3000"
@@ -176,6 +176,15 @@ services:
       # depuis le sous-domaine du Host (<slug>.vaks-pm.com -> base `<db>_<slug>`).
       DEPLOYMENT_MODE: pooled
       TENANCY_BASE_DOMAIN: vaks-pm.com
+      # Domaine(s) public(s) d'un serveur MCP en DMZ, servant `<slug>.<domaine>`.
+      # UNE valeur couvre TOUS les tenants : l'API résout le slug sur le premier
+      # label. À poser seulement si le domaine public du MCP diffère du domaine
+      # interne (app sur `vaks.local`, MCP sur `<slug>.mcp.exemple.fr`). Vide
+      # sinon — un MCP interne sur le même domaine ne nécessite rien.
+      # TENANCY_MCP_DOMAINS: "mcp.exemple.fr"
+      #
+      # (TENANCY_CUSTOM_DOMAINS reste disponible pour un tenant sur un domaine
+      #  propre, hors `<slug>.<baseDomain>` — sans rapport avec le MCP.)
     secrets:
       - jwt_access_secret
       - jwt_refresh_secret
@@ -215,7 +224,7 @@ services:
   # traefik-dynamic.yml). Ne fait PAS `prisma db push` (l'`api`/data-plane
   # possède le schéma — évite une race sur la base partagée).
   controlplane:
-    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/thomasvaxelaire-vaks/vakspm}-api:${VAKS_TAG:-latest}
+    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/vaks-fr/vakspm}-api:${VAKS_TAG:-latest}
     environment:
       NODE_ENV: production
       API_PORT: "3000"
@@ -232,6 +241,15 @@ services:
       APP_URL: http://localhost
       DEPLOYMENT_MODE: pooled
       TENANCY_BASE_DOMAIN: vaks-pm.com
+      # Domaine(s) public(s) d'un serveur MCP en DMZ, servant `<slug>.<domaine>`.
+      # UNE valeur couvre TOUS les tenants : l'API résout le slug sur le premier
+      # label. À poser seulement si le domaine public du MCP diffère du domaine
+      # interne (app sur `vaks.local`, MCP sur `<slug>.mcp.exemple.fr`). Vide
+      # sinon — un MCP interne sur le même domaine ne nécessite rien.
+      # TENANCY_MCP_DOMAINS: "mcp.exemple.fr"
+      #
+      # (TENANCY_CUSTOM_DOMAINS reste disponible pour un tenant sur un domaine
+      #  propre, hors `<slug>.<baseDomain>` — sans rapport avec le MCP.)
     secrets:
       - jwt_access_secret
       - jwt_refresh_secret
@@ -255,8 +273,57 @@ services:
         limits: { cpus: "1", memory: 448M }
       update_config: { parallelism: 1, order: start-first }
 
+  # Serveur MCP (connecteur IA : Claude, Copilot Studio, ChatGPT). Transport
+  # Streamable-HTTP **stateless** : chaque POST /mcp construit un serveur jetable,
+  # aucun état n'est partagé entre requêtes ni entre réplicas. C'est ce qui rend
+  # le multi-réplica sûr par construction — et pourquoi ce service ne monte
+  # AUCUN secret : il ne détient rien, relaie le bearer et laisse l'API valider
+  # le jeton et appliquer le RBAC (cf. mcp/src/main.ts).
+  mcp:
+    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/vaks-fr/vakspm}-mcp:${VAKS_TAG:-latest}
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      VAKS_API_URL: http://api:3000
+      VAKS_API_PREFIX: api/v1
+      # Heap cap sous la limite conteneur : le serveur reconstruit ~95 tools
+      # validés par zod à CHAQUE requête (buildServer), ce n'est pas gratuit.
+      NODE_OPTIONS: "--max-old-space-size=112"
+      # ⚠ VAKS_TENANT_HOST et VAKS_AUTH_SERVER_MODE sont volontairement ABSENTS.
+      # Les deux ressemblent à des oublis, n'en ajoutez pas :
+      #  - sans VAKS_TENANT_HOST, le tenant est dérivé du Host entrant, ce qui
+      #    permet à un seul déploiement de servir N tenants (mode pooled). Le
+      #    définir épinglerait toutes les requêtes sur un seul tenant.
+      #  - sans VAKS_AUTH_SERVER_MODE, le mode est `self`. En co-localisé (MCP
+      #    derrière le même Traefik que l'API), `self` et `tenant` résolvent le
+      #    même host : le changer serait du risque pour zéro bénéfice.
+    healthcheck:
+      # Premier healthcheck du stack, et il porte un vrai rôle : avec
+      # `order: start-first` et SANS healthcheck, une tâche est réputée prête dès
+      # que le process démarre — le VIP Swarm y envoie donc du trafic avant que
+      # Express n'ait appelé listen(), soit un 502 à chaque rolling update.
+      # Timings calqués sur deploy/helm/vaks-pm/templates/api.yaml.
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    # Laisse au drain SIGTERM le temps de finir les requêtes en vol. Doit rester
+    # > DRAIN_MS (25 s), lui-même > VAKS_API_TIMEOUT_MS (20 s) : un appel de tool
+    # légitime peut occuper 20 s, une grâce plus courte couperait exactement les
+    # appels lents qu'on cherche à protéger.
+    stop_grace_period: 30s
+    networks: [vakspm]
+    deploy:
+      replicas: 2
+      resources:
+        limits: { cpus: "0.5", memory: 160M }
+      update_config: { parallelism: 1, order: start-first }
+      placement:
+        preferences: [{ spread: node.id }]
+
   worker:
-    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/thomasvaxelaire-vaks/vakspm}-worker:${VAKS_TAG:-latest}
+    image: ${VAKS_IMAGE_PREFIX:-ghcr.io/vaks-fr/vakspm}-worker:${VAKS_TAG:-latest}
     environment:
       NODE_ENV: production
       REDIS_URL: redis://redis:6379

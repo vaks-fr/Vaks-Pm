@@ -11,7 +11,8 @@
     "@vaks-pm/shared": "*",
     "bullmq": "^5.7.0",
     "ioredis": "^5.4.1",
-    "nodemailer": "^9.0.1"
+    "nodemailer": "^9.0.1",
+    "undici": "^7.28.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
