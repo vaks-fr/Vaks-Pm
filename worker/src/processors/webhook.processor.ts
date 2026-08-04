@@ -1,6 +1,7 @@
 import { createHmac } from 'crypto';
 import { WebhookJob } from '../queues';
 import { safeFetch } from '../safe-fetch';
+import { internalHeaders } from '../internal-headers';
 
 /**
  * Worker BullMQ pour la file `webhook`. POST le payload au receveur externe
@@ -27,16 +28,6 @@ interface WebhookConfig {
   active: boolean;
   /** 'raw' (enveloppe Vaks) ou 'teams' (Adaptive Card). */
   format?: string;
-}
-
-function internalHeaders(tenantSlug?: string | null): Record<string, string> {
-  const headers: Record<string, string> = {};
-  const token = process.env.WORKER_API_TOKEN;
-  if (token) headers['X-Worker-Token'] = token;
-  // Route la requête interne vers la base du tenant (mode pooled). Sans ce
-  // header, l'API retombe sur la base de base et ne trouve pas le webhook.
-  if (tenantSlug) headers['X-Tenant-Slug'] = tenantSlug;
-  return headers;
 }
 
 async function fetchWebhookConfig(

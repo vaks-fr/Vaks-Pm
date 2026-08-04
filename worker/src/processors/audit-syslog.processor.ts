@@ -4,6 +4,7 @@ import * as tls from 'node:tls';
 import * as os from 'node:os';
 import { createHash } from 'node:crypto';
 import { AuditSyslogEntry, AuditSyslogJob } from '../queues';
+import { internalHeaders } from '../internal-headers';
 
 /**
  * Worker BullMQ pour la file `audit-syslog` : forward des entrées du journal
@@ -170,20 +171,12 @@ function frame(msg: string): string {
   return `${Buffer.byteLength(msg, 'utf8')} ${msg}`;
 }
 
-function internalHeaders(tenantSlug?: string | null): Record<string, string> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const token = process.env.WORKER_API_TOKEN;
-  if (token) headers['X-Worker-Token'] = token;
-  if (tenantSlug) headers['X-Tenant-Slug'] = tenantSlug;
-  return headers;
-}
-
 async function reportTestResult(job: AuditSyslogJob, ok: boolean, error?: string): Promise<void> {
   const base = process.env.INTERNAL_API_URL ?? 'http://api:3000';
   try {
     await fetch(`${base}/api/v1/internal/audit/syslog-test-result`, {
       method: 'POST',
-      headers: internalHeaders(job.tenantSlug),
+      headers: { 'Content-Type': 'application/json', ...internalHeaders(job.tenantSlug) },
       body: JSON.stringify({ organizationId: job.organizationId, ok, error: error ?? null }),
     });
   } catch {
@@ -198,7 +191,7 @@ async function reportTerminalFailure(job: AuditSyslogJob, error: string): Promis
   try {
     await fetch(`${base}/api/v1/internal/audit/syslog-failure`, {
       method: 'POST',
-      headers: internalHeaders(job.tenantSlug),
+      headers: { 'Content-Type': 'application/json', ...internalHeaders(job.tenantSlug) },
       body: JSON.stringify({
         organizationId: job.organizationId,
         error: error.slice(0, 500),

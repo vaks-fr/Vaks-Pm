@@ -281,13 +281,33 @@ export class OAuthService {
 
   // -------------------- Clients pré-enregistrés (admin) --------------------
 
-  /** Crée un client confidentiel (id + secret). Le secret n'est renvoyé qu'ICI. */
+  /**
+   * Callback par défaut quand l'admin crée un client SANS renseigner d'URL.
+   * Copilot Studio / Power Platform (cloud commercial) exposent une **constante
+   * fixe** (pas un GUID par connecteur) comme URL de rappel du connecteur OAuth2
+   * générique — donc on peut la pré-enregistrer AVANT que le connecteur existe.
+   * Cela permet le flux « créer le client comme un jeton » (nom → id + secret,
+   * sans avoir encore l'URL du provider). Un cloud souverain/régional utilise un
+   * autre hôte `*.consent.azure-apim.net` : l'admin édite alors le callback après
+   * coup (`updatePreregisteredClient`), sans régénérer le secret.
+   */
+  private static readonly DEFAULT_POWER_PLATFORM_REDIRECT =
+    'https://global.consent.azure-apim.net/redirect';
+
+  /**
+   * Crée un client confidentiel (id + secret). Le secret n'est renvoyé qu'ICI.
+   * Le callback est **optionnel** : absent, on enregistre la constante Power
+   * Platform par défaut (éditable ensuite) — l'admin obtient donc son id+secret
+   * sans avoir l'URL du provider sous la main.
+   */
   async createPreregisteredClient(
     name: string,
     redirectUris: string[],
   ): Promise<{ client_id: string; client_secret: string; redirect_uris: string[]; client_name: string }> {
-    const uris = (redirectUris ?? []).filter((u) => typeof u === 'string' && u.trim());
-    if (uris.length === 0) throw new BadRequestException('Au moins une URL de callback est requise.');
+    const provided = (redirectUris ?? []).filter((u) => typeof u === 'string' && u.trim());
+    const uris = provided.length
+      ? provided
+      : [OAuthService.DEFAULT_POWER_PLATFORM_REDIRECT];
     for (const u of uris) this.assertSafeRedirectUri(u);
     const clientId = `vaks_mcpc_${randomBytes(16).toString('base64url')}`;
     const clientSecret = `vaks_cs_${randomBytes(32).toString('base64url')}`;
@@ -301,6 +321,26 @@ export class OAuthService {
     };
     await this.store.savePreClient(this.slug(), client);
     return { client_id: clientId, client_secret: clientSecret, redirect_uris: uris, client_name: client.clientName };
+  }
+
+  /**
+   * Remplace la liste des URLs de callback d'un client pré-enregistré **sans
+   * régénérer le secret** — pour renseigner le vrai callback régional une fois
+   * connu, ou en ajouter plusieurs. Le `secretHash` et le reste du client sont
+   * préservés (on relit l'existant et on ne touche qu'aux `redirectUris`).
+   */
+  async updatePreregisteredClient(
+    clientId: string,
+    redirectUris: string[],
+  ): Promise<{ client_id: string; redirect_uris: string[]; client_name: string }> {
+    const existing = await this.store.getPreClient(this.slug(), clientId);
+    if (!existing) throw new BadRequestException('Client pré-enregistré introuvable.');
+    const uris = (redirectUris ?? []).filter((u) => typeof u === 'string' && u.trim());
+    if (uris.length === 0) throw new BadRequestException('Au moins une URL de callback est requise.');
+    for (const u of uris) this.assertSafeRedirectUri(u);
+    const updated: OAuthClient = { ...existing, redirectUris: uris };
+    await this.store.savePreClient(this.slug(), updated);
+    return { client_id: clientId, redirect_uris: uris, client_name: updated.clientName };
   }
 
   async listPreregisteredClients(): Promise<

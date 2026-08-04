@@ -16,14 +16,6 @@ export interface McpConfig {
   /** Préfixe global de l'API NestJS. */
   apiPrefix: string;
   /**
-   * @deprecated Plus utilisé pour la résolution du tenant. Le serveur MCP relaie
-   * désormais le **Host public tel quel** ; c'est l'API qui résout le tenant
-   * (sous-domaine canonique, domaine custom, ou `TENANCY_MCP_DOMAINS` pour un MCP
-   * en DMZ sur un domaine distinct). Champ conservé pour ne pas casser un
-   * environnement qui le définit encore.
-   */
-  mcpLabel: string;
-  /**
    * Host tenant forcé (optionnel). S'il est défini, on l'utilise tel quel et on
    * ignore le Host entrant — utile pour un déploiement **mono-tenant** où aucun
    * sous-domaine par tenant n'existe.
@@ -55,10 +47,6 @@ export function loadConfig(): McpConfig {
     port: intEnv('PORT', 8080),
     apiBaseUrl: (process.env.VAKS_API_URL ?? 'http://api:3000').replace(/\/+$/, ''),
     apiPrefix: '/' + (process.env.VAKS_API_PREFIX ?? 'api/v1').replace(/^\/+|\/+$/g, ''),
-    // VAKS_STRIP_HOST_PREFIX conservé comme alias rétrocompatible de VAKS_MCP_LABEL.
-    mcpLabel: (process.env.VAKS_MCP_LABEL ?? process.env.VAKS_STRIP_HOST_PREFIX ?? 'mcp')
-      .trim()
-      .toLowerCase(),
     forcedTenantHost: process.env.VAKS_TENANT_HOST?.trim() || null,
     apiTimeoutMs: intEnv('VAKS_API_TIMEOUT_MS', 20000),
     authServerMode: process.env.VAKS_AUTH_SERVER_MODE === 'tenant' ? 'tenant' : 'self',

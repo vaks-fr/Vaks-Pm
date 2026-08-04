@@ -1,4 +1,5 @@
 import { TeamsJob } from '../queues';
+import { internalHeaders } from '../internal-headers';
 
 /**
  * Worker BullMQ pour la file `teams` (provisioning Microsoft Teams via Graph).
@@ -55,14 +56,6 @@ interface ResultBody {
   terminal?: boolean;
   /** Numéro de la tentative ayant produit ce résultat (informatif). */
   attempts?: number;
-}
-
-function internalHeaders(tenantSlug?: string | null): Record<string, string> {
-  const headers: Record<string, string> = {};
-  const token = process.env.WORKER_API_TOKEN;
-  if (token) headers['X-Worker-Token'] = token;
-  if (tenantSlug) headers['X-Tenant-Slug'] = tenantSlug;
-  return headers;
 }
 
 async function fetchContext(job: TeamsJob): Promise<ProvisionContext | null> {

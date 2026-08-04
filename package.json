@@ -24,9 +24,16 @@
   "overrides": {
     "rxjs": "7.8.2",
     "ws": "^8.21.0",
-    "js-yaml": "^4.2.0",
+    "js-yaml": "^4.3.1",
     "undici": "^7.28.0",
     "multer": "^2.2.0",
-    "uuid": "^11.1.1"
+    "uuid": "^11.1.1",
+    "@hono/node-server": "^2.0.12",
+    "body-parser": "^1.20.6",
+    "brace-expansion": "2.1.4",
+    "esbuild": "^0.28.1",
+    "fast-uri": "^3.1.5",
+    "postcss": "^8.5.25",
+    "valibot": "^1.4.2"
   }
 }

@@ -18,7 +18,7 @@ import {
   FillResult,
   UserCapacityCtx,
 } from './capacity.service';
-import { dateIso, excessLoggedHours, isPlanStale } from './scheduling';
+import { dateIso, excessLoggedHours, isPlanStale, startOfUtcDay, weekdayMonFirst } from './scheduling';
 import { UpsertWorkScheduleDto } from './dto/work-schedule.dto';
 import {
   BulkTimeOffItem,
@@ -1820,17 +1820,6 @@ export class WorkloadService {
 // ============================================================
 // Pure helpers
 // ============================================================
-
-function startOfUtcDay(d: Date): Date {
-  const x = new Date(d);
-  x.setUTCHours(0, 0, 0, 0);
-  return x;
-}
-
-/** 0 = Monday … 6 = Sunday */
-function weekdayMonFirst(d: Date): number {
-  return (d.getUTCDay() + 6) % 7;
-}
 
 type HasDayHours = Pick<
   WorkSchedule,

@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { normalizeAgentPolicies } from '@vaks-pm/shared';
 import { normalizeAgentBrief } from '../agents/context/agent-brief';
 import type { LicenseFeature } from '@vaks-pm/shared';
@@ -124,6 +125,7 @@ export class AdminSettingsService {
     private readonly audit: AuditLogService,
     private readonly tenantCrypto: TenantCryptoService,
     private readonly licenses: LicenseService,
+    private readonly config: ConfigService,
   ) {}
 
   /**
@@ -628,7 +630,39 @@ export class AdminSettingsService {
       delete all[s.plainKey];
       all[s.setKey] = hasEnc;
     }
+    // Calculée, jamais stockée — écrase toute valeur qui traînerait en base sous
+    // ce nom (cf. garde dans upsertMany). Voir getMcpPublicUrls.
+    all.mcpPublicUrls = await this.getMcpPublicUrls(orgId);
     return all;
+  }
+
+  /**
+   * URL(s) MCP **publiques**, dérivées du déploiement (jamais saisies par
+   * l'admin) : `TENANCY_MCP_DOMAINS` déclaré côté infra (`infra/cluster.json`
+   * → `mcp.publicDomains`), combiné au slug de l'org en mode `pooled` (une
+   * valeur de config couvre tous les tenants, cf. `TenancyService.slugFromMcpHost`)
+   * ou utilisé tel quel en mode `dedicated` (une seule org, pas de slug — le
+   * Host n'est de toute façon jamais utilisé pour résoudre le tenant dans ce
+   * mode, `TenancyService.resolveFromHost` court-circuite avant). Vide si rien
+   * n'est déclaré : c'est le cas normal (MCP publié sur le même domaine que
+   * l'app, ou pas de passerelle DMZ du tout) — le front retombe alors sur
+   * `window.location.origin`.
+   */
+  async getMcpPublicUrls(orgId: string): Promise<string[]> {
+    const deployment = this.config.get('deployment') as
+      | { mode?: 'dedicated' | 'pooled'; mcpDomains?: string[] }
+      | undefined;
+    const domains = deployment?.mcpDomains ?? [];
+    if (!domains.length) return [];
+    if (deployment?.mode !== 'pooled') {
+      return domains.map((d) => `https://${d}/mcp`);
+    }
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { slug: true },
+    });
+    if (!org?.slug) return [];
+    return domains.map((d) => `https://${org.slug}.${d}/mcp`);
   }
 
   /** Déchiffre un secret stocké at-rest (ex. client secret Graph). Renvoie `''`
@@ -652,6 +686,10 @@ export class AdminSettingsService {
     values: Record<string, unknown>,
     actor?: { id?: string; email?: string },
   ) {
+    // Calculée à la lecture (getMcpPublicUrls) — jamais un OrgSetting, jamais
+    // écrite. Ignorée si un client renvoie sans le vouloir le corps complet
+    // du GET.
+    delete values['mcpPublicUrls'];
     this.validateWebhookSettings(values);
     this.validateAuditSettings(values);
     this.validateTeamsProvisioningSettings(values);

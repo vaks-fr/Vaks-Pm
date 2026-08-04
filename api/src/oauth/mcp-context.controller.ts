@@ -1,10 +1,12 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, ForbiddenException, Get, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Permission } from '@vaks-pm/shared';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PublicApi } from '../rbac/require-permissions.decorator';
 import { AuthUser, CurrentUser } from '../auth/current-user.decorator';
 import { PrismaService } from '../prisma/prisma.service';
+import { AdminSettingsService } from '../admin/admin-settings.service';
+import { CacheService } from '../common/cache.service';
 
 /**
  * Scopes d'écriture exposés via MCP (miroir de `OAuthService.WRITE_SCOPES`).
@@ -45,7 +47,16 @@ const MCP_WRITE_SCOPES: Permission[] = [
  * `PERMISSIONS` côté shared : l'accès MCP est gouverné par licence + toggle +
  * révocation de connexion, pas par ce scope). L'exiger via `@RequirePermissions`
  * la ferait échouer pour tout non-admin (effectif PAT = rôle ∩ scopes).
- * L'endpoint ne révèle que la capacité du jeton appelant → `@PublicApi` suffit.
+ *
+ * ⚠️ **Cet endpoint GATE l'accès MCP**, il ne se contente plus de le décrire.
+ * C'est le seul point traversé par CHAQUE requête MCP, quelle que soit la porte
+ * par laquelle le jeton a été obtenu : consentement OAuth, PAT fabriqué à la
+ * main dans les réglages de compte (`POST /me/api-tokens`, sans permission
+ * requise), ou clé org. Le toggle `mcp.enabled` est donc relu **ici**, et pas
+ * seulement dans `OAuthService.consent` qui ne garde que l'ÉMISSION — ce qui
+ * laissait les connexions déjà établies se renouveler indéfiniment après
+ * désactivation, et n'opposait jamais rien à un PAT fabriqué à la main (MCP
+ * fonctionnait même sur un tenant où le connecteur n'a jamais été activé).
  */
 @ApiTags('mcp')
 @ApiBearerAuth()
@@ -53,10 +64,32 @@ const MCP_WRITE_SCOPES: Permission[] = [
 @PublicApi('mcp:access')
 @Controller('me/mcp-context')
 export class McpContextController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly settings: AdminSettingsService,
+    private readonly cache: CacheService,
+  ) {}
 
   @Get()
   async context(@CurrentUser() user: AuthUser) {
+    // Kill switch org, relu à chaque requête MCP (cf. en-tête de classe).
+    // Cache court : ce handler est sur le chemin chaud (un appel par tool call)
+    // et `getMcpEnabled` fait un `findUnique` non caché — sans cache on ajoutait
+    // une lecture DB par appel d'outil. `wrap` retombe sur la source autoritaire
+    // quand Redis est KO, donc le gate tient même cache indisponible. TTL 30 s =
+    // latence de coupure au pire, acceptable pour un interrupteur d'admin.
+    const mcpEnabled = await this.cache.wrap([user.orgId, 'mcp.enabled'], 30, () =>
+      this.settings.getMcpEnabled(user.orgId),
+    );
+    if (!mcpEnabled) {
+      // 403 et non 401 : se reconnecter n'y changerait rien, c'est une décision
+      // de l'organisation. Le serveur MCP rend ce cas en échec dur, là où un 401
+      // relancerait en boucle le flux d'autorisation.
+      throw new ForbiddenException(
+        "Le connecteur IA (MCP) est désactivé pour votre organisation. Contactez votre administrateur.",
+      );
+    }
+
     const scopes = user.tokenScopes ?? [];
     // Langue de l'utilisateur : le serveur MCP en a besoin pour servir les
     // libellés de prompts et demander une réponse dans la bonne langue. Elle ne

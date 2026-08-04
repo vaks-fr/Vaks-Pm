@@ -1,4 +1,5 @@
 import { ExportJob } from '../queues';
+import { internalHeaders } from '../internal-headers';
 
 /**
  * Worker BullMQ pour la file `export`.
@@ -14,14 +15,6 @@ import { ExportJob } from '../queues';
  */
 const TIMEOUT_MS = 15 * 60_000;
 
-function internalHeaders(tenantSlug?: string | null): Record<string, string> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const token = process.env.WORKER_API_TOKEN;
-  if (token) headers['X-Worker-Token'] = token;
-  if (tenantSlug) headers['X-Tenant-Slug'] = tenantSlug;
-  return headers;
-}
-
 export async function processExport(job: ExportJob): Promise<void> {
   const base = process.env.INTERNAL_API_URL ?? 'http://api:3000';
   const ctl = new AbortController();
@@ -29,7 +22,7 @@ export async function processExport(job: ExportJob): Promise<void> {
   try {
     const res = await fetch(`${base}/api/v1/internal/exports/run`, {
       method: 'POST',
-      headers: internalHeaders(job.tenantSlug),
+      headers: { 'Content-Type': 'application/json', ...internalHeaders(job.tenantSlug) },
       body: JSON.stringify({ jobId: job.jobId, organizationId: job.organizationId }),
       signal: ctl.signal,
     });

@@ -4,7 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { HolidaysService } from '../holidays/holidays.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { TimesheetQueryDto } from './dto/timesheet.dto';
-import { dateIso } from '../workload/scheduling';
+import { dateIso, startOfUtcDay, weekdayMonFirst } from '../workload/scheduling';
 
 const MS_PER_DAY = 86_400_000;
 
@@ -382,12 +382,7 @@ export class TimesheetService {
 // ---- helpers locaux ----
 function toDateOnly(iso: string): Date {
   const s = iso.length === 10 ? `${iso}T00:00:00.000Z` : iso;
-  const d = new Date(s);
-  d.setUTCHours(0, 0, 0, 0);
-  return d;
-}
-function weekdayMonFirst(d: Date): number {
-  return (d.getUTCDay() + 6) % 7;
+  return startOfUtcDay(new Date(s));
 }
 function scheduleHoursFor(s: DaySchedule, d: Date): number {
   switch (weekdayMonFirst(d)) {

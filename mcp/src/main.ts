@@ -170,10 +170,17 @@ app.post('/mcp', async (req: Request, res: Response) => {
       );
     }
     if (e instanceof VaksApiError && e.status === 403) {
-      // Filet défensif : `me/mcp-context` ne 403 pas aujourd'hui (refus = 401),
-      // mais si un futur guard le faisait, on rend un message honnête plutôt que
-      // d'incriminer un scope qui n'est pas vérifié.
-      return rpcError(res, 403, -32003, 'Accès refusé par Vaks-PM pour ce jeton.');
+      // Cas réel depuis que `me/mcp-context` relit `mcp.enabled` : l'organisation
+      // a désactivé le connecteur. Échec DUR volontaire — contrairement au 401,
+      // se réauthentifier n'y changerait rien, donc on ne relance pas le flux
+      // d'autorisation.
+      // On lit le message BRUT de l'API (`body.message`) et non `e.message`, que
+      // `explain()` habille d'un « le périmètre de l'utilisateur ne couvre pas
+      // cette opération » — faux ici : c'est un interrupteur d'organisation, pas
+      // un défaut de droits.
+      const body = e.body as { message?: unknown } | null | undefined;
+      const reason = typeof body?.message === 'string' ? body.message : null;
+      return rpcError(res, 403, -32003, reason ?? 'Accès refusé par Vaks-PM pour ce jeton.');
     }
     // API injoignable / autre : on continue en lecture seule (les tools de
     // lecture marcheront ou échoueront d'eux-mêmes avec un message clair).

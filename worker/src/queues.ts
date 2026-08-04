@@ -2,7 +2,6 @@
 export const QUEUES = {
   EMAIL: 'email',
   WEBHOOK: 'webhook',
-  WORKLOAD_RECALC: 'workload-recalc',
   AUDIT_SYSLOG: 'audit-syslog',
   TEAMS: 'teams',
   EXPORT: 'export',

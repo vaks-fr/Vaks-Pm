@@ -62,9 +62,20 @@ export default function McpSection({ flash }: { flash: Flash }) {
   const [newClientName, setNewClientName] = useState('');
   const [newClientUri, setNewClientUri] = useState('');
   const [creatingClient, setCreatingClient] = useState(false);
-  const [createdSecret, setCreatedSecret] = useState<{ client_id: string; client_secret: string } | null>(null);
+  const [createdSecret, setCreatedSecret] = useState<
+    { client_id: string; client_secret: string; redirect_uris: string[] } | null
+  >(null);
+  // Édition du callback d'un client existant (clientId en cours d'édition + valeur).
+  const [editingClientId, setEditingClientId] = useState<string | null>(null);
+  const [editClientUri, setEditClientUri] = useState('');
+  // URL(s) MCP publiques, calculées côté API depuis TENANCY_MCP_DOMAINS (cf.
+  // AdminSettingsService.getMcpPublicUrls) — non vide seulement si une
+  // passerelle DMZ a été déclarée à l'infra avec un domaine différent.
+  const [mcpPublicUrls, setMcpPublicUrls] = useState<string[]>([]);
 
-  // URL publique dérivée du déploiement (path-based `https://<tenant>/mcp`).
+  // URL dérivée de l'origine courante du navigateur (path-based `https://<tenant>/mcp`).
+  // Correcte pour un déploiement co-localisé ; PAS l'URL à donner si une
+  // passerelle DMZ existe (voir mcpPublicUrls ci-dessous).
   const mcpUrl = `${window.location.origin}/mcp`;
 
   useEffect(() => {
@@ -89,6 +100,8 @@ export default function McpSection({ flash }: { flash: Flash }) {
         setSsoCount(Array.isArray(sso) ? sso.length : 0);
         setOauthClients(Array.isArray(clients) ? clients : []);
         setUsage(usageRes.tools ?? []);
+        const publicUrls = s['mcpPublicUrls'];
+        setMcpPublicUrls(Array.isArray(publicUrls) ? (publicUrls as string[]) : []);
       } catch (e) {
         flash(t('mcp.loadError', { defaultValue: 'Unable to load MCP settings: {{message}}', message: (e as Error).message }));
       } finally {
@@ -198,11 +211,17 @@ export default function McpSection({ flash }: { flash: Flash }) {
   const tokenUrl = `${window.location.origin}/api/v1/auth/oauth/token`;
 
   const createClient = async () => {
-    if (!newClientUri.trim()) return;
     setCreatingClient(true);
     try {
-      const res = await api.createOauthClient(newClientName.trim() || 'Integration', [newClientUri.trim()]);
-      setCreatedSecret({ client_id: res.client_id, client_secret: res.client_secret });
+      // Callback optionnel : vide → le serveur enregistre la constante Power
+      // Platform par défaut, éditable ensuite (flux « créer comme un jeton »).
+      const uris = newClientUri.trim() ? [newClientUri.trim()] : [];
+      const res = await api.createOauthClient(newClientName.trim() || 'Integration', uris);
+      setCreatedSecret({
+        client_id: res.client_id,
+        client_secret: res.client_secret,
+        redirect_uris: res.redirect_uris,
+      });
       setNewClientName('');
       setNewClientUri('');
       setOauthClients(await api.listOauthClients());
@@ -211,6 +230,19 @@ export default function McpSection({ flash }: { flash: Flash }) {
       flash(t('mcp.clientError', { defaultValue: 'Failed: {{message}}', message: (e as Error).message }));
     } finally {
       setCreatingClient(false);
+    }
+  };
+
+  const saveClientCallback = async (clientId: string) => {
+    if (!editClientUri.trim()) return;
+    try {
+      await api.updateOauthClient(clientId, [editClientUri.trim()]);
+      setEditingClientId(null);
+      setEditClientUri('');
+      setOauthClients(await api.listOauthClients());
+      flash(t('mcp.clientCallbackSaved', { defaultValue: 'Callback URL updated.' }));
+    } catch (e) {
+      flash(t('mcp.clientError', { defaultValue: 'Failed: {{message}}', message: (e as Error).message }));
     }
   };
 
@@ -251,6 +283,14 @@ export default function McpSection({ flash }: { flash: Flash }) {
             defaultValue:
               'Share this URL with your users — they paste it into their AI client (Claude, ChatGPT, Copilot Studio) as a custom connector, then sign in.',
           })}
+          {mcpPublicUrls.length > 0 && (
+            <>
+              {' '}
+              {t('mcp.urlDescInternalNote', {
+                defaultValue: 'This one only works for clients on the same network as this instance.',
+              })}
+            </>
+          )}
         </p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <code
@@ -288,6 +328,54 @@ export default function McpSection({ flash }: { flash: Flash }) {
             </span>
           )}
         </div>
+
+        {mcpPublicUrls.length > 0 && (
+          <>
+            <div style={{ height: 1, background: 'var(--border)', margin: '18px 0' }} />
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-3)', marginBottom: 8, letterSpacing: 0.3 }}>
+              {t('mcp.publicUrlHeading', { defaultValue: 'Public MCP URL' })}
+            </div>
+            <p style={{ margin: '0 0 10px', fontSize: 13, color: 'var(--text-3)' }}>
+              {t('mcp.publicUrlDesc', {
+                defaultValue:
+                  'This organization is also reachable through a separately declared public domain — typically an isolated DMZ gateway. Hand THIS to AI clients connecting from the internet, not the URL above (which only works for clients on the same network as the instance).',
+              })}
+            </p>
+            {mcpPublicUrls.map((url) => (
+              <div key={url} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                <code
+                  style={{
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                    fontSize: 13,
+                    padding: '7px 10px',
+                    borderRadius: 8,
+                    border: '1px solid var(--border)',
+                    background: 'var(--surface-2)',
+                    color: enabled ? 'var(--text)' : 'var(--text-faint)',
+                    userSelect: 'all',
+                  }}
+                >
+                  {url}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => copy(url)}
+                  style={{
+                    cursor: 'pointer',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    background: 'var(--surface)',
+                    color: 'var(--text-2)',
+                    fontSize: 12,
+                    padding: '6px 12px',
+                  }}
+                >
+                  {t('mcp.copyUrl', { defaultValue: 'Copy' })}
+                </button>
+              </div>
+            ))}
+          </>
+        )}
       </div>
 
       {/* 2. Authentification (réutilise le SSO) */}
@@ -582,6 +670,13 @@ export default function McpSection({ flash }: { flash: Flash }) {
               </div>
               <UrlRow label="Client ID" value={createdSecret.client_id} onCopy={() => copy(createdSecret.client_id)} />
               <UrlRow label="Client secret" value={createdSecret.client_secret} onCopy={() => copy(createdSecret.client_secret)} />
+              {createdSecret.redirect_uris?.length > 0 && (
+                <UrlRow
+                  label={t('mcp.clientCallbackRegistered', { defaultValue: 'Callback URL' })}
+                  value={createdSecret.redirect_uris.join(', ')}
+                  onCopy={() => copy(createdSecret.redirect_uris.join(', '))}
+                />
+              )}
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -604,11 +699,11 @@ export default function McpSection({ flash }: { flash: Flash }) {
               />
             </label>
             <label style={{ fontSize: 12, color: 'var(--text-3)', flex: '2 1 280px' }}>
-              {t('mcp.clientCallback', { defaultValue: 'Callback URL (from the connector)' })}
+              {t('mcp.clientCallbackOptional', { defaultValue: 'Callback URL (optional)' })}
               <input
                 value={newClientUri}
                 onChange={(e) => setNewClientUri(e.target.value)}
-                placeholder="https://global.consent.azure-apim.net/redirect/..."
+                placeholder="https://global.consent.azure-apim.net/redirect"
                 style={inputStyle}
               />
             </label>
@@ -616,11 +711,17 @@ export default function McpSection({ flash }: { flash: Flash }) {
               type="button"
               className="btn btn-accent"
               style={{ padding: '8px 14px' }}
-              disabled={creatingClient || !newClientUri.trim()}
+              disabled={creatingClient}
               onClick={() => void createClient()}
             >
               {creatingClient ? t('mcp.creating', { defaultValue: 'Creating…' }) : t('mcp.createClient', { defaultValue: 'Create client' })}
             </button>
+          </div>
+          <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.5 }}>
+            {t('mcp.clientCallbackHint', {
+              defaultValue:
+                'Leave the callback empty to create the client right away — you get the ID and secret without needing the connector URL first (Copilot Studio asks for them before it reveals its redirect URL). We register the standard Power Platform callback by default; you can edit it below once you have the exact one.',
+            })}
           </div>
 
           {oauthClients.length > 0 && (
@@ -643,7 +744,50 @@ export default function McpSection({ flash }: { flash: Flash }) {
                     <div style={{ fontSize: 11.5, color: 'var(--text-3)', wordBreak: 'break-all' }}>
                       <code>{c.clientId}</code> · {c.redirectUris.join(', ')}
                     </div>
+                    {editingClientId === c.clientId && (
+                      <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <input
+                          value={editClientUri}
+                          onChange={(e) => setEditClientUri(e.target.value)}
+                          placeholder="https://global.consent.azure-apim.net/redirect"
+                          style={{ ...inputStyle, marginTop: 0, flex: '1 1 240px' }}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-accent"
+                          style={{ fontSize: 12, padding: '6px 12px' }}
+                          disabled={!editClientUri.trim()}
+                          onClick={() => void saveClientCallback(c.clientId)}
+                        >
+                          {t('mcp.save', { defaultValue: 'Save' })}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          style={{ fontSize: 12 }}
+                          onClick={() => {
+                            setEditingClientId(null);
+                            setEditClientUri('');
+                          }}
+                        >
+                          {t('mcp.cancel', { defaultValue: 'Cancel' })}
+                        </button>
+                      </div>
+                    )}
                   </div>
+                  {editingClientId !== c.clientId && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={{ fontSize: 12 }}
+                      onClick={() => {
+                        setEditingClientId(c.clientId);
+                        setEditClientUri(c.redirectUris[0] ?? '');
+                      }}
+                    >
+                      {t('mcp.editCallback', { defaultValue: 'Edit callback' })}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="btn btn-ghost"

@@ -590,6 +590,11 @@ export const api = {
       '/admin/oauth-clients',
       { method: 'POST', body: JSON.stringify({ name, redirect_uris: redirectUris }) },
     ),
+  updateOauthClient: (clientId: string, redirectUris: string[]) =>
+    request<{ client_id: string; redirect_uris: string[]; client_name: string }>(
+      `/admin/oauth-clients/${encodeURIComponent(clientId)}`,
+      { method: 'PATCH', body: JSON.stringify({ redirect_uris: redirectUris }) },
+    ),
   revokeOauthClient: (clientId: string) =>
     request<{ revoked: boolean }>(`/admin/oauth-clients/${encodeURIComponent(clientId)}`, {
       method: 'DELETE',

@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiExcludeController } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../rbac/permissions.guard';
@@ -32,6 +32,12 @@ export class OAuthAdminController {
   @RequirePermissions('org:manage')
   create(@Body() body: { name?: string; redirect_uris?: string[] }) {
     return this.oauth.createPreregisteredClient(body?.name ?? '', body?.redirect_uris ?? []);
+  }
+
+  @Patch(':clientId')
+  @RequirePermissions('org:manage')
+  update(@Param('clientId') clientId: string, @Body() body: { redirect_uris?: string[] }) {
+    return this.oauth.updatePreregisteredClient(clientId, body?.redirect_uris ?? []);
   }
 
   @Delete(':clientId')

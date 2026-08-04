@@ -74,9 +74,9 @@ export function withCallContext<T>(ctx: CallContext, fn: () => T): T {
 
 export class ApiClient {
   /**
-   * Repli si aucun contexte async n'est actif (appelant historique passant par
-   * `setCallContext`). Le chemin normal est `withCallContext`, qui est correct
-   * même quand plusieurs handlers tournent en concurrence sur ce client.
+   * Repli si aucun contexte async n'est actif (jamais posé explicitement — le
+   * chemin normal est `withCallContext`, qui est correct même quand plusieurs
+   * handlers tournent en concurrence sur ce client). Reste à `{}` en pratique.
    */
   private callContext: CallContext = {};
 
@@ -100,19 +100,6 @@ export class ApiClient {
      */
     private readonly clientUserAgent?: string,
   ) {}
-
-  /**
-   * Pose le contexte d'audit par défaut (nom du tool + justification en langage
-   * naturel fournie par l'agent), transmis à l'API via `X-Vaks-Mcp-Tool` /
-   * `X-Vaks-Justification` → visibles dans le journal d'audit.
-   *
-   * ⚠️ Préférer `withCallContext()` : ce setter mute l'instance et ne résiste
-   * donc pas à deux handlers concurrents sur le même client (batch JSON-RPC).
-   * Conservé comme repli pour les appels hors handler.
-   */
-  setCallContext(ctx: CallContext): void {
-    this.callContext = ctx;
-  }
 
   /** Pose la langue relayée à l'API via `Accept-Language` (étiquette IETF). */
   setLanguage(lang: string | null): void {

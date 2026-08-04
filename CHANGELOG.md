@@ -2,6 +2,20 @@
 
 User-facing changes, most recent first.
 
+## 2026-08-05-1 — 2026-08-05
+
+### AI connector (MCP)
+- **Simpler setup with Microsoft Copilot Studio**: you can now create a
+  pre-registered OAuth client without entering a callback URL upfront (a
+  standard default is applied), and edit a client's callback later without
+  regenerating its secret.
+- **Immediate disconnect**: turning the AI connector off now instantly cuts
+  existing connections, not just new sign-ins.
+
+### Quality & security
+- Security and reliability hardening around the AI connector.
+- Updated third-party dependencies to address reported vulnerabilities.
+
 ## 2026-08-03-4 — 2026-08-03
 
 ### Workload planning — major overhaul

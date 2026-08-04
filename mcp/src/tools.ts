@@ -10,6 +10,56 @@ import { CONFIRM_TOOLS } from './confirm-tools.js';
  * « observe et suggère », l'humain agit dans l'app.
  */
 
+/**
+ * Décode `input` avec `decodeURIComponent` de façon répétée jusqu'à point fixe
+ * (gère l'encodage imbriqué type `%252e%252e` = `..` doublement encodé),
+ * borné à 5 itérations pour ne jamais boucler sur une entrée pathologique.
+ * Ne throw jamais : une séquence `%` malformée (ex. `100%`) renvoie la
+ * dernière valeur décodable telle quelle plutôt que de faire échouer la
+ * validation avec une erreur peu claire.
+ */
+export function decodeFully(input: string): string {
+  let current = input;
+  for (let i = 0; i < 5; i++) {
+    let next: string;
+    try {
+      next = decodeURIComponent(current);
+    } catch {
+      break;
+    }
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+/**
+ * SÉCURITÉ — Empêche la traversée hors de l'arbre `@PublicApi` pour `vaks_read`.
+ * Sans ça un `path` comme `../internal/...` ou `../admin/...` — y compris ses
+ * formes **encodées** (`%2e%2e`, `.%2e`, `%2e.`, doublement encodées
+ * `%252e%252e`, ou via un slash encodé `foo%2f..%2f..%2finternal`) — se
+ * normalise une fois concaténé à la base et atteint des routes voisines : le
+ * parseur WHATWG `URL` de Node décode et collapse ces dot-segments avant que
+ * la requête ne parte. Le public-gate API bloque ces routes côté serveur,
+ * mais on ne dépend pas que de lui : défense en profondeur, comme l'annonce
+ * la description du tool.
+ *
+ * On compare des **segments de chemin** après décodage intégral (pas une
+ * recherche de sous-chaîne '..' sur le texte brut) : plus strict sur les
+ * formes encodées, et ça évite au passage un faux-positif sur un segment
+ * légitime qui contiendrait '..' comme partie d'un nom plus large.
+ */
+export function assertSafeReadPath(rawPath: string): string {
+  const clean = rawPath.replace(/^\/?(api\/v1\/)?/, '');
+  const decoded = decodeFully(clean);
+  const segments = decoded.split(/[/\\]+/);
+  const hasTraversal = segments.some((s) => s === '..' || s === '.');
+  if (hasTraversal || decoded.startsWith('/') || clean.startsWith('/')) {
+    throw new Error('Chemin invalide (traversée interdite).');
+  }
+  return clean;
+}
+
 /** Enveloppe un appel API en réponse MCP, avec gestion d'erreur exploitable. */
 async function run(fn: () => Promise<unknown>) {
   try {
@@ -123,10 +173,10 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async (args: any, extra: any) => {
         const { justification, confirmToken, ...rest } = (args ?? {}) as Record<string, unknown>;
-        // `withCallContext` et non `setCallContext` : un batch JSON-RPC fait
-        // tourner plusieurs handlers en concurrence sur le même `api`, et un
-        // champ mutable ferait attribuer la justification au mauvais tool dans
-        // le journal d'audit (cf. `callContextStore` dans api-client.ts).
+        // `withCallContext` : un batch JSON-RPC fait tourner plusieurs
+        // handlers en concurrence sur le même `api`, et un champ mutable
+        // ferait attribuer la justification au mauvais tool dans le journal
+        // d'audit (cf. `callContextStore` dans api-client.ts).
         return withCallContext(
           {
             tool: name,
@@ -560,15 +610,7 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ path, query }) => {
-      // SÉCURITÉ — Empêche la traversée hors de l'arbre `@PublicApi`. Sans ça un
-      // `path` comme `../internal/...` ou `../admin/...` se normalise une fois
-      // concaténé à la base et atteint des routes voisines (le public-gate API
-      // les bloque côté serveur, mais on ne dépend pas que de lui : défense en
-      // profondeur, comme l'annonce la description du tool).
-      const clean = path.replace(/^\/?(api\/v1\/)?/, '');
-      if (clean.includes('..') || clean.startsWith('/')) {
-        throw new Error('Chemin invalide (traversée interdite).');
-      }
+      const clean = assertSafeReadPath(path);
       return run(() => api.get(clean, query));
     },
   );
