@@ -4,7 +4,7 @@
  * AuditLog ni le SIEM — la redaction se fait AVANT bufferisation.
  */
 
-const SENSITIVE_KEY = /password|passwd|secret|token|authorization|api[-_]?key|mfa|otp|totp|cookie|credential|caPem/i;
+const SENSITIVE_KEY = /password|passwd|secret|token|authorization|(?:api|admin)[-_]?key|mfa|otp|totp|cookie|credential|caPem/i;
 
 /** Taille max du JSON `detail` après redaction (8 KB). */
 export const DETAIL_MAX_BYTES = 8 * 1024;

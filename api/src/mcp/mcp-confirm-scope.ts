@@ -6,32 +6,42 @@ export type ConfirmPolicy = 'off' | 'destructive' | 'all_writes';
 /**
  * Tools exigeant une confirmation explicite en politique `destructive`.
  *
- * La liste porte sur des **noms de tools**, pas sur des routes, et c'est
- * structurant : plusieurs de ces tools partagent leur route avec un frère
- * bénin. `vaks_plan_project_apply` et `vaks_plan_project_preview` sont le même
- * `POST workload/autoplan` au `persist` près ; `vaks_resolve_skill_request`
- * n'est destructif qu'en `REJECTED`. Router sur la route imposerait soit de
- * sur-challenger, soit de renifler le corps route par route.
+ * La liste porte sur des **identifiants de tools**, pas sur des routes, et
+ * c'est structurant : plusieurs de ces tools partagent leur route avec un
+ * frère bénin. `vaks_plan_project_apply` et `vaks_plan_project_preview` sont
+ * le même `POST workload/autoplan` au `persist` près ;
+ * `vaks_skill_requests:resolve` n'est destructif qu'en `REJECTED`. Router sur
+ * la route imposerait soit de sur-challenger, soit de renifler le corps route
+ * par route.
+ *
+ * Depuis la fusion CRUD des tools MCP, un tool groupé transmet son action dans
+ * le header `X-Vaks-Mcp-Tool` sous forme composite `tool:action`
+ * (ex. `vaks_clients_manage:delete_client`) — seule façon de faire voyager
+ * l'action jusqu'ici, un `DELETE` HTTP n'ayant pas de corps. Les entrées
+ * composites ne challengent donc que les actions destructrices du tool.
+ * Miroir côté serveur MCP : `mcp/src/confirm-tools.ts` (CONFIRM_TOOL_ACTIONS).
  */
 export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
-  'vaks_delete_allocation',
-  'vaks_delete_client',
-  'vaks_delete_contact',
-  'vaks_delete_dependency',
-  'vaks_delete_expense',
-  'vaks_delete_label',
-  'vaks_delete_project_rate',
-  'vaks_delete_skill',
+  // Tools dédiés (nom simple).
   'vaks_delete_task',
-  'vaks_delete_time_entry',
-  'vaks_delete_time_off',
-  'vaks_remove_team_member',
-  'vaks_remove_user_skill',
   // Sortant : le seul dont le rayon d'action quitte le système.
   'vaks_notify_stakeholders',
   // Écrit en masse des allocations.
   'vaks_plan_project_apply',
-  'vaks_resolve_skill_request',
+  // Actions destructrices des tools fusionnés (composite `tool:action`).
+  'vaks_time_entries:delete',
+  'vaks_time_off_manage:delete',
+  'vaks_allocations_manage:delete',
+  'vaks_labels_manage:delete',
+  'vaks_dependencies_manage:delete',
+  'vaks_clients_manage:delete_client',
+  'vaks_clients_manage:delete_contact',
+  'vaks_teams_manage:remove_member',
+  'vaks_skills_catalog:delete',
+  'vaks_skills_assign:remove_user',
+  'vaks_expenses_manage:delete',
+  'vaks_project_finance:delete_rate',
+  'vaks_skill_requests:resolve',
 ]);
 
 /** Ce tool doit-il être confirmé sous cette politique ? */

@@ -6,6 +6,8 @@
    pre-defined so the UI has scaffolding to render.
    ============================================================ */
 
+import type { TaskStatus } from '@vaks-pm/shared';
+
 export interface User {
   id: string;
   name: string;
@@ -67,6 +69,10 @@ export interface ChecklistItem {
 export interface Task {
   id: string;
   col: string;
+  /** Statut brut (enum serveur). Porté sur la carte pour placer les statuts
+   *  agents (CLAIMED/CHANGES_REQUESTED/APPROVED) dans un sous-conteneur virtuel
+   *  de la colonne foldée. `undefined` = inconnu (démo / tâches sans statut). */
+  status?: TaskStatus;
   title: string;
   /** Numéro séquentiel par projet (1, 2, ...). Source de vérité côté API. */
   number?: number;

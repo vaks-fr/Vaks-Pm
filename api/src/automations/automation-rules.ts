@@ -53,6 +53,13 @@ export type AutomationKind =
   // (`vaks_request_assistance`). Un commentaire ne prévient personne en soi :
   // cette alerte vise le PM du projet, l'owner de l'agent et les co-assignés.
   | 'agent_blocked'
+  // File de revue du projet saturée (AGENT_NUDGE_CAPACITY.md §6) — des réveils
+  // d'agents sont SUPPRIMÉS faute de place en revue. Keyé sur le **projet** et
+  // pas sur l'agent : deux agents bloqués par la même file, c'est un seul
+  // problème (relire, ou relever `agents.backpressure.maxPendingReviews`) et une
+  // seule alerte, adressée aux PM. La saturation par simple concurrence, elle,
+  // n'alerte jamais — elle se résout d'elle-même à la tâche suivante.
+  | 'review_queue_full'
   // Planning (lot 3, événementiel)
   | 'timeoff_conflict'
   | 'autoplan_overflow'
@@ -120,6 +127,9 @@ export const COOLDOWN_TTL_S: Record<AutomationKind, number> = {
   agent_run_anomaly: 24 * 3600,
   // Un blocage par tâche et par jour : l'agent peut relancer, on ne spamme pas.
   agent_blocked: 24 * 3600,
+  // Clé qualifiée par jour : une alerte par projet et par jour tant que la file
+  // reste pleine (la condition persiste, mais ce n'est pas une raison de répéter).
+  review_queue_full: 24 * 3600,
   timeoff_conflict: 24 * 3600,
   autoplan_overflow: 24 * 3600,
   // Re-nudge hebdo : tant que la tâche n'a pas bougé, ça reste à signaler,

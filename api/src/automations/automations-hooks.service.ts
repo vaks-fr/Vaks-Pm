@@ -3,6 +3,7 @@ import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { TasksService } from '../tasks/tasks.service';
 import { SkillRequestsService } from '../skill-requests/skill-requests.service';
+import { AgentRunsService } from '../agent-runs/agent-runs.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { readAutomationsSettings } from './automations-settings';
 import { readSponsorNotify } from './sponsor-notify';
@@ -477,6 +478,7 @@ export class AutomationsHooksService {
     }
   }
 
+
   /**
    * Coupe-circuit budgétaire (lot A §2) — une enveloppe de coût agent vient
    * d'être consommée EN COURS de tâche. Le cron horaire (règle 14) alerte déjà
@@ -616,6 +618,73 @@ export class AutomationsHooksService {
       return this.moduleRef.get(TasksService, { strict: false });
     } catch {
       return null;
+    }
+  }
+
+  /** `AgentRunsService` en lazy (cf. cycle de modules). */
+  private agentRunsService(): AgentRunsService | null {
+    try {
+      return this.moduleRef.get(AgentRunsService, { strict: false });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Persiste le meter d'appels MCP d'un agent (coût crédits Copilot mesuré) —
+   * appelé aux points naturels par `TasksService` (claim/heartbeat/submit).
+   * Passe-plat vers `AgentRunsService` en réutilisant la chaîne lazy sûre
+   * (TasksService parle déjà à ce hook), pour ne pas ajouter d'import à risque de
+   * cycle dans TasksService.
+   */
+  async persistAgentMeter(orgId: string, agentId: string): Promise<void> {
+    try {
+      await this.agentRunsService()?.persistAgentMeters(orgId, agentId);
+    } catch (err) {
+      this.log.warn(`persistAgentMeter(${agentId}) failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Balayage de rattrapage du meter (cron horaire) : persiste tout le tenant. */
+  async sweepAgentMeters(orgId: string): Promise<void> {
+    try {
+      await this.agentRunsService()?.sweepMeters(orgId);
+    } catch (err) {
+      this.log.warn(`sweepAgentMeters(org=${orgId}) failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Tâche complétée par un AGENT (DONE / auto-close) → coût crédits Copilot
+   * mesuré (persistance finale + nettoyage du compteur). Fire-and-forget ; toutes
+   * les gardes (opt-in `agents.copilotEstimate.enabled`, unité crédits) vivent
+   * dans `persistMeteredRun`. Pas gaté par le kill switch automations : c'est du
+   * bookkeeping de coût, pas une règle d'alerte.
+   */
+  async onTaskCompletedByAgent(orgId: string, x: { taskId: string; agentId?: string }): Promise<void> {
+    try {
+      // Résout l'agent qui a fait le travail si non fourni (chemin auto-close
+      // APPROVED→DONE) : claimant, sinon auteur du dernier livrable.
+      let agentId = x.agentId ?? null;
+      if (!agentId) {
+        const task = await this.prisma.task.findFirst({
+          where: { id: x.taskId, organizationId: orgId },
+          select: { claimedById: true },
+        });
+        agentId = task?.claimedById ?? null;
+      }
+      if (!agentId) {
+        const deliverable = await this.prisma.deliverable.findFirst({
+          where: { taskId: x.taskId, organizationId: orgId },
+          orderBy: { version: 'desc' },
+          select: { authorId: true },
+        });
+        agentId = deliverable?.authorId ?? null;
+      }
+      if (!agentId) return;
+      await this.agentRunsService()?.recordEstimatedRun(orgId, agentId, x.taskId);
+    } catch (err) {
+      this.log.warn(`onTaskCompletedByAgent(${x.taskId}) failed: ${(err as Error).message}`);
     }
   }
 

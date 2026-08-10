@@ -155,24 +155,50 @@ export class AuditLogService implements OnModuleInit, OnApplicationShutdown {
     return this.reqScope.getStore()?.extra ?? null;
   }
 
-  /** Entrée bufferisée (mutations courantes, INFO). */
+  /**
+   * Entrée bufferisée (mutations courantes, INFO ; aussi les lectures
+   * forensic `read.*` capturées via `audit.logReads`).
+   *
+   * Garde-fou d'intégrité sous pression : le buffer est PARTAGÉ entre
+   * écritures et lectures — un flood de `read.*` (mode `all`) ne doit jamais
+   * faire perdre une entrée d'écriture/conformité. Au plafond, une entrée de
+   * LECTURE est droppée en priorité ; une entrée d'ÉCRITURE évince plutôt la
+   * plus ancienne lecture bufferisée (et ne drope elle-même qu'en dernier
+   * recours, si aucune lecture n'est évinçable).
+   */
   log(input: AuditEntryInput): void {
     try {
       const entry = this.capture(input);
+      const isReadEntry = entry.row.action.startsWith('read.');
       if (this.buffer.length >= BUFFER_CAP) {
-        this.droppedSinceLastReport++;
-        const now = Date.now();
-        if (now - this.lastDropReport > 60_000) {
-          this.logger.warn(`Audit buffer overflow: ${this.droppedSinceLastReport} entrée(s) droppée(s)`);
-          this.droppedSinceLastReport = 0;
-          this.lastDropReport = now;
+        if (isReadEntry) {
+          this.noteDrop();
+          return;
         }
-        return;
+        const evictIdx = this.buffer.findIndex((e) => e.row.action.startsWith('read.'));
+        if (evictIdx === -1) {
+          // Aucune lecture à sacrifier : le buffer est saturé d'écritures
+          // légitimes, on ne peut plus rien faire de mieux qu'avertir.
+          this.noteDrop();
+          return;
+        }
+        this.buffer.splice(evictIdx, 1);
       }
       this.buffer.push(entry);
       if (this.buffer.length >= FLUSH_THRESHOLD) void this.flush();
     } catch (err) {
       this.logger.error(`audit log() failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Warn throttlé (1/min) sur les entrées perdues par saturation du buffer. */
+  private noteDrop(): void {
+    this.droppedSinceLastReport++;
+    const now = Date.now();
+    if (now - this.lastDropReport > 60_000) {
+      this.logger.warn(`Audit buffer overflow: ${this.droppedSinceLastReport} entrée(s) droppée(s)`);
+      this.droppedSinceLastReport = 0;
+      this.lastDropReport = now;
     }
   }
 

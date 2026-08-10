@@ -1,8 +1,9 @@
 import { Worker, Job, ConnectionOptions } from 'bullmq';
 import { URL } from 'url';
-import { QUEUES, EmailJob, WebhookJob, AuditSyslogJob, TeamsJob, ExportJob } from './queues';
+import { QUEUES, EmailJob, WebhookJob, AgentNudgeJob, AuditSyslogJob, TeamsJob, ExportJob } from './queues';
 import { processEmail } from './processors/email.processor';
 import { processWebhook } from './processors/webhook.processor';
+import { processAgentNudge } from './processors/agent-nudge.processor';
 import { processAuditSyslog } from './processors/audit-syslog.processor';
 import { processTeams } from './processors/teams.processor';
 import { processExport } from './processors/export.processor';
@@ -29,6 +30,15 @@ const webhookWorker = new Worker(
   QUEUES.WEBHOOK,
   async (job: Job<WebhookJob>) => {
     await processWebhook(job.data, job.attemptsMade + 1);
+  },
+  { connection },
+);
+
+// Nudge sortant vers les agents IA (réveil sur assignation / boucle de revue).
+const agentNudgeWorker = new Worker(
+  QUEUES.AGENT_NUDGE,
+  async (job: Job<AgentNudgeJob>) => {
+    await processAgentNudge(job.data, job.attemptsMade + 1);
   },
   { connection },
 );
@@ -68,17 +78,18 @@ const exportWorker = new Worker(
   { connection, concurrency: 2 },
 );
 
-for (const w of [emailWorker, webhookWorker, auditSyslogWorker, teamsWorker, exportWorker]) {
+for (const w of [emailWorker, webhookWorker, agentNudgeWorker, auditSyslogWorker, teamsWorker, exportWorker]) {
   w.on('completed', (job) => console.log(`[${w.name}] job ${job.id} OK`));
   w.on('failed', (job, err) => console.error(`[${w.name}] job ${job?.id} KO: ${err.message}`));
 }
 
-console.log('Worker BullMQ démarré (files: email, webhook, audit-syslog, teams, export).');
+console.log('Worker BullMQ démarré (files: email, webhook, agent-nudge, audit-syslog, teams, export).');
 
 async function shutdown() {
   await Promise.all([
     emailWorker.close(),
     webhookWorker.close(),
+    agentNudgeWorker.close(),
     auditSyslogWorker.close(),
     teamsWorker.close(),
     exportWorker.close(),

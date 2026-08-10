@@ -192,6 +192,9 @@ function TeamAccessRow({ pt, options, onRoleChange, onRemove }: TeamAccessRowPro
 
 interface ManageDraft {
   status: ProjectStatus;
+  /** Santé projet (RAG) pour le point de statut client. '' = non renseignée. */
+  statusHealth: '' | 'ON_TRACK' | 'AT_RISK' | 'OFF_TRACK';
+  statusSummary: string;
   startDate: string;
   dueDate: string;
   name: string;
@@ -497,6 +500,8 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
   }, [project.id]);
   const [draft, setDraft] = useState<ManageDraft>(() => ({
     status: project.status,
+    statusHealth: project.statusHealth ?? '',
+    statusSummary: project.statusSummary ?? '',
     startDate: project.startDate ? project.startDate.slice(0, 10) : '',
     dueDate: project.dueDate ? project.dueDate.slice(0, 10) : '',
     name: project.name,
@@ -689,6 +694,14 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
       description:
         draft.description !== (project.description ?? '') ? draft.description || null : undefined,
       status: draft.status !== project.status ? draft.status : undefined,
+      statusHealth:
+        draft.statusHealth !== (project.statusHealth ?? '')
+          ? (draft.statusHealth || null)
+          : undefined,
+      statusSummary:
+        draft.statusSummary !== (project.statusSummary ?? '')
+          ? (draft.statusSummary.trim() || null)
+          : undefined,
       startDate:
         draft.startDate !== (project.startDate?.slice(0, 10) ?? '')
           ? draft.startDate || null
@@ -1092,6 +1105,40 @@ export function ManageModal({ project, onClose, onSaved, onDeleted, pushToast }:
               rows={3}
               style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }}
             />
+          </div>
+
+          {/* Point de statut client — santé (RAG) + résumé rendus dans le deck PPTX */}
+          <div className="md-field">
+            <div className="md-label">{t('manage.clientStatus')}</div>
+            <div className="seg">
+              {(
+                [
+                  ['ON_TRACK', 'onTrack'],
+                  ['AT_RISK', 'atRisk'],
+                  ['OFF_TRACK', 'offTrack'],
+                ] as const
+              ).map(([k, key]) => (
+                <button
+                  key={k}
+                  className={'seg-btn' + (draft.statusHealth === k ? ' seg-on' : '')}
+                  onClick={() => set({ statusHealth: draft.statusHealth === k ? '' : k })}
+                >
+                  {t('manage.health.' + key)}
+                </button>
+              ))}
+            </div>
+            <textarea
+              className="atext"
+              value={draft.statusSummary}
+              onChange={(e) => set({ statusSummary: e.target.value })}
+              rows={4}
+              maxLength={4000}
+              placeholder={t('manage.statusSummaryPlaceholder')}
+              style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit', marginTop: 8 }}
+            />
+            <div className="md-hint" style={{ marginTop: 4, fontSize: 12, color: 'var(--text-2)' }}>
+              {t('manage.clientStatusHint')}
+            </div>
           </div>
 
           {/* Client (portefeuille) — reste dans l'onglet Général */}

@@ -11,8 +11,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { GanttDto, GanttTaskDto, TaskAssigneeDto } from '@vaks-pm/shared';
-import { TaskStatus } from '@vaks-pm/shared';
 import { api } from '../api/client';
+import { foldStatus, statusMeta } from './taskStatus';
 import { Avatar, Icon } from './primitives';
 import { useConfirm } from './confirm';
 import type { User } from './data';
@@ -54,21 +54,6 @@ function titleLinesFor(title: string): number {
     Math.max(2, Math.ceil(title.length / TITLE_CHARS_PER_LINE)),
   );
 }
-
-/** Clé i18n du statut, écrite en toutes lettres sur la carte. On
- *  n'affiche plus de pastille de couleur : la couleur de la carte sert
- *  déjà à identifier le groupe/projet, une couleur de statut en plus
- *  prête à confusion. */
-const STATUS_LABEL_KEY: Record<TaskStatus, string> = {
-  [TaskStatus.TODO]: 'pert.status.todo',
-  [TaskStatus.CLAIMED]: 'pert.status.todo',
-  [TaskStatus.IN_PROGRESS]: 'pert.status.inProgress',
-  [TaskStatus.CHANGES_REQUESTED]: 'pert.status.inProgress',
-  [TaskStatus.IN_REVIEW]: 'pert.status.inReview',
-  [TaskStatus.APPROVED]: 'pert.status.inReview',
-  [TaskStatus.ON_HOLD]: 'pert.status.onHold',
-  [TaskStatus.DONE]: 'pert.status.done',
-};
 
 function parseDay(iso: string): Date {
   return new Date(iso + 'T00:00:00Z');
@@ -670,7 +655,9 @@ function PertNode({
       title={t('timeline:pert.nodeTooltip', { title: tk.title, es: n.ES, ef: n.EF, dur: n.dur, ls: n.LS, lf: n.LF, slack: n.slack })}
     >
       <div className="pn-head">
-        <span className="pn-status-label">{t('timeline:' + STATUS_LABEL_KEY[tk.status])}</span>
+        {/* Libellé du statut REPLIÉ sur sa base canonique (pas de pastille : la
+            couleur de la carte identifie déjà le groupe/projet). */}
+        <span className="pn-status-label">{t('timeline:pert.status.' + statusMeta(foldStatus(tk.status)).labelSubkey)}</span>
         {tk.isMilestone && (
           <Icon name="flag" size={11} style={{ color: 'var(--accent)' }} />
         )}

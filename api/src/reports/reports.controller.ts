@@ -23,6 +23,7 @@ import { buildXlsx, sendXlsx, type XlsxSheet } from '../common/xlsx.util';
 import { PdfReport, sendPdf, PDF_CONTENT_WIDTH } from '../common/pdf.util';
 import { burndownSvg, donutSvg, barsSvg, CHART_COLORS } from '../common/charts.svg';
 import { CurrentLang, reportT, statusLabel, type ReportLang } from '../common/i18n/report-i18n';
+import { renderStatusDeckPptx } from './status-deck';
 
 const h = (min: number) => Math.round((min / 60) * 100) / 100; // minutes → heures
 
@@ -143,6 +144,25 @@ export class ReportsController {
     @Query() dto: BurndownDto,
   ) {
     return this.svc.tasksInWindow(user.orgId, projectId, dto);
+  }
+
+  // ----- Statut projet composite : stats + due-adherence + tasks-in-window
+  // + workload en UN seul aller-retour (cf. `ReportsService.projectStatus`).
+  // `from`/`to` optionnels (défaut serveur). Pensé pour un unique tool MCP.
+  @Get('projects/:projectId/status')
+  @RequirePermissions('report:view')
+  projectStatus(
+    @CurrentUser() user: AuthUser,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.svc.projectStatus(
+      user.orgId,
+      projectId,
+      { userId: user.userId, isAdmin: user.isAdmin },
+      { from, to },
+    );
   }
 
   // ================= Exports CSV (téléchargeables + via API) =================
@@ -649,6 +669,36 @@ export class ReportsController {
     );
 
     sendPdf(res, `report-${stats.projectKey}.pdf`, await pdf.finish());
+  }
+
+  /**
+   * Point de statut CLIENT en PowerPoint (.pptx). Livrable dépouillé (statut
+   * éditorial, avancement, jalons, next steps, risques) — sans temps/agents/coûts,
+   * contrairement à `report.pdf`. Remplit le template `.pptx` de l'org s'il existe,
+   * sinon deck par défaut brandé Vaks. Rendu synchrone (fill = quelques ms).
+   */
+  @Get('projects/:projectId/status-deck.pptx')
+  @RequirePermissions('report:view')
+  async statusDeckPptx(
+    @CurrentUser() user: AuthUser,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @CurrentLang() lang: ReportLang,
+    @Res() res: Response,
+  ) {
+    const model = await this.svc.statusDeckModel(user.orgId, projectId, {
+      preparedById: user.userId,
+      preparedByFallback: user.email,
+      lang,
+    });
+    const tpl = await this.svc.loadClientStatusTemplate(user.orgId);
+    const buf = await renderStatusDeckPptx(model, tpl);
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="status-${model.projectKey}.pptx"`);
+    res.setHeader('Content-Length', String(buf.length));
+    res.end(buf);
   }
 
   /** Répartition du temps : barres par projet / utilisateur / label + tables. */

@@ -51,6 +51,8 @@ export type SpecialKind =
   /** Policies de gouvernance des agents (chantier agents 3). */
   | 'agentpolicies'
   | 'agentruns'
+  /** Souscriptions de nudge sortant (réveil des agents sur assignation). */
+  | 'agentnudges'
   /** Connecteurs d'annuaire d'agents (Entra Agent ID, …) — groupe Integrations. */
   | 'agentconnectors'
   /** Connecteurs CI signataires (vérification des livrables agents — phase C). */
@@ -146,6 +148,7 @@ export const ADMIN_GROUPS: AdminGroup[] = [
     sections: [
       { title: 'Policies', kind: 'agentpolicies', nav: true, navIcon: 'shield', blurb: 'Governance rules for AI agents: require review, deny or notify based on labels, trust level, estimate or transition — plus review backpressure.' },
       { title: 'Usage & cost ledger', kind: 'agentruns', nav: true, navIcon: 'coins', blurb: 'Every run declared by an AI agent: cost, tokens, model, project and task. The audit log of AI consumption — filter by agent, project or period, flag suspicious declarations, export to CSV.' },
+      { title: 'Agent nudges', kind: 'agentnudges', nav: true, navIcon: 'bell', blurb: 'Outbound callbacks that wake an agent when a task is assigned to it or a review asks for changes. Agents self-register from their platform (Copilot Studio, n8n, custom runners). A nudge carries no authority — the agent still pulls and claims with its own token.' },
     ],
   },
   {
@@ -498,6 +501,15 @@ export const ADMIN_GROUPS: AdminGroup[] = [
         settings: [
           { id: 'audit.retentionDays', label: 'Rétention des entrées d\'audit', desc: 'Les entrées plus anciennes sont purgées par un cron quotidien. Seul mécanisme de suppression du journal.', type: 'number', unit: 'days', value: 365, min: 30, max: 3650 },
           { id: 'audit.archive.enabled', label: 'Archiver avant purge', desc: "Exporte les entrées en JSONL gzip vers le stockage objet (Garage) AVANT leur suppression — rétention froide illimitée pour la conformité. Fail-safe : si l'archivage échoue, la purge est sautée.", type: 'toggle', value: false },
+          {
+            id: 'audit.logReads',
+            label: 'Journaliser les lectures (forensic)',
+            desc: "Audite aussi les requêtes de lecture (GET), en plus des modifications. Désactivé (défaut) : seules les modifications sont tracées. Agents IA seulement : uniquement les lectures faites par un agent (contexte forensic ciblé, faible volume). Toutes les lectures : chaque lecture de chaque utilisateur — 10 à 50× plus d'entrées d'audit, à surveiller côté volumétrie/rétention/SIEM.",
+            type: 'select',
+            options: ['off', 'agents', 'all'],
+            optionLabels: ['Désactivé', 'Agents IA seulement', 'Toutes les lectures'],
+            value: 'off',
+          },
         ],
       },
         ],

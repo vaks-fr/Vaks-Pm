@@ -29,6 +29,15 @@ enum ProjectStatus {
   ARCHIVED
 }
 
+/// Santé projet (RAG) montrée dans le POINT DE STATUT CLIENT (deck PPTX).
+/// Éditoriale — c'est le PM qui la pose (distincte de `ProjectStatus`, qui est le
+/// cycle de vie commercial). Sert de « où en est le projet » lisible par le client.
+enum ProjectHealth {
+  ON_TRACK
+  AT_RISK
+  OFF_TRACK
+}
+
 /// STANDARD = projet ordinaire géré dans l'app.
 /// EXTERNAL = conteneur auto-provisionné pour les tickets d'un outil de
 /// ticketing externe (un par couple outil × client). Invisible dans tous les
@@ -145,7 +154,8 @@ enum IdpType {
 }
 
 enum DocumentTemplateKind {
-  CHARTER // template Word pour le project charter
+  CHARTER            // template Word (.docx) pour le project charter
+  CLIENT_STATUS_PPTX // template PowerPoint (.pptx) pour le point de statut client
 }
 
 // ============================================================
@@ -715,6 +725,10 @@ model User {
   /// Même logique que `defaultBillRate` (humains, €/h) — se configure dans
   /// Admin > Agents et alimente automatiquement les taux projet.
   defaultBillRatePerKTokens Decimal? @db.Decimal(12, 4)
+  /// Lot 2 (AGENT_COST_UNITS) — en mode d'application `per_agent`, seuls les
+  /// agents ayant opté suivent les prix du catalogue au tick du cron. Ne touche
+  /// QUE les taux de COÛT (in/out), jamais le taux facturé (défaut ci-dessus).
+  followCatalogPricing Boolean @default(false)
 
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
@@ -809,6 +823,12 @@ model Project {
   name           String
   description    String?
   status         ProjectStatus @default(DRAFT)
+  /// Santé projet (RAG) éditoriale pour le point de statut client (deck PPTX).
+  /// `null` = non renseignée. Posée par le PM, indépendante de `status`.
+  statusHealth   ProjectHealth?
+  /// Résumé narratif du statut, saisi par le PM, rendu tel quel dans le deck
+  /// client. `null`/'' = absent. Volontairement libre (pas de structure).
+  statusSummary  String?
   startDate      DateTime?
   dueDate        DateTime?
   /// true = projet facturable (cycle complet avec charter signé requis pour
@@ -1562,6 +1582,13 @@ model AgentRun {
   runKey         String?
   /// Note libre (ce que le run a fait).
   note           String?
+  /// Provenance du run (Lot 3 AGENT_COST_UNITS) : 'self' = déclaré par l'agent
+  /// (`vaks_report_run`) ; 'gateway' = MESURÉ par la passerelle LLM Vaks (usage
+  /// exact par appel). Posé SERVEUR uniquement, jamais via le DTO : 'gateway'
+  /// n'est accordé que si le header `X-Vaks-Gateway-Secret` matche le setting
+  /// `agents.gateway.sharedSecret`. Les runs 'gateway' échappent aux anomalies
+  /// « déclaré sans tokens / sous la référence » (l'usage est mesuré, pas déclaré).
+  source         String?
   createdAt      DateTime @default(now())
 
   @@unique([organizationId, agentId, runKey])
@@ -2042,6 +2069,44 @@ model AgentProjectRate {
   @@index([projectId])
 }
 
+/// Catalogue UNIFIÉ de modèles + prix (AGENT_COST_UNITS) — par ORG (pooled-safe).
+/// **Cumulatif / additif** : alimenté par un SEED committé (défaut air-gap) puis,
+/// en opt-in, par un sync live OpenRouter (liste + prix ; fallback LiteLLM pour
+/// le prix manquant). Un upsert ne SUPPRIME jamais — `firstSeenAt`/`lastSeenAt`
+/// tracent l'apparition/dernière vue d'un modèle ; la liste PROPOSÉE au picker
+/// filtre sur `lastSeenAt` (rétention 4 ans), mais l'entrée reste en DB.
+/// `source='manual'` (saisi admin) n'est jamais écrasé par le sync.
+/// Ne pilote QUE les taux de COÛT interne (référence `derivedCost`), jamais le
+/// taux facturé client.
+model ModelPrice {
+  id             String   @id @default(uuid())
+  organizationId String
+  provider       String   // 'anthropic' | 'openai' | 'azure-openai' | … (nomenclature interne)
+  model          String   // ex. 'claude-sonnet-5'
+  label          String?
+  /// 'tokens' (défaut) | 'credits' — miroir de AgentBillingUnit (shared).
+  unit           String   @default("tokens")
+  /// € par 1000 unités (tokens d'entrée / crédits). NULL = modèle listé sans prix connu.
+  costInPerKUnits  Decimal? @db.Decimal(12, 4)
+  /// € par 1000 tokens de sortie. null en crédits (compteur unique) ou prix inconnu.
+  costOutPerKUnits Decimal? @db.Decimal(12, 4)
+  /// Provenance de l'ENTRÉE catalogue : 'seed' | 'openrouter' | 'manual'.
+  source         String   @default("seed")
+  /// Provenance du PRIX : 'openrouter' | 'litellm' | 'manual' | null (aucun prix).
+  priceSource    String?
+  /// Première apparition du modèle dans le catalogue (jamais modifiée).
+  firstSeenAt    DateTime @default(now())
+  /// Dernière fois vu chez une source (sert la rétention 4 ans de la liste proposée).
+  lastSeenAt     DateTime @default(now())
+  /// Horodatage de la dernière valeur de prix reçue (pour l'affichage).
+  feedUpdatedAt  DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([organizationId, provider, model])
+  @@index([organizationId])
+}
+
 /// Catégorie d'un coût hors main-d'œuvre rattaché à un projet.
 /// LICENSE = licences logicielles / abonnements SaaS ; HARDWARE = matériel /
 /// équipement ; CLOUD = consommation cloud / hébergement ; SUBCONTRACTOR =
@@ -2213,6 +2278,65 @@ model WebhookDelivery {
 
   @@index([organizationId, queuedAt])
   @@index([webhookId, queuedAt])
+  @@index([status])
+}
+
+/// Souscription webhook SORTANTE self-provisionnée par un **agent IA** (chantier
+/// nudge). Un provider (Copilot Studio / Power Automate, n8n, runner custom)
+/// enregistre son URL de callback via `POST /me/webhook-subscriptions` avec le
+/// PAT de l'agent ; Vaks POST un « nudge » léger (sans autorité) quand une tâche
+/// devient pertinente pour l'agent (assignée / boucle de revue). `agentUserId`
+/// est un scalaire (pas de FK, comme `Webhook.scopeId`) : la table `users` reste
+/// inchangée. Une souscription active par agent (cible d'upsert).
+model AgentWebhookSubscription {
+  id                  String    @id @default(uuid())
+  organizationId      String
+  /// = ApiTokenPrincipal.userId (l'utilisateur AGENT porteur du PAT).
+  agentUserId         String
+  /// URL de callback fournie par le provider (`@{listCallbackUrl()}`).
+  callbackUrl         String
+  /// Secret partagé de signature HMAC (header X-Vaks-Signature). Montré une fois.
+  secret              String
+  /// Events souscrits (sous-ensemble de task.assigned / task.changes_requested /
+  /// comment.created). Vide ou "*" = tous.
+  events              String[]
+  active              Boolean   @default(true)
+  /// Échecs terminaux consécutifs (reset à 0 sur succès) → auto-désactivation.
+  consecutiveFailures Int       @default(0)
+  autoDisabledAt      DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  deliveries AgentNudgeDelivery[]
+
+  @@unique([organizationId, agentUserId])
+  @@index([organizationId, agentUserId])
+}
+
+/// Journal d'une livraison de nudge (POST vers le callback du provider). Retries
+/// BullMQ dans la même ligne (status / responseStatus / attemptCount).
+model AgentNudgeDelivery {
+  id             String                @id @default(uuid())
+  organizationId String
+  subscriptionId String
+  agentUserId    String
+  event          String
+  taskId         String?
+  projectId      String?
+  /// Payload envoyé (nudge minimal, sans autorité) — replay/debug.
+  payload        Json
+  status         WebhookDeliveryStatus @default(PENDING)
+  responseStatus Int?
+  responseBody   String?
+  error          String?
+  attemptCount   Int                   @default(0)
+  queuedAt       DateTime              @default(now())
+  deliveredAt    DateTime?
+
+  subscription AgentWebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, queuedAt])
+  @@index([subscriptionId, queuedAt])
   @@index([status])
 }
 

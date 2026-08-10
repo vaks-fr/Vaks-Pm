@@ -185,6 +185,12 @@ services:
       #
       # (TENANCY_CUSTOM_DOMAINS reste disponible pour un tenant sur un domaine
       #  propre, hors `<slug>.<baseDomain>` — sans rapport avec le MCP.)
+      #
+      # Feed de prix des modèles (Lot 2 AGENT_COST_UNITS) — source du catalogue de
+      # coûts. Défaut = JSON communautaire LiteLLM. Opt-in par org (setting
+      # `agents.pricing.feedEnabled`), donc AUCUN appel sortant tant qu'aucune org
+      # ne l'a activé. Décommenter pour pointer un feed Vaks hébergé plus tard.
+      # MODEL_PRICING_FEED_URL: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
     secrets:
       - jwt_access_secret
       - jwt_refresh_secret
@@ -250,6 +256,12 @@ services:
       #
       # (TENANCY_CUSTOM_DOMAINS reste disponible pour un tenant sur un domaine
       #  propre, hors `<slug>.<baseDomain>` — sans rapport avec le MCP.)
+      #
+      # Feed de prix des modèles (Lot 2 AGENT_COST_UNITS) — source du catalogue de
+      # coûts. Défaut = JSON communautaire LiteLLM. Opt-in par org (setting
+      # `agents.pricing.feedEnabled`), donc AUCUN appel sortant tant qu'aucune org
+      # ne l'a activé. Décommenter pour pointer un feed Vaks hébergé plus tard.
+      # MODEL_PRICING_FEED_URL: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
     secrets:
       - jwt_access_secret
       - jwt_refresh_secret

@@ -195,9 +195,14 @@ export class ProjectsController {
 
   @Get()
   @RequirePermissions('project:view')
-  findAll(@CurrentUser() user: AuthUser, @Query('scope') scope?: string) {
+  findAll(
+    @CurrentUser() user: AuthUser,
+    @Query('scope') scope?: string,
+    @Query('q') q?: string,
+  ) {
     return this.projects.findAll(user.orgId, user.userId, user.isAdmin, {
       scope: scope === 'mine' ? 'mine' : scope === 'all' ? 'all' : undefined,
+      q,
     });
   }
 

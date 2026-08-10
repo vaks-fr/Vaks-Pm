@@ -16,7 +16,6 @@ import {
   type DueAdherence,
   type ProjectStats,
   type TasksInWindowReportDto,
-  type TaskInWindowDto,
   type TimeBreakdown,
   type TimeBreakdownRow,
 } from './api';
@@ -25,6 +24,7 @@ import { Icon } from './primitives';
 import { ProjectSkillGapView } from './SkillGapSection';
 import { useChartTooltip } from './chart-tooltip';
 import { CfdChart } from './report-charts';
+import { statusMeta } from './taskStatus';
 import { PieChart, palette } from './finance-charts';
 import { ReportWidgetsPanel, type ReportWidgetRow } from './ReportWidgetsPanel';
 import {
@@ -526,19 +526,6 @@ function BreakdownTable({
 
 /* ---------- Tâches sur la période ---------- */
 
-const STATUS_LABELS: Record<TaskInWindowDto['status'], { labelKey: string; color: string }> = {
-  TODO: { labelKey: 'reports:status.todo', color: 'var(--text-3)' },
-  CLAIMED: { labelKey: 'reports:status.claimed', color: 'var(--accent)' },
-  IN_PROGRESS: { labelKey: 'reports:status.inProgress', color: 'var(--accent)' },
-  IN_REVIEW: { labelKey: 'reports:status.inReview', color: 'var(--info)' },
-  CHANGES_REQUESTED: { labelKey: 'reports:status.changesRequested', color: '#f97316' },
-  APPROVED: { labelKey: 'reports:status.approved', color: '#16a34a' },
-  ON_HOLD: { labelKey: 'reports:status.onHold', color: '#9333ea' },
-  DONE: { labelKey: 'reports:status.done', color: '#16a34a' },
-};
-
-const STATUS_FALLBACK = { labelKey: 'reports:status.todo', color: 'var(--text-3)' };
-
 /* ---------- Barres hebdo du throughput agents (SVG inline) ---------- */
 
 function AgentWeeklyBars({ weekly }: { weekly: { weekStart: string; count: number }[] }) {
@@ -674,14 +661,14 @@ function TasksInWindowCard({ data }: { data: TasksInWindowReportDto }) {
           </thead>
           <tbody>
             {pageTasks.map((tk) => {
-              const s = STATUS_LABELS[tk.status] ?? STATUS_FALLBACK;
+              const m = statusMeta(tk.status);
               return (
                 <tr key={tk.id} style={{ borderTop: '1px solid var(--border)' }}>
                   <td style={{ padding: '6px 8px', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {tk.title}
                   </td>
                   <td style={{ padding: '6px 8px' }}>
-                    <span style={{ color: s.color, fontWeight: 600 }}>{t(s.labelKey)}</span>
+                    <span style={{ color: m.reportColor, fontWeight: 600 }}>{t('reports:status.' + m.labelSubkey)}</span>
                   </td>
                   <td style={{ padding: '6px 8px', color: 'var(--text-3)' }}>
                     {tk.assignees.length === 0
@@ -897,7 +884,10 @@ export function ReportsView({ projectId, monday, onOpenTask }: Props) {
 
   const sectionRenderers: Partial<Record<ReportWidgetKey, () => React.ReactNode>> = {
     kpis: () => (
-      <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+      // alignItems: stretch → toutes les cartes prennent la hauteur de la plus
+      // haute (`.row` par défaut aligne en `center`, ce qui laissait dépasser la
+      // carte dont le libellé passe sur 2 lignes, ex. « Complétion à temps »).
+      <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
         <Kpi label={t('reports:kpi.tasks')} value={String(stats.totalTasks)} hint={t('reports:kpi.tasksHint', { done: stats.byStatus.DONE, inProgress: stats.byStatus.IN_PROGRESS })} scope="project" />
         <Kpi label={t('reports:kpi.progress')} value={`${stats.completionPct}%`} hint={t('reports:kpi.progressHint', { done: stats.doneEstimateHours, total: stats.totalEstimateHours })} accent scope="project" />
         <Kpi label={t('reports:kpi.remaining')} value={`${stats.remainingEstimateHours}h`} hint={t('reports:kpi.remainingHint', { todo: stats.byStatus.TODO, review: stats.byStatus.IN_REVIEW })} scope="project" />
@@ -1024,7 +1014,7 @@ export function ReportsView({ projectId, monday, onOpenTask }: Props) {
       !quality || quality.totalTasks === 0 ? null : (
         <div className="card" style={{ padding: 14 }}>
           <div style={{ fontWeight: 700, marginBottom: 10 }}>{t('reports:quality.title')}</div>
-          <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+          <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
             <Kpi label={t('reports:quality.reworkRate')} value={`${quality.reworkRatePct}%`} hint={t('reports:quality.reworkHint', { reworked: quality.reworkedTasks, total: quality.totalTasks })} />
             <Kpi label={t('reports:quality.bugs')} value={String(quality.bugCount)} hint={t('reports:quality.bugsHint', { pct: quality.bugRatePct })} accent />
             <Kpi
@@ -1053,7 +1043,7 @@ export function ReportsView({ projectId, monday, onOpenTask }: Props) {
             </div>
           ) : (
             <>
-              <div className="row" style={{ gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <div className="row" style={{ gap: 12, flexWrap: 'wrap', marginBottom: 12, alignItems: 'stretch' }}>
                 <Kpi label={t('reports:agents.kpiThroughput')} value={String(agents.tasksCompleted)} hint={t('reports:agents.kpiThroughputHint')} accent scope="period" />
                 <Kpi label={t('reports:agents.kpiActive')} value={String(agents.activeAgents)} hint={t('reports:agents.kpiActiveHint')} scope="period" />
                 <Kpi
@@ -1380,6 +1370,20 @@ export function ReportsView({ projectId, monday, onOpenTask }: Props) {
                 </button>
               );
             })}
+
+            {/* Point de statut client (PowerPoint) */}
+            <div style={{ fontSize: 12, fontWeight: 700, marginTop: 8, color: 'var(--text-2)' }}>{t('reports:exports.clientDeck')}</div>
+            <button
+              className="btn btn-line"
+              style={{ justifyContent: 'flex-start', gap: 8 }}
+              onClick={() =>
+                api
+                  .downloadCsv(`/projects/${projectId}/status-deck.pptx`, `status-${projectId}.pptx`)
+                  .catch((e) => setErr((e as Error).message))
+              }
+            >
+              <Icon name="download" size={14} /> {t('reports:exports.items.clientStatusDeck')}
+            </button>
           </div>
         </div>
       )}

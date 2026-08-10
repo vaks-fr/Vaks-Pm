@@ -11,6 +11,10 @@ import { WatchersService } from './watchers.service';
 import { WatchersController, MeWatchingController } from './watchers.controller';
 import { RecurringTasksService } from './recurring-tasks.service';
 import { RecurringTasksController } from './recurring-tasks.controller';
+import {
+  LAZY_AUTOMATION_ACTIONS,
+  LAZY_AUTOMATION_RECIPIENTS,
+} from '../agents/agent-nudge.service';
 
 /**
  * Automatisations built-in (BUILTIN_AUTOMATIONS.md) : règles livrées de base,
@@ -35,6 +39,11 @@ import { RecurringTasksController } from './recurring-tasks.controller';
     AutomationsCronService,
     WatchersService,
     RecurringTasksService,
+    // Alias par token string pour `AgentNudgeService` (alertes « file de revue
+    // pleine » / budget). Même raison que côté TasksModule : pas d'import de
+    // valeur possible sans réintroduire un cycle de chargement.
+    { provide: LAZY_AUTOMATION_ACTIONS, useExisting: AutomationActionsService },
+    { provide: LAZY_AUTOMATION_RECIPIENTS, useExisting: AutomationRecipientsService },
   ],
   controllers: [
     AutomationsAdminController,

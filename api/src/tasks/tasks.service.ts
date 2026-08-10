@@ -11,11 +11,12 @@ import { createHash } from 'node:crypto';
 import { Prisma, Task, TaskStatus } from '@db';
 import { AutomationsHooksService } from '../automations/automations-hooks.service';
 import { WatchersService } from '../automations/watchers.service';
-import { EVENTS, AgentPolicyContext, AgentPolicyOutcome, isAgentModelAllowed } from '@vaks-pm/shared';
+import { EVENTS, AgentPolicyContext, AgentPolicyOutcome, isAgentModelAllowed, foldToBaseStatus, billingUnitForProvider } from '@vaks-pm/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../realtime/events.gateway';
 import { NotificationsService } from '../notifications/notifications.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
+import { AgentNudgeService } from '../agents/agent-nudge.service';
 import { SkillsService } from '../skills/skills.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
 import { auditDiff } from '../audit-logs/audit-sanitize';
@@ -128,6 +129,7 @@ export class TasksService {
     private readonly events: EventsGateway,
     private readonly notifications: NotificationsService,
     private readonly webhooks: WebhooksService,
+    private readonly agentNudge: AgentNudgeService,
     private readonly skills: SkillsService,
     private readonly audit: AuditLogService,
     private readonly transitions: TaskTransitionService,
@@ -160,6 +162,7 @@ export class TasksService {
       return null;
     }
   }
+
 
   /**
    * Notifie un changement de statut aux assignés **et** aux watchers (tâche ou
@@ -626,6 +629,7 @@ export class TasksService {
         { ...out, assignedUserIds: dto.assigneeIds },
         { projectId },
       );
+      void this.agentNudge.nudgeTaskAssigned(orgId, { id: task.id, projectId }, dto.assigneeIds);
       for (const uid of dto.assigneeIds) {
         void this.notifications.notifyAssignment(orgId, userId, uid, task.id);
       }
@@ -1004,6 +1008,15 @@ export class TasksService {
       }
     }
 
+    // Réaligne la carte sur la colonne du statut foldé (CLAIMED/CHANGES_REQUESTED
+    // → In progress, APPROVED → In review, etc.). Sans ça, `boardColumnId` reste
+    // figé sur tout changement de statut hors `move()` et la carte « traîne » dans
+    // une colonne qui ne correspond plus à son statut. Best-effort.
+    if (statusChanging && dto.status) {
+      const colId = await this.columnForStatus(existing.projectId, dto.status as TaskStatus);
+      if (colId) data.boardColumn = { connect: { id: colId } };
+    }
+
     // Gating clôture : on ne peut passer une tâche à DONE que si tous ses
     // prédécesseurs le sont. Sinon refus 409, sauf si `completePredecessors`
     // demande la clôture en cascade.
@@ -1090,13 +1103,19 @@ export class TasksService {
       const prev = new Set(previousAssigneeIds);
       const added = dto.assigneeIds.filter((id) => !prev.has(id));
       const removed = previousAssigneeIds.filter((id) => !next.has(id));
-      if (added.length)
+      if (added.length) {
         void this.webhooks.dispatch(
           orgId,
           'task.assigned',
           { ...out, assignedUserIds: added },
           { projectId: task.projectId },
         );
+        void this.agentNudge.nudgeTaskAssigned(
+          orgId,
+          { id: task.id, projectId: task.projectId },
+          added,
+        );
+      }
       if (removed.length)
         void this.webhooks.dispatch(
           orgId,
@@ -1151,6 +1170,15 @@ export class TasksService {
         { id: task.id, title: task.title },
         task.projectId,
       );
+    }
+    // Estimation coût Copilot : une tâche complétée directement par un AGENT
+    // (projets sans revue) → run estimé via la grille tarifaire si l'agent
+    // facture en crédits (non mesurable). Toutes les gardes vivent dans le hook.
+    if (statusChanged && task.status === 'DONE' && caller?.actorKind === 'AGENT' && !caller?.system) {
+      void this.automationHooks()?.onTaskCompletedByAgent(orgId, { taskId: task.id, agentId: actorUserId ?? undefined });
+      // Projets sans revue : la tâche se termine ici, la capacité de l'agent se
+      // libère ici aussi (le chemin avec revue passe par `applyReviewDecision`).
+      void this.agentNudge.resumeAgent(orgId, actorUserId);
     }
     // Notification d'ENTRÉE dans un sous-statut (Custom Status) : destinataires
     // configurés sur le sous-statut. Pas d'anti-boucle `caller.system` — aucune
@@ -1525,6 +1553,14 @@ export class TasksService {
     // une lecture pure, et on ne veut pas tenir un verrou pendant tout ça).
     const contextSnapshot = await this.buildClaimSnapshot(orgId, task.projectId, task);
 
+    // Budget frais AVANT le contrôle : pour un agent crédits (Copilot), persiste
+    // son meter d'appels MCP en cours (les crédits déjà brûlés sur ses tâches
+    // récentes, pas encore persistés) → le contrôle de budget plus bas voit la
+    // dépense réelle, pas une valeur en retard. Best-effort.
+    if (actor.actorKind === 'AGENT') {
+      await this.automationHooks()?.persistAgentMeter(orgId, actor.userId);
+    }
+
     // Enveloppe de coût de la tâche, HÉRITAGE COMPRIS (lot B) : une sous-tâche
     // sans plafond propre est couverte par celui de son parent, sinon découper
     // une tâche plafonnée suffirait à s'en affranchir. Résolu hors transaction
@@ -1669,10 +1705,13 @@ export class TasksService {
         }
       }
 
+      // Réaligne la carte sur la colonne foldée (CLAIMED → In progress).
+      const claimedColId = await this.columnForStatus(task.projectId, TaskStatus.CLAIMED);
       const res = await tx.task.updateMany({
         where: { id: taskId, organizationId: orgId, status: TaskStatus.TODO, deletedAt: null },
         data: {
           status: TaskStatus.CLAIMED,
+          ...(claimedColId ? { boardColumnId: claimedColId } : {}),
           claimedById: actor.userId,
           claimedAt: new Date(),
           leaseExpiresAt,
@@ -1707,6 +1746,10 @@ export class TasksService {
     });
     void this.webhooks.dispatch(orgId, 'task.updated', out, { projectId: task.projectId });
     void this.webhooks.dispatch(orgId, 'task.claimed', out, { projectId: task.projectId });
+    // Le réveil qui a mené à ce claim a joué son rôle : on libère le slot
+    // réservé (AGENT_NUDGE_CAPACITY.md §4.1). Sans ça, la tâche compterait
+    // deux fois — comme réservation ET comme tâche active — jusqu'à expiration.
+    if (actor.actorKind === 'AGENT') void this.agentNudge.consumeSlot(actor.userId);
     return out;
   }
 
@@ -1767,6 +1810,10 @@ export class TasksService {
     });
     void this.webhooks.dispatch(orgId, 'task.updated', out, { projectId: task.projectId });
     void this.webhooks.dispatch(orgId, 'task.released', out, { projectId: task.projectId });
+    // Capacité libérée → on réveille l'agent sur la suite. ⚠️ `task.claimedById`
+    // (valeur d'AVANT le release) et pas `actor.userId` : un humain peut faire
+    // un takeover, ce serait alors lui qu'on tenterait de réveiller.
+    void this.agentNudge.resumeAgent(orgId, task.claimedById);
     return out;
   }
 
@@ -1826,6 +1873,10 @@ export class TasksService {
         message: "Le bail vient d'être perdu (reprise concurrente) — arrêtez ce travail.",
       });
     }
+
+    // (Meter de coût : plus de persistance ici — le meter est matérialisé À CHAQUE
+    // appel MCP par `McpToolQuotaInterceptor`. Persister aussi au heartbeat ferait
+    // un upsert concurrent sur le même runKey que l'appel courant.)
 
     return {
       taskId,
@@ -1998,6 +2049,18 @@ export class TasksService {
       select: { id: true, status: true, projectId: true, claimedById: true },
     });
     if (!task) throw new NotFoundException('Tâche introuvable');
+    // Idempotence : une tâche DÉJÀ en revue par le même claimant → no-op (on
+    // renvoie l'état courant sans erreur). Sans ça, un agent trop zélé qui
+    // rappelle `submit_for_review` se prend un NOT_SUBMITTABLE et boucle. La
+    // 1ʳᵉ soumission a déjà créé le livrable + posé IN_REVIEW ; les suivantes
+    // ne doivent ni casser ni dupliquer.
+    if (task.status === TaskStatus.IN_REVIEW && task.claimedById === actor.userId) {
+      const current = await this.prisma.task.findFirst({
+        where: { id: taskId, organizationId: orgId },
+        include: TASK_INCLUDE,
+      });
+      return this.toDto(current!);
+    }
     if (task.status !== TaskStatus.IN_PROGRESS) {
       throw new ConflictException({
         code: 'NOT_SUBMITTABLE',
@@ -2045,7 +2108,22 @@ export class TasksService {
       // livrable soumis** (porte A1, batch 1) AVANT la revue — pas juste « un run
       // sur la tâche » : le run et le livrable doivent être liés (l'agent passe le
       // `deliverableId` à `vaks_report_run`). Rapproche le coût de l'artefact revu.
-      if (await this.policies.getRequireRunDeclaration(orgId)) {
+      //
+      // ⚠️ EXEMPTION agents crédits (Copilot) : leur coût est MESURÉ serveur (meter
+      // d'appels MCP), `vaks_report_run` leur est masqué → ils ne PEUVENT pas
+      // déclarer, et la ligne metered n'a pas de `deliverableId`. Exiger la
+      // déclaration les bloquerait éternellement en IN_PROGRESS. Le meter couvre
+      // déjà le besoin (connaître le coût réel).
+      const isCreditsAgent =
+        billingUnitForProvider(
+          (
+            await this.prisma.user.findFirst({
+              where: { id: actor.userId, organizationId: orgId },
+              select: { modelProvider: true },
+            })
+          )?.modelProvider,
+        ) === 'credits';
+      if (!isCreditsAgent && (await this.policies.getRequireRunDeclaration(orgId))) {
         const runs = await this.prisma.agentRun.count({
           where: {
             organizationId: orgId,
@@ -2068,12 +2146,27 @@ export class TasksService {
       // l'agent réessaie plus tard (`retryAfter`). N'affecte QUE les agents.
       const maxPending = await this.policies.getBackpressureMax(orgId);
       if (maxPending > 0) {
-        const queued = await this.prisma.task.count({
-          where: {
-            organizationId: orgId, projectId: task.projectId,
-            status: TaskStatus.IN_REVIEW, deletedAt: null,
-          },
-        });
+        // ⚠️ Ne compte QUE les tâches produites par des agents : ce plafond
+        // protège la capacité de revue des LIVRABLES D'AGENTS, et une file de
+        // relecture entre humains n'y touche pas. Compter les tâches humaines
+        // faisait bloquer les agents par une activité qui ne les concerne pas.
+        // `Task.claimedById` est un scalaire sans relation (découplage du
+        // schéma) → on résout les ids d'agents puis on filtre par `in`.
+        const agentIds = (
+          await this.prisma.user.findMany({
+            where: { organizationId: orgId, kind: 'AGENT' },
+            select: { id: true },
+          })
+        ).map((u) => u.id);
+        const queued = agentIds.length
+          ? await this.prisma.task.count({
+              where: {
+                organizationId: orgId, projectId: task.projectId,
+                status: TaskStatus.IN_REVIEW, deletedAt: null,
+                claimedById: { in: agentIds },
+              },
+            })
+          : 0;
         if (queued >= maxPending) {
           void this.audit.log({
             organizationId: orgId,
@@ -2103,12 +2196,18 @@ export class TasksService {
       },
     });
 
+    // Réaligne sur la colonne foldée (IN_REVIEW → In review).
+    const reviewColId = await this.columnForStatus(task.projectId, TaskStatus.IN_REVIEW);
     const updated = await this.prisma.$transaction(async (tx) => {
       // Le bail d'exécution s'éteint ici : la balle est dans le camp du reviewer,
       // plus dans celui de l'agent — le balayeur n'a plus rien à reprendre.
       await tx.task.update({
         where: { id: taskId },
-        data: { status: TaskStatus.IN_REVIEW, leaseExpiresAt: null },
+        data: {
+          status: TaskStatus.IN_REVIEW,
+          leaseExpiresAt: null,
+          ...(reviewColId ? { boardColumn: { connect: { id: reviewColId } } } : {}),
+        },
       });
       await tx.taskStatusHistory.create({
         data: {
@@ -2126,6 +2225,8 @@ export class TasksService {
     });
     void this.webhooks.dispatch(orgId, 'task.updated', out, { projectId: task.projectId });
     void this.webhooks.dispatch(orgId, 'task.review_requested', out, { projectId: task.projectId });
+    // (Meter de coût : matérialisé à chaque appel MCP par l'intercepteur — plus
+    // de persistance ici, cf. commentaire au heartbeat.)
     const reviewers = await this.projectManagerIds(task.projectId);
     if (reviewers.length) {
       void this.notifications.notifyStatusChange(
@@ -2173,11 +2274,14 @@ export class TasksService {
       },
     });
 
+    // Réaligne sur la colonne foldée (APPROVED → In review, CHANGES_REQUESTED → In progress).
+    const decisionColId = await this.columnForStatus(task.projectId, toStatus);
     const updated = await this.prisma.$transaction(async (tx) => {
       await tx.task.update({
         where: { id: taskId },
         data: {
           status: toStatus,
+          ...(decisionColId ? { boardColumn: { connect: { id: decisionColId } } } : {}),
           ...(toStatus === TaskStatus.CHANGES_REQUESTED ? { retryCount: { increment: 1 } } : {}),
         },
       });
@@ -2198,6 +2302,9 @@ export class TasksService {
 
     if (toStatus === TaskStatus.APPROVED) {
       void this.webhooks.dispatch(orgId, 'task.approved', out, { projectId: task.projectId });
+      // La tâche quitte la file de revue → un slot de backpressure ET un slot de
+      // concurrence se libèrent pour son claimant.
+      void this.agentNudge.resumeAgent(orgId, task.claimedById);
       if (await this.resolveAutoClose(orgId, task.project)) {
         // Policy `require_review` (chantier 3) : une tâche qui matche exige une
         // **clôture humaine explicite** — l'auto-close est neutralisé même si
@@ -2226,6 +2333,12 @@ export class TasksService {
       }
     } else {
       void this.webhooks.dispatch(orgId, 'task.changes_requested', out, { projectId: task.projectId });
+      // Nudge : réveille l'agent claimant pour qu'il traite les corrections.
+      void this.agentNudge.nudgeChangesRequested(
+        orgId,
+        { id: taskId, projectId: task.projectId },
+        task.claimedById,
+      );
       const target = await this.ownerOrSelfId(task.claimedById);
       if (target) {
         void this.notifications.notifyStatusChange(
@@ -2295,6 +2408,10 @@ export class TasksService {
     }
     const out = this.toDto(updated);
     this.events.emitToProject(projectId, EVENTS.TASK_UPDATED, out);
+    // L'agent vient d'être retiré de la tâche : sa concurrence se libère. La
+    // tâche empoisonnée ne peut pas lui être re-proposée (elle n'est plus TODO,
+    // et `rankCandidates` ne classe que des TODO).
+    void this.agentNudge.resumeAgent(orgId, claimedById);
     return out;
   }
 
@@ -2306,8 +2423,17 @@ export class TasksService {
       orgId, projectId, taskId, from: TaskStatus.APPROVED, to: TaskStatus.DONE,
       actorUserId, actor: { kind: 'HUMAN', canUpdate: false, canReview: false }, autoClose: true,
     });
+    // Réaligne sur la colonne Done (auto-close normal : `cascadeComplete` le
+    // faisait déjà, pas ce chemin — d'où l'incohérence corrigée ici).
+    const doneColId = await this.columnForStatus(projectId, TaskStatus.DONE);
     const done = await this.prisma.$transaction(async (tx) => {
-      await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.DONE } });
+      await tx.task.update({
+        where: { id: taskId },
+        data: {
+          status: TaskStatus.DONE,
+          ...(doneColId ? { boardColumn: { connect: { id: doneColId } } } : {}),
+        },
+      });
       await tx.taskStatusHistory.create({
         data: {
           organizationId: orgId, projectId, taskId,
@@ -2322,6 +2448,9 @@ export class TasksService {
       taskId, from: TaskStatus.APPROVED, to: TaskStatus.DONE,
     });
     void this.webhooks.dispatch(orgId, 'task.completed', out, { projectId });
+    // Estimation coût Copilot : auto-close du flux de revue → l'agent qui a
+    // produit le livrable est résolu dans le hook (claimant / auteur du livrable).
+    void this.automationHooks()?.onTaskCompletedByAgent(orgId, { taskId });
     return out;
   }
 
@@ -3261,6 +3390,26 @@ export class TasksService {
     if (!columnId) return undefined;
     const c = await this.prisma.boardColumn.findUnique({ where: { id: columnId } });
     return c?.status;
+  }
+
+  /**
+   * Colonne de board correspondant au statut donné, en repliant les statuts
+   * agents sur leur base (`foldToBaseStatus` — SOURCE DE VÉRITÉ partagée avec le
+   * front) : CLAIMED/CHANGES_REQUESTED → colonne IN_PROGRESS, APPROVED → colonne
+   * IN_REVIEW. Sert à réaligner `boardColumnId` sur tout chemin d'écriture de
+   * statut HORS `move()` (le drag choisit sa colonne explicitement). Best-effort :
+   * renvoie `undefined` si aucune colonne — l'appelant ne touche alors à rien.
+   * Même pattern que `cascadeComplete`. Lecture via `this.prisma` (les colonnes
+   * ne sont pas mutées dans les transactions appelantes → lecture stable).
+   */
+  private async columnForStatus(projectId: string, status: TaskStatus): Promise<string | undefined> {
+    const base = foldToBaseStatus(status) as TaskStatus;
+    const col = await this.prisma.boardColumn.findFirst({
+      where: { board: { projectId }, status: base },
+      orderBy: { order: 'asc' },
+      select: { id: true },
+    });
+    return col?.id;
   }
 
   private async nextPositionInColumn(columnId: string | undefined): Promise<number> {

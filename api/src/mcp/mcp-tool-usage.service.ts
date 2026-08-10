@@ -84,6 +84,116 @@ export class McpToolUsageService implements OnModuleDestroy {
     }
   }
 
+  // ============================================================
+  // Compteur ACCUMULÉ par (agent, tâche) — estimation de coût
+  // ============================================================
+  //
+  // Distinct de `hit()` (fenêtre glissante de 60 s pour les quotas) : ici on
+  // accumule sur toute la durée de vie d'une tâche, pour savoir combien d'appels
+  // MCP elle a réellement coûtés (AGENT_MCP_CALL_METER.md).
+  //
+  // Clé à trois niveaux : la tâche si l'appel en désigne une, sinon le projet,
+  // sinon un panier d'overhead org. On ne replie JAMAIS l'overhead sur une tâche
+  // au hasard — sous parallélisme, N runs explorent en même temps et le bruit
+  // atterrirait entièrement sur la première tâche qui se termine.
+
+  private static readonly ACCRUE_PREFIX = 'vaks-mcpcalls';
+  /** TTL 7 j : le compteur d'une tâche jamais complétée finit par mourir. */
+  private static readonly ACCRUE_TTL_S = 7 * 24 * 3600;
+
+  private accrueKey(agentId: string, ctx: { taskId?: string | null; projectId?: string | null }): string {
+    const scope = ctx.taskId ? `t:${ctx.taskId}` : ctx.projectId ? `p:${ctx.projectId}` : '__none__';
+    return `${McpToolUsageService.ACCRUE_PREFIX}:${this.slug()}:${agentId}:${scope}`;
+  }
+
+  /** Incrémente le compteur d'appels de l'agent (lectures comprises). Fail-open. */
+  async accrue(
+    agentId: string,
+    ctx: { taskId?: string | null; projectId?: string | null } = {},
+  ): Promise<void> {
+    const k = this.accrueKey(agentId, ctx);
+    try {
+      const n = await this.redis.incr(k);
+      if (n === 1) await this.redis.expire(k, McpToolUsageService.ACCRUE_TTL_S);
+    } catch {
+      /* la persistance retombera au prochain passage */
+    }
+  }
+
+  /**
+   * Lit le compteur SANS le vider. Le meter persiste des lignes `AgentRun`
+   * metered qu'il RECALCULE à chaque passage depuis le total cumulé (upsert
+   * idempotent) — vider casserait ce recalcul. 0 si absent/erreur.
+   */
+  async readAccrued(
+    agentId: string,
+    ctx: { taskId?: string | null; projectId?: string | null } = {},
+  ): Promise<number> {
+    try {
+      const v = await this.redis.get(this.accrueKey(agentId, ctx));
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** Supprime le compteur — appelé au terminal d'une tâche (DONE), après la persistance finale. */
+  async clearAccrued(
+    agentId: string,
+    ctx: { taskId?: string | null; projectId?: string | null } = {},
+  ): Promise<void> {
+    try {
+      await this.redis.del(this.accrueKey(agentId, ctx));
+    } catch {
+      /* le TTL 7 j finira par nettoyer */
+    }
+  }
+
+  /**
+   * Énumère tous les compteurs accumulés du tenant courant — utilisé par le
+   * balayage de rattrapage (backstop des tâches abandonnées, dont le compteur
+   * n'a jamais été persisté par un claim/heartbeat/submit).
+   *
+   * Clé : `<prefix>:<slug>:<agentId>:<scope>` où `scope` ∈ `t:<taskId>` |
+   * `p:<projectId>` | `__none__`. L'agentId est un uuid (sans « : ») ; le scope
+   * porte lui un « : » pour t/p → on parse par position après l'agentId.
+   */
+  async scanAccrued(): Promise<
+    Array<{ agentId: string; taskId: string | null; projectId: string | null; count: number }>
+  > {
+    const pattern = `${McpToolUsageService.ACCRUE_PREFIX}:${this.slug()}:*`;
+    const out: Array<{ agentId: string; taskId: string | null; projectId: string | null; count: number }> = [];
+    try {
+      let cursor = '0';
+      let guard = 0;
+      do {
+        const [next, keys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
+        cursor = next;
+        if (keys.length) {
+          const vals = await this.redis.mget(...keys);
+          keys.forEach((k, i) => {
+            const parts = k.split(':');
+            // [prefix, slug, agentId, ...scope]
+            const agentId = parts[2];
+            const rest = parts.slice(3);
+            let taskId: string | null = null;
+            let projectId: string | null = null;
+            if (rest[0] === 't') taskId = rest[1] ?? null;
+            else if (rest[0] === 'p') projectId = rest[1] ?? null;
+            const count = Number(vals[i] ?? 0);
+            if (agentId && Number.isFinite(count) && count > 0) {
+              out.push({ agentId, taskId, projectId, count });
+            }
+          });
+        }
+      } while (cursor !== '0' && ++guard < 200);
+    } catch {
+      return [];
+    }
+    return out;
+  }
+
   /**
    * Usage agrégé **par tool** sur la fenêtre courante, tous jetons confondus,
    * pour le tenant courant. Vue « ce qui se passe maintenant ».

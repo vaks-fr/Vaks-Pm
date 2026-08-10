@@ -10,25 +10,11 @@ import { TaskStatus } from '@vaks-pm/shared';
 import type { DashboardDto, DashboardActivityDto, WatchingEntryDto } from '@vaks-pm/shared';
 import { apiGetDashboard, apiGetTimesheet, apiListMyWatching, hueFromId, initialsOf } from './api';
 import type { TimesheetDto } from './api';
+import { statusColKey } from './taskStatus';
 import { MONTHS, type Priority } from './data';
 import { useAuth } from '../auth/AuthContext';
 import { Icon, PriorityDot } from './primitives';
 import { useChartTooltip } from './chart-tooltip';
-
-/** Statut canonique → clé de couleur (col-dot) + clé i18n `tasks:status.*`.
- *  Les statuts « agent » retombent sur le plus proche pour éviter un rendu
- *  cassé (cf. mémoire agent statuses in status maps). */
-const STATUS_META: Record<string, { color: string; key: string }> = {
-  [TaskStatus.TODO]: { color: 'todo', key: 'todo' },
-  [TaskStatus.CLAIMED]: { color: 'progress', key: 'progress' },
-  [TaskStatus.IN_PROGRESS]: { color: 'progress', key: 'progress' },
-  [TaskStatus.IN_REVIEW]: { color: 'review', key: 'review' },
-  [TaskStatus.CHANGES_REQUESTED]: { color: 'review', key: 'review' },
-  [TaskStatus.APPROVED]: { color: 'done', key: 'done' },
-  [TaskStatus.ON_HOLD]: { color: 'hold', key: 'hold' },
-  [TaskStatus.DONE]: { color: 'done', key: 'done' },
-};
-const STATUS_FALLBACK = { color: 'todo', key: 'todo' };
 
 const MS_PER_DAY = 86_400_000;
 
@@ -269,7 +255,7 @@ export function DashboardView({ onOpen }: { onOpen: (id: string) => void }) {
             ) : (
               <div className="dash-tasklist">
                 {data.tasks.map((task) => {
-                  const meta = STATUS_META[task.status] ?? STATUS_FALLBACK;
+                  const col = statusColKey(task.status);
                   const due = dueInfo(task.dueDate);
                   return (
                     <button
@@ -278,7 +264,7 @@ export function DashboardView({ onOpen }: { onOpen: (id: string) => void }) {
                       onClick={() => onOpen(task.id)}
                       title={task.projectName}
                     >
-                      <span className="dash-col-dot" data-status={meta.color} />
+                      <span className="dash-col-dot" data-status={col} />
                       <span className="dash-tid mono">{task.key}</span>
                       <span className="dash-tnm">{task.title}</span>
                       {due && (
@@ -291,9 +277,9 @@ export function DashboardView({ onOpen }: { onOpen: (id: string) => void }) {
                           {due.label}
                         </span>
                       )}
-                      <span className="dash-tag" data-status={meta.color}>
-                        <span className="dash-tag-dot" data-status={meta.color} />
-                        {t('tasks:status.' + meta.key)}
+                      <span className="dash-tag" data-status={col}>
+                        <span className="dash-tag-dot" data-status={col} />
+                        {t('tasks:status.' + col)}
                       </span>
                       <PriorityDot level={task.priority.toLowerCase() as Priority} />
                     </button>
@@ -476,12 +462,12 @@ function LegendRow({
 
 function ActivityRow({ item, onOpen }: { item: DashboardActivityDto; onOpen: (id: string) => void }) {
   const { t } = useTranslation();
-  const meta = item.toStatus ? STATUS_META[item.toStatus] ?? STATUS_FALLBACK : null;
+  const col = item.toStatus ? statusColKey(item.toStatus) : null;
   const verb =
     item.kind === 'move'
       ? t('dashboard.act.move', {
           key: item.taskKey,
-          status: meta ? t('tasks:status.' + meta.key) : '',
+          status: col ? t('tasks:status.' + col) : '',
         })
       : item.kind === 'comment'
         ? t('dashboard.act.comment', { key: item.taskKey })

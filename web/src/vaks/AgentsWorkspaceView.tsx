@@ -119,6 +119,8 @@ export function AgentsWorkspaceView() {
                     )}
                   </div>
                   <div className="dir-email mono">
+                    {a.email}
+                    {' · '}
                     {a.model ? (a.modelProvider ? `${a.modelProvider}/${a.model}` : a.model) : t('agentsWs.noModel', { defaultValue: 'no model declared' })}
                     {a.ownerName && ` · ${a.ownerName}`}
                   </div>
@@ -244,6 +246,7 @@ function AgentDetailModal({
           <div>
             <div className="md-eyebrow mono">{t('agentsWs.title', { defaultValue: 'AI Agent' })}</div>
             <div className="md-title truncate">{d?.name ?? '…'}</div>
+            {d?.email && <div className="mono truncate" style={{ fontSize: 12, opacity: 0.6 }}>{d.email}</div>}
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="close">
             <Icon name="x" size={18} />
@@ -319,7 +322,7 @@ function AgentDetailModal({
                       { l: t('agentsWs.usageCost', { defaultValue: 'Total cost' }), v: `€${d.usage.totalCost.toFixed(2)}` },
                       { l: t('agentsWs.usageRuns', { defaultValue: 'Runs' }), v: String(d.usage.runCount) },
                       { l: t('agentsWs.usageAvg', { defaultValue: 'Avg / task' }), v: d.usage.avgCostPerTask != null ? `€${d.usage.avgCostPerTask.toFixed(2)}` : '—' },
-                      { l: t('agentsWs.usageTokens', { defaultValue: 'Tokens' }), v: d.usage.totalTokens.toLocaleString() },
+                      { l: t(d.billingUnit === 'credits' ? 'agentsWs.usageCredits' : 'agentsWs.usageTokens', { defaultValue: d.billingUnit === 'credits' ? 'Credits' : 'Tokens' }), v: d.usage.totalTokens.toLocaleString() },
                     ].map((x) => (
                       <div key={x.l}>
                         <div style={{ fontSize: 11, color: 'var(--text-3)' }}>{x.l}</div>

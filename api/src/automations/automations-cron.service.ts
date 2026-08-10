@@ -8,6 +8,8 @@ import { getEmailQueue } from '../notifications/email-queue';
 import { readAutomationsSettings } from './automations-settings';
 import { AutomationsEvaluatorService, RunCounters } from './automations-evaluator.service';
 import { RecurringTasksService } from './recurring-tasks.service';
+import { AgentNudgeService, ORG_NUDGE_SUBJECT } from '../agents/agent-nudge.service';
+import { AutomationsHooksService } from './automations-hooks.service';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -38,6 +40,9 @@ export class AutomationsCronService implements OnModuleInit, OnModuleDestroy {
     private readonly tenancy: TenancyService,
     private readonly conn: TenantConnectionService,
     private readonly tenantCtx: TenantContext,
+    private readonly nudge: AgentNudgeService,
+    // Même module (AutomationsModule) → injection directe sans cycle.
+    private readonly hooks: AutomationsHooksService,
   ) {}
 
   onModuleInit() {
@@ -94,6 +99,19 @@ export class AutomationsCronService implements OnModuleInit, OnModuleDestroy {
         const h = await this.evaluator.runHourlyRules(org.id, s);
         this.report(org.id, 'hourly', h);
 
+        // Rattrapage des réveils d'agents (AGENT_NUDGE_CAPACITY.md §7) : un
+        // nudge peut avoir été supprimé (capacité pleine au moment de l'event),
+        // perdu (webhook en échec) ou réservé sans jamais aboutir à un claim.
+        // `resumeAgent` re-vérifie la capacité et ne fait rien s'il n'y a pas de
+        // travail — coût nul quand tout va bien.
+        void this.resumeIdleAgents(org.id);
+
+        // Backstop du meter d'appels MCP (AGENT_MCP_CALL_METER.md) : persiste les
+        // compteurs d'agents crédits qu'aucun claim/heartbeat/submit n'a matérialisés
+        // (tâche abandonnée sans retour de l'agent). Le compteur Redis survit au
+        // crash, donc rien n'est perdu ; ce balayage ne fait que rattraper la trace.
+        void this.hooks.sweepAgentMeters(org.id);
+
         // Matérialisation des tâches récurrentes (gate propre : `recurrence.enabled`).
         if (s.recurrenceEnabled) {
           const n = await this.recurring.materialize(org.id, now);
@@ -114,6 +132,40 @@ export class AutomationsCronService implements OnModuleInit, OnModuleDestroy {
       } catch (err) {
         this.log.warn(`tick org=${org.id} failed: ${(err as Error).message}`);
       }
+    }
+  }
+
+  /**
+   * Re-réveille les agents qui ont une souscription de nudge active et du
+   * travail en attente. Filet de sécurité du chemin événementiel : sans lui, un
+   * agent dont le nudge a été supprimé faute de capacité resterait endormi
+   * jusqu'à la prochaine mutation sur une de ses tâches.
+   *
+   * Fire-and-forget, jamais bloquant pour le reste du tick.
+   */
+  private async resumeIdleAgents(orgId: string): Promise<void> {
+    try {
+      const subs = await this.prisma.agentWebhookSubscription.findMany({
+        where: { organizationId: orgId, active: true },
+        select: { agentUserId: true },
+      });
+      // Une souscription org-level (sentinelle `__org__`) ne désigne pas un
+      // agent : on énumère alors tous les agents de l'org.
+      const hasOrgSub = subs.some((s) => s.agentUserId === ORG_NUDGE_SUBJECT);
+      const ids = hasOrgSub
+        ? (
+            await this.prisma.user.findMany({
+              where: { organizationId: orgId, kind: 'AGENT', status: 'ACTIVE', deletedAt: null },
+              select: { id: true },
+            })
+          ).map((u) => u.id)
+        : subs.map((s) => s.agentUserId).filter((id) => id !== ORG_NUDGE_SUBJECT);
+
+      for (const agentId of [...new Set(ids)]) {
+        await this.nudge.resumeAgent(orgId, agentId);
+      }
+    } catch (err) {
+      this.log.warn(`resumeIdleAgents(org=${orgId}) failed: ${(err as Error).message}`);
     }
   }
 

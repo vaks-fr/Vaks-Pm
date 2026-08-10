@@ -43,6 +43,15 @@ export interface CallContext {
    * la whitelist de validation de chaque DTO côté API.
    */
   confirmToken?: string;
+  /**
+   * Tâche / projet sur lequel porte l'appel, lus dans les arguments du tool
+   * (`AGENT_MCP_CALL_METER.md` §5). Sert **uniquement** l'attribution du coût :
+   * l'API compte les appels MCP par `(agent, tâche)` pour estimer le coût d'un
+   * agent facturé en crédits. Déclaratif et non vérifié — comme `justification`.
+   * Aucun effet sur l'autorisation : les droits restent ceux de la route.
+   */
+  taskId?: string;
+  projectId?: string;
 }
 
 /**
@@ -173,6 +182,9 @@ export class ApiClient {
     const ctx = callContextStore.getStore() ?? this.callContext;
     if (ctx.tool) headers['x-vaks-mcp-tool'] = ctx.tool.slice(0, 200);
     if (ctx.confirmToken) headers['x-vaks-confirm-token'] = ctx.confirmToken.slice(0, 200);
+    // Contexte de coût : imputation de l'appel à une tâche, à défaut un projet.
+    if (ctx.taskId) headers['x-vaks-task-id'] = ctx.taskId;
+    if (ctx.projectId) headers['x-vaks-project-id'] = ctx.projectId;
     if (ctx.justification) {
       headers['x-vaks-justification'] = ctx.justification
         .slice(0, 1000)

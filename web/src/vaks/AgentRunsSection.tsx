@@ -167,7 +167,7 @@ export default function AgentRunsSection({ flash }: { flash: Flash }) {
           />
           <KpiTile
             icon="arrowRight"
-            label={t('agentRuns.kpi.tokens', { defaultValue: 'Tokens (in / out)' })}
+            label={t('agentRuns.kpi.tokens', { defaultValue: 'Units (tokens / credits)' })}
             value={
               <>
                 <span className="aruns-val-full">{num(data.totals.tokensIn)} / {num(data.totals.tokensOut)}</span>
@@ -281,6 +281,30 @@ export default function AgentRunsSection({ flash }: { flash: Flash }) {
                       ) : (
                         <span className="aruns-pill aruns-pill-model-missing">
                           {t('agentRuns.modelUndeclared', { defaultValue: 'not declared' })}
+                        </span>
+                      )}
+                      {(r.source === 'gateway' || r.source === 'runtime_log') && (
+                        <span
+                          className="aruns-pill"
+                          title={
+                            r.source === 'runtime_log'
+                              ? t('agentRuns.viaRuntimeLogHint', { defaultValue: 'Exact tokens read from the agent runtime usage logs (measured, not declared).' })
+                              : t('agentRuns.viaGatewayHint', { defaultValue: 'Usage measured by the LLM gateway (exact, not declared).' })
+                          }
+                          style={{ marginLeft: 6, background: 'color-mix(in oklch, var(--accent) 16%, var(--surface))', color: 'var(--accent)' }}
+                        >
+                          {r.source === 'runtime_log'
+                            ? t('agentRuns.viaRuntimeLog', { defaultValue: 'runtime logs' })
+                            : t('agentRuns.viaGateway', { defaultValue: 'via gateway' })}
+                        </span>
+                      )}
+                      {r.source === 'estimated' && (
+                        <span
+                          className="aruns-pill"
+                          title={t('agentRuns.estimatedHint', { defaultValue: 'Estimated from the Copilot Studio credit rate card × observed activity (not measured).' })}
+                          style={{ marginLeft: 6, background: 'color-mix(in oklch, var(--warning) 18%, var(--surface))', color: 'var(--warning)' }}
+                        >
+                          {t('agentRuns.estimated', { defaultValue: 'estimated' })}
                         </span>
                       )}
                     </td>

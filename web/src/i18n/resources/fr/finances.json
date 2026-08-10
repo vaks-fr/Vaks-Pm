@@ -135,6 +135,8 @@
       "agent": "Agent",
       "billPerKTokens": "Facturé / 1K tokens",
       "kTokens": "kTokens",
+      "kUnits": "kUnités",
+      "unitCredits": "crédits",
       "runs": "Runs",
       "cost": "Coût",
       "billed": "Facturé",

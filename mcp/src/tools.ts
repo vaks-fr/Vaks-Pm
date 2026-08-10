@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ApiClient, VaksApiError, withCallContext } from './api-client.js';
-import { CONFIRM_TOOLS } from './confirm-tools.js';
+import { CONFIRM_TOOL_ACTIONS } from './confirm-tools.js';
 
 /**
  * Tools MCP de l'incrément 1 — **lecture seule**. Chacun n'est qu'un appel à un
@@ -55,9 +55,40 @@ export function assertSafeReadPath(rawPath: string): string {
   const segments = decoded.split(/[/\\]+/);
   const hasTraversal = segments.some((s) => s === '..' || s === '.');
   if (hasTraversal || decoded.startsWith('/') || clean.startsWith('/')) {
-    throw new Error('Chemin invalide (traversée interdite).');
+    throw new Error('Invalid path (traversal not allowed).');
   }
   return clean;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Résout un projet désigné par NOM ou CLÉ (pas un UUID) vers son id, via le
+ * filtre `q` de `GET /projects?scope=all&q=`. Sert `vaks_project_status` :
+ * l'appelant n'a jamais besoin de passer par `vaks_list_projects` pour un
+ * simple nom. `scope=all` n'est honoré côté API que si l'appelant a le droit
+ * de tout voir — sinon la recherche reste bornée à son périmètre RBAC, ce qui
+ * est le comportement voulu (pas de fuite, juste moins de matches possibles).
+ */
+async function resolveProjectId(api: ApiClient, query: string): Promise<string> {
+  const results = (await api.get('projects', { scope: 'all', q: query })) as Array<{
+    id: string;
+    key?: string;
+    name?: string;
+    client?: { name?: string } | null;
+  }>;
+  if (!Array.isArray(results) || results.length === 0) {
+    throw new Error(
+      `No project matches "${query}". Check the spelling, or call \`vaks_list_projects\` to see the available ones.`,
+    );
+  }
+  if (results.length === 1) return results[0].id;
+  const candidates = results
+    .map((p) => `- ${p.key ?? '?'} — ${p.name ?? '?'}${p.client?.name ? ` (${p.client.name})` : ''}`)
+    .join('\n');
+  throw new Error(
+    `Several projects match "${query}", please be more specific (name, key, or client):\n${candidates}`,
+  );
 }
 
 /** Enveloppe un appel API en réponse MCP, avec gestion d'erreur exploitable. */
@@ -95,20 +126,98 @@ function confirmationChallenge(e: VaksApiError) {
     | undefined;
   if (e.status !== 409 || body?.code !== 'CONFIRMATION_REQUIRED' || !body.confirmToken) return null;
   const t = body.impact?.target as { type?: string; id?: string; label?: string } | undefined;
-  const cible = t?.label ?? (t?.type && t?.id ? `${t.type} ${t.id}` : 'la ressource visée');
+  const cible = t?.label ?? (t?.type && t?.id ? `${t.type} ${t.id}` : 'the target resource');
   const lines = [
-    `⚠️ Cette action demande une confirmation explicite avant d'être exécutée.`,
+    `⚠️ This action requires explicit confirmation before it can be executed.`,
     ``,
-    `Action  : ${String(body.impact?.tool ?? 'inconnue')}`,
-    `Cible   : ${cible}`,
-    `Validité: ${body.expiresInSec ?? 600} secondes`,
+    `Action  : ${String(body.impact?.tool ?? 'unknown')}`,
+    `Target  : ${cible}`,
+    `Validity: ${body.expiresInSec ?? 600} seconds`,
     ``,
-    `Présentez ceci à l'utilisateur. S'il confirme, rappelez EXACTEMENT le même`,
-    `tool avec les mêmes arguments plus : confirmToken: "${body.confirmToken}"`,
-    `(les arguments doivent être identiques, sinon le jeton est refusé).`,
+    `Present this to the user. If they confirm, call the EXACT same tool`,
+    `with the same arguments plus: confirmToken: "${body.confirmToken}"`,
+    `(the arguments must be identical, otherwise the token is rejected).`,
   ];
   return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
 }
+
+/**
+ * Tools an AUTONOMOUS agent (actorKind=AGENT) is allowed to SEE. A human driving
+ * MCP (delegated OAuth, human PAT, or org key — anything with actorKind !== 'AGENT')
+ * keeps the full surface, gated only by `allowWrite` exactly as before.
+ *
+ * This bounds an agent to its work loop (discover → understand → decompose →
+ * produce → validate → collaborate) and hides the org/finance/team/client/settings
+ * management it must never drive. It ALSO keeps an agent's tool count well under
+ * client-side caps (e.g. Copilot Studio limits an agent to 70 tools).
+ *
+ * Note: this is a *visibility* allowlist. Actual authorization stays server-side
+ * (RBAC ∩ scopes ∩ capabilities) — a tool listed here still 403s if the agent's
+ * token doesn't permit it (e.g. validation tools without `deliverables:validate`).
+ */
+const AGENT_ELIGIBLE_TOOLS = new Set<string>([
+  // discover & claim
+  'vaks_next_task',
+  'vaks_claim_next_task',
+  'vaks_list_my_tasks',
+  'vaks_claim_task',
+  'vaks_list_projects',
+  'vaks_list_project_tasks',
+  'vaks_get_tasks_in_window',
+  // understand the work
+  'vaks_get_task',
+  'vaks_get_work_context',
+  'vaks_get_task_comments',
+  'vaks_get_verification_requirements',
+  'vaks_get_project_health',
+  'vaks_project_status',
+  'vaks_list_context_files',
+  'vaks_get_context_file',
+  'vaks_read',
+  'vaks_list_readable_endpoints',
+  // decompose
+  'vaks_create_subtask',
+  'vaks_get_subtasks_summary',
+  // produce & submit for review
+  'vaks_update_task',
+  'vaks_submit_deliverable',
+  'vaks_report_run',
+  'vaks_submit_for_review',
+  // validate (agent-as-validator)
+  'vaks_claim_validation_task',
+  'vaks_validation_heartbeat',
+  'vaks_submit_validation',
+  // collaborate & lifecycle
+  'vaks_post_comment',
+  'vaks_request_assistance',
+  'vaks_execution_heartbeat',
+  'vaks_release_task',
+]);
+
+/**
+ * Miroir du filtre agent : tools de la BOUCLE MACHINE (pull, baux/heartbeats,
+ * livrables, validation par agent) qu'un HUMAIN pilotant MCP n'appelle jamais —
+ * il a l'app web pour ça. Les masquer réduit la surface humaine (~97 → ~50,
+ * sous le cap de 70 de Copilot Studio) et surtout le bruit de sélection du
+ * modèle. `claim_task` / `release_task` / `submit_for_review` restent visibles
+ * humain (pilotage manuel plausible d'une tâche déléguée).
+ *
+ * Comme `AGENT_ELIGIBLE_TOOLS`, c'est de la *visibilité* : l'autorisation
+ * réelle reste server-side.
+ */
+const AGENT_LOOP_ONLY_TOOLS = new Set<string>([
+  'vaks_next_task',
+  'vaks_claim_next_task',
+  'vaks_execution_heartbeat',
+  'vaks_get_work_context',
+  'vaks_get_verification_requirements',
+  'vaks_submit_deliverable',
+  'vaks_report_run',
+  'vaks_claim_validation_task',
+  'vaks_validation_heartbeat',
+  'vaks_submit_validation',
+  'vaks_request_assistance',
+]);
 
 /**
  * Enregistre les tools sur le serveur. `allowWrite` (dérivé des scopes du jeton
@@ -116,8 +225,30 @@ function confirmationChallenge(e: VaksApiError) {
  * l'org n'a pas activé `mcp.allowWrites`, le jeton ne porte pas les scopes
  * correspondants → on **ne déclare même pas** ces tools (plutôt que de les
  * lister et qu'ils échouent en 403). Les tools de lecture sont toujours exposés.
+ *
+ * `actorKind` (aussi lu de `/me/mcp-context`) : un agent autonome (`AGENT`) ne
+ * voit que `AGENT_ELIGIBLE_TOOLS` ; un humain voit tout SAUF la boucle machine
+ * (`AGENT_LOOP_ONLY_TOOLS`).
+ *
+ * `allowFinance` (toggle org `mcp.allowFinance`, relayé par `/me/mcp-context`) :
+ * quand OFF, les tools finance ne sont pas déclarés — même philosophie que
+ * `allowWrite` (plutôt que de les lister et qu'ils échouent en 403 via
+ * `FinanceApiGateGuard`, qui reste l'enforcement).
  */
-export function registerTools(server: McpServer, api: ApiClient, allowWrite: boolean): void {
+export function registerTools(
+  server: McpServer,
+  api: ApiClient,
+  allowWrite: boolean,
+  actorKind?: string,
+  allowFinance = false,
+  billingUnit?: string,
+): void {
+  const isAgent = actorKind === 'AGENT';
+  // Agents facturés en CRÉDITS (Copilot) : leur coût est MESURÉ côté serveur
+  // (meter d'appels MCP), pas déclaré. On leur masque `vaks_report_run` — un
+  // appel de déclaration serait 5 crédits gaspillés et une source de double
+  // comptage. Les agents en tokens (API) le gardent : eux, on mesure vraiment.
+  const isCreditsAgent = isAgent && billingUnit === 'credits';
   /**
    * Enregistrement uniforme (chantier agents 1) : chaque tool pose son **nom**
    * en contexte d'audit (`X-Vaks-Mcp-Tool`), et les tools d'ÉCRITURE
@@ -139,6 +270,12 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     handler: (args: any, extra?: any) => Promise<any>,
   ): void => {
+    // Autonomous agents see only the bounded work-loop surface; humans see
+    // everything EXCEPT the machine loop (still gated by allowWrite below).
+    if (isAgent && !AGENT_ELIGIBLE_TOOLS.has(name)) return;
+    if (!isAgent && AGENT_LOOP_ONLY_TOOLS.has(name)) return;
+    // Credit-billed agents don't self-declare cost — it's server-metered.
+    if (isCreditsAgent && name === 'vaks_report_run') return;
     const isWrite = def.annotations?.readOnlyHint === false;
     const inputSchema = isWrite
       ? {
@@ -148,19 +285,22 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
             .max(1000)
             .optional()
             .describe(
-              "Pourquoi cette action est effectuée (une phrase). Tracé dans le journal d'audit — fortement recommandé pour les agents.",
+              'Why this action is being performed (one sentence). Recorded in the audit log — strongly recommended for agents.',
             ),
           // Seulement sur les tools susceptibles d'être challengés : l'ajouter
           // partout coûterait ~2-3 k tokens de description à chaque tools/list.
-          ...(CONFIRM_TOOLS.has(name)
+          // Pour un tool fusionné, seules les ACTIONS destructrices déclenchent
+          // le défi — le paramètre reste inoffensif sur les autres.
+          ...(CONFIRM_TOOL_ACTIONS.has(name)
             ? {
                 confirmToken: z
                   .string()
                   .max(200)
                   .optional()
                   .describe(
-                    "À NE PAS inventer. Si un premier appel renvoie une demande de confirmation, " +
-                      "rappeler ce tool avec les MÊMES arguments plus le jeton fourni.",
+                    'DO NOT make this up. If a first call returns a confirmation request, ' +
+                      'call this tool again with the SAME arguments plus the token provided. ' +
+                      'Only ever needed on destructive actions.',
                   ),
               }
             : {}),
@@ -173,17 +313,31 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async (args: any, extra: any) => {
         const { justification, confirmToken, ...rest } = (args ?? {}) as Record<string, unknown>;
+        // Identifiant composite `tool:action` pour les tools fusionnés : seul
+        // canal qui fait voyager l'action jusqu'à l'API (un DELETE HTTP n'a pas
+        // de corps) — le garde-fou de confirmation, les quotas par tool et
+        // l'audit sont keyés sur le header `X-Vaks-Mcp-Tool`.
+        const action = typeof rest.action === 'string' && rest.action ? rest.action : undefined;
+        // Contexte de COÛT (AGENT_MCP_CALL_METER.md §5) : la tâche — à défaut le
+        // projet — sur laquelle porte l'appel, lue dans les arguments que le tool
+        // déclare déjà. Sans ça, les appels de N tâches menées en parallèle par
+        // le même agent tombent dans un compteur unique et la première tâche qui
+        // se termine rafle tout le coût.
+        const uuid = (v: unknown): string | undefined =>
+          typeof v === 'string' && /^[0-9a-f-]{36}$/i.test(v) ? v : undefined;
         // `withCallContext` : un batch JSON-RPC fait tourner plusieurs
         // handlers en concurrence sur le même `api`, et un champ mutable
         // ferait attribuer la justification au mauvais tool dans le journal
         // d'audit (cf. `callContextStore` dans api-client.ts).
         return withCallContext(
           {
-            tool: name,
+            tool: action ? `${name}:${action}` : name,
             justification:
               typeof justification === 'string' && justification.trim() ? justification : undefined,
             confirmToken:
               typeof confirmToken === 'string' && confirmToken.trim() ? confirmToken.trim() : undefined,
+            taskId: uuid(rest.taskId),
+            projectId: uuid(rest.projectId),
           },
           () => handler(rest, extra),
         );
@@ -191,19 +345,24 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
     );
   };
 
+  /** Erreur de validation runtime d'un tool fusionné (rendue `isError` par `run`). */
+  const need = (cond: unknown, msg: string): void => {
+    if (!cond) throw new Error(msg);
+  };
+
   register(
     'vaks_list_projects',
     {
-      title: 'Lister les projets',
+      title: 'List projects',
       description:
-        "Liste les projets visibles par l'utilisateur courant (selon son périmètre RBAC). " +
-        "Utiliser `scope=all` pour tenter d'inclure tous les projets de l'organisation " +
-        "(n'est honoré que si l'utilisateur a la permission de tout voir).",
+        'Lists the projects visible to the current user (according to their RBAC scope). ' +
+        'Use `scope=all` to attempt to include all projects in the organization ' +
+        '(only honored if the user has permission to see everything).',
       inputSchema: {
         scope: z
           .enum(['mine', 'all'])
           .optional()
-          .describe("Périmètre : 'mine' (défaut) = projets accessibles ; 'all' = portefeuille."),
+          .describe("Scope: 'mine' (default) = accessible projects; 'all' = whole portfolio."),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -213,17 +372,17 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_list_project_tasks',
     {
-      title: "Lister les tâches d'un projet",
+      title: 'List a project\'s tasks',
       description:
-        "Liste les tâches d'un projet donné. Filtres optionnels par statut et par assigné. " +
-        "Récupérer d'abord l'id du projet via `vaks_list_projects`.",
+        'Lists the tasks of a given project. Optional filters by status and by assignee. ' +
+        'First fetch the project id via `vaks_list_projects`.',
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
+        projectId: z.string().uuid().describe('Project id (UUID).'),
         status: z
           .string()
           .optional()
-          .describe('Filtre statut (ex. TODO, IN_PROGRESS, DONE) — optionnel.'),
-        assigneeId: z.string().uuid().optional().describe("Filtre par assigné (UUID) — optionnel."),
+          .describe('Status filter (e.g. TODO, IN_PROGRESS, DONE) — optional.'),
+        assigneeId: z.string().uuid().optional().describe('Filter by assignee (UUID) — optional.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -234,19 +393,19 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_workload',
     {
-      title: 'Charge de travail (capacité vs allouée)',
+      title: 'Workload (capacity vs allocated)',
       description:
-        "Agrège la charge de travail par personne et par jour sur une fenêtre de dates " +
-        "(capacité vs heures allouées), pour repérer les sur/sous-charges. " +
-        "Dates au format ISO (YYYY-MM-DD).",
+        'Aggregates workload per person and per day over a date window ' +
+        '(capacity vs allocated hours), to spot over/under-load. ' +
+        'Dates in ISO format (YYYY-MM-DD).',
       inputSchema: {
-        from: z.string().describe('Début de fenêtre (YYYY-MM-DD).'),
-        to: z.string().describe('Fin de fenêtre (YYYY-MM-DD).'),
+        from: z.string().describe('Window start (YYYY-MM-DD).'),
+        to: z.string().describe('Window end (YYYY-MM-DD).'),
         projectId: z
           .string()
           .uuid()
           .optional()
-          .describe('Restreindre à un projet (UUID) — optionnel.'),
+          .describe('Restrict to a project (UUID) — optional.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -259,14 +418,14 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_skill_gap',
     {
-      title: 'Couverture des compétences d\'un projet',
+      title: 'Skill coverage of a project',
       description:
-        "Pour un projet, évalue la couverture des compétences requises : qui est qualifié " +
-        "ET réellement disponible (capacité libre jour par jour = horaires × occupation − congés " +
-        "− fériés − allocations), l'effort restant à couvrir, et les candidats « presque qualifiés » " +
-        "(formation). À utiliser pour répondre à « qui peut prendre cette charge ? » avant d'assigner.",
+        'For a project, assesses coverage of the required skills: who is qualified ' +
+        'AND actually available (free capacity day by day = schedule × occupancy − time-off ' +
+        '− holidays − allocations), the remaining effort to cover, and the "near-qualified" candidates ' +
+        '(training). Use to answer "who can take this load?" before assigning.',
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
+        projectId: z.string().uuid().describe('Project id (UUID).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -276,16 +435,16 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_suggest_assignees',
     {
-      title: 'Suggérer des assignés pour une tâche',
+      title: 'Suggest assignees for a task',
       description:
-        "Propose les meilleurs candidats pour une tâche, en croisant les compétences requises " +
-        "et la disponibilité réelle sur une fenêtre de dates. Renvoie un classement (skill match + " +
-        "capacité libre). Récupérer l'id de tâche via `vaks_list_project_tasks`. Ne fait qu'une " +
-        "suggestion — n'assigne rien.",
+        'Proposes the best candidates for a task, cross-referencing required skills ' +
+        'and actual availability over a date window. Returns a ranking (skill match + ' +
+        'free capacity). Fetch the task id via `vaks_list_project_tasks`. Only a ' +
+        'suggestion — assigns nothing.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
-        from: z.string().optional().describe('Début de fenêtre (YYYY-MM-DD) — optionnel.'),
-        to: z.string().optional().describe('Fin de fenêtre (YYYY-MM-DD) — optionnel.'),
+        taskId: z.string().uuid().describe('Task id (UUID).'),
+        from: z.string().optional().describe('Window start (YYYY-MM-DD) — optional.'),
+        to: z.string().optional().describe('Window end (YYYY-MM-DD) — optional.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -296,12 +455,12 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_task',
     {
-      title: 'Détail d\'une tâche',
+      title: 'Task detail',
       description:
-        "Renvoie le détail complet d'une tâche (statut, estimé, temps loggé, assignés, échéances, " +
-        "compétence requise, dépendances). Utile avant de suggérer une affectation ou d'analyser un retard.",
+        'Returns the full detail of a task (status, estimate, logged time, assignees, due dates, ' +
+        'required skill, dependencies). Useful before suggesting an assignment or analyzing a delay.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
+        taskId: z.string().uuid().describe('Task id (UUID).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -311,29 +470,32 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_work_context',
     {
-      title: 'Contexte de travail complet d\'une tâche',
+      title: 'Full work context of a task',
       description:
-        "TOUT ce qu'il faut pour bien réaliser une tâche, en UN seul appel : le brief du projet " +
-        "(`project.brief`, markdown composé = rôle/mission, conventions de sortie, où déposer les " +
-        "livrables, hors-périmètre, PLUS les faits que l'application connaît déjà — reviewer, mode " +
-        "de vérification, enjeu, langue — et les notes libres du PM en dernier), le `charter` du " +
-        "projet (périmètre inclus/exclu, livrables, contraintes, critères de succès), les " +
-        "garde-fous (projet ET tâche), les critères d'acceptation (checklist de revue), le détail " +
-        "de la tâche, le journal des livrables APPROUVÉS précédents (continuité), les documents de " +
-        "contexte (`projectDocuments` ; `projectDocumentsMeta.truncated:true` = tout n'est pas " +
-        "listé) et les commentaires récents. " +
-        "Porte AUSSI `upstreamOutputs` : les paires clé/valeur produites par les tâches AMONT " +
-        "(prédécesseurs et sous-tâches) dont le livrable a été APPROUVÉ — endpoint, version, " +
-        "identifiants. Les lire de là plutôt que de les chercher dans le texte des livrables amont. " +
-        "Deux autres blocs décisifs : `reviewFeedback` (si un livrable a été rejeté — la note " +
-        "EXACTE du valideur et l'historique des versions : commencez par là, c'est votre consigne de " +
-        "reprise) et `limits` (bail d'exécution, nombre de rejets restants avant escalade humaine, " +
-        "enveloppes de budget € restantes — si `limits.budget.stop` est vrai, ne produisez plus). " +
-        "À APPELER APRÈS avoir revendiqué une tâche, AVANT de produire quoi que ce soit. " +
-        "Si un critère est ambigu ou du contexte manque, poser une question via `vaks_post_comment` " +
-        "plutôt que de deviner.",
+        'EVERYTHING needed to properly carry out a task, in ONE call: the project brief ' +
+        '(`project.brief`, composed markdown = role/mission, output conventions, where to deposit ' +
+        'deliverables, out-of-scope, PLUS the facts the application already knows — reviewer, ' +
+        'verification mode, stakes, language — and the PM\'s free-form notes last), the project ' +
+        '`charter` (in/out scope, deliverables, constraints, success criteria), the ' +
+        'guardrails (project AND task), the acceptance criteria (review checklist), the task ' +
+        'detail, the log of previously APPROVED deliverables (continuity), the context ' +
+        'documents (`projectDocuments`; `projectDocumentsMeta.truncated:true` = not everything is ' +
+        'listed) and recent comments. ' +
+        'ALSO carries `upstreamOutputs`: the key/value pairs produced by UPSTREAM tasks ' +
+        '(predecessors and subtasks) whose deliverable was APPROVED — endpoint, version, ' +
+        'identifiers. Read them from there rather than looking for them in the text of upstream deliverables. ' +
+        'Two other decisive blocks: `reviewFeedback` (if a deliverable was rejected — the EXACT ' +
+        'note from the validator and the version history: start there, it is your rework ' +
+        'instruction) and `limits` (execution lease, number of rejections left before human escalation, ' +
+        'remaining € budget envelopes — if `limits.budget.stop` is true, produce no more). ' +
+        'Budget envelopes are always in €, whatever the provider bills in (tokens or credits); when ' +
+        'you later declare consumption via `vaks_report_run`, credit-billed providers (Copilot) put ' +
+        'the credit count in `tokensIn` with `tokensOut` = 0. ' +
+        'CALL AFTER claiming a task, BEFORE producing anything. ' +
+        'If a criterion is ambiguous or context is missing, ask a question via `vaks_post_comment` ' +
+        'rather than guessing.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche revendiquée.'),
+        taskId: z.string().uuid().describe('Id (UUID) of the claimed task.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -343,19 +505,19 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_list_context_files',
     {
-      title: 'Lister les documents d\'une source externe (SharePoint…)',
+      title: 'List documents from an external source (SharePoint…)',
       description:
-        "Liste les fichiers et dossiers d'une source de documents externe rattachée au projet " +
-        "de la tâche — en v1 le SharePoint de la team Microsoft Teams provisionnée. Proxy live " +
-        "(pas de copie). Paginé : passer `cursor` pour la page suivante, `folderId` pour entrer " +
-        "dans un dossier. La dispo des sources est indiquée dans `vaks_get_work_context` " +
-        "(`contextSources`). Codes d'erreur : `FS_DISABLED`/`FS_GRANT_PENDING`/`FS_SOURCE_UNAVAILABLE` " +
-        "= la source n'est pas exploitable sur ce projet (ne pas réessayer).",
+        'Lists the files and folders of an external document source attached to the task\'s ' +
+        'project — in v1 the SharePoint of the provisioned Microsoft Teams team. Live proxy ' +
+        '(no copy). Paginated: pass `cursor` for the next page, `folderId` to enter ' +
+        'a folder. Source availability is indicated in `vaks_get_work_context` ' +
+        '(`contextSources`). Error codes: `FS_DISABLED`/`FS_GRANT_PENDING`/`FS_SOURCE_UNAVAILABLE` ' +
+        '= the source is not usable on this project (do not retry).',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
-        source: z.string().optional().describe("Source (défaut 'sharepoint')."),
-        folderId: z.string().optional().describe('Dossier à ouvrir (racine si absent).'),
-        cursor: z.string().optional().describe('Curseur de pagination (page suivante).'),
+        taskId: z.string().uuid().describe('Task id (UUID).'),
+        source: z.string().optional().describe("Source (default 'sharepoint')."),
+        folderId: z.string().optional().describe('Folder to open (root if absent).'),
+        cursor: z.string().optional().describe('Pagination cursor (next page).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -372,17 +534,17 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_context_file',
     {
-      title: 'Lire le texte d\'un document d\'une source externe',
+      title: 'Read the text of a document from an external source',
       description:
-        "Renvoie le TEXTE extrait d'un fichier d'une source externe (SharePoint…), pour s'en " +
-        "servir de contexte. Formats supportés : texte, Markdown, CSV/JSON, Word (.docx), " +
-        "Excel (.xlsx), PDF. Le texte est plafonné (~64 Ko) : `truncated:true` signale une coupe. " +
-        "`FS_FILE_TOO_LARGE` (fichier > 10 Mo) et `FS_UNSUPPORTED_FORMAT` (image, archive…) " +
-        "renvoient les métadonnées sans contenu. Récupérer l'`itemId` via `vaks_list_context_files`.",
+        'Returns the extracted TEXT of a file from an external source (SharePoint…), to use ' +
+        'as context. Supported formats: text, Markdown, CSV/JSON, Word (.docx), ' +
+        'Excel (.xlsx), PDF. The text is capped (~64 KB): `truncated:true` signals a cut. ' +
+        '`FS_FILE_TOO_LARGE` (file > 10 MB) and `FS_UNSUPPORTED_FORMAT` (image, archive…) ' +
+        'return the metadata without content. Fetch the `itemId` via `vaks_list_context_files`.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
-        source: z.string().describe("Source (ex. 'sharepoint')."),
-        itemId: z.string().describe("Identifiant de l'item retourné par le listing."),
+        taskId: z.string().uuid().describe('Task id (UUID).'),
+        source: z.string().describe("Source (e.g. 'sharepoint')."),
+        itemId: z.string().describe('Id of the item returned by the listing.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -395,13 +557,13 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_project_health',
     {
-      title: 'Santé d\'un projet (stats + respect des échéances)',
+      title: 'Project health (stats + due-date adherence)',
       description:
-        "Instantané de santé d'un projet : statistiques (avancement, tâches en retard, " +
-        "estimé vs réel) ET respect des échéances (taux de tâches livrées à temps). À utiliser " +
-        "pour diagnostiquer un projet repéré comme à risque via `vaks_list_projects`.",
+        'Snapshot of a project\'s health: statistics (progress, overdue tasks, ' +
+        'estimated vs actual) AND due-date adherence (rate of tasks delivered on time). Use ' +
+        'to diagnose a project flagged as at-risk via `vaks_list_projects`.',
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
+        projectId: z.string().uuid().describe('Project id (UUID).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -416,16 +578,43 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   );
 
   register(
+    'vaks_project_status',
+    {
+      title: 'Project status (one-call digest)',
+      description:
+        'ONE-CALL project status digest: progress stats, due-date adherence, tasks within a ' +
+        'date window, and team workload — everything `vaks_get_project_health` + ' +
+        '`vaks_list_project_tasks` + `vaks_get_tasks_in_window` + `vaks_get_workload` would ' +
+        'return together, gathered server-side into a SINGLE tool call. Accepts the project ' +
+        'NAME, KEY, or UUID directly — no need to resolve the id first via `vaks_list_projects`. ' +
+        'If the name matches several projects, the error message lists the candidates so you can ' +
+        'ask which one. Prefer this tool over the individual reads whenever asked for a project\'s ' +
+        'status/health/overview.',
+      inputSchema: {
+        project: z.string().describe('Project name, key, or UUID.'),
+        from: z.string().optional().describe('Window start (YYYY-MM-DD) — optional, server default.'),
+        to: z.string().optional().describe('Window end (YYYY-MM-DD) — optional, server default.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ project, from, to }) =>
+      run(async () => {
+        const projectId = UUID_RE.test(project) ? project : await resolveProjectId(api, project);
+        return api.get(`projects/${projectId}/status`, { from, to });
+      }),
+  );
+
+  register(
     'vaks_get_tasks_in_window',
     {
-      title: 'Tâches d\'un projet dans une fenêtre de dates',
+      title: 'Project tasks within a date window',
       description:
-        "Liste les tâches d'un projet dont l'échéance (ou l'activité) tombe dans une fenêtre " +
-        "[from, to]. Idéal pour repérer les deadlines imminentes ou en dépassement. Dates ISO (YYYY-MM-DD).",
+        'Lists the tasks of a project whose due date (or activity) falls within a window ' +
+        '[from, to]. Ideal for spotting imminent or overdue deadlines. ISO dates (YYYY-MM-DD).',
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
-        from: z.string().describe('Début de fenêtre (YYYY-MM-DD).'),
-        to: z.string().describe('Fin de fenêtre (YYYY-MM-DD).'),
+        projectId: z.string().uuid().describe('Project id (UUID).'),
+        from: z.string().describe('Window start (YYYY-MM-DD).'),
+        to: z.string().describe('Window end (YYYY-MM-DD).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -438,13 +627,13 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_task_comments',
     {
-      title: 'Commentaires d\'une tâche',
+      title: 'Task comments',
       description:
-        "Liste les commentaires d'une tâche (fil de discussion, @mentions). Récupérer l'id de " +
-        "tâche via `vaks_list_project_tasks` ou `vaks_get_task`. Utile pour comprendre le contexte, " +
-        "les blocages ou les décisions d'une tâche.",
+        'Lists a task\'s comments (discussion thread, @mentions). Fetch the task id ' +
+        'via `vaks_list_project_tasks` or `vaks_get_task`. Useful to understand the context, ' +
+        'blockers or decisions of a task.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
+        taskId: z.string().uuid().describe('Task id (UUID).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -454,13 +643,13 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_user_skills',
     {
-      title: 'Compétences d\'un utilisateur',
+      title: 'A user\'s skills',
       description:
-        "Liste les compétences (avec niveau) attribuées à un utilisateur. Récupérer les ids " +
-        "d'utilisateurs via `vaks_suggest_assignees`, `vaks_get_task` (assignés) ou `vaks_list_teams` " +
-        "(membres). Utile pour évaluer qui maîtrise quoi.",
+        'Lists the skills (with level) assigned to a user. Fetch user ids ' +
+        'via `vaks_suggest_assignees`, `vaks_get_task` (assignees) or `vaks_list_teams` ' +
+        '(members). Useful to assess who masters what.',
       inputSchema: {
-        userId: z.string().uuid().describe("Identifiant (UUID) de l'utilisateur."),
+        userId: z.string().uuid().describe('User id (UUID).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -470,11 +659,11 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_list_teams',
     {
-      title: 'Lister les équipes',
+      title: 'List teams',
       description:
-        "Liste les équipes de l'organisation (avec leurs membres et leads). Sert notamment à " +
-        "trouver le `teamId` d'une équipe pour adresser une demande de compétence à son lead " +
-        "via `vaks_request_skill`.",
+        'Lists the organization\'s teams (with their members and leads). Used in particular to ' +
+        'find a team\'s `teamId` to address a skill request to its lead ' +
+        'via `vaks_skill_requests`.',
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -484,11 +673,11 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_list_skills',
     {
-      title: 'Catalogue des compétences de l\'organisation',
+      title: 'Organization skill catalog',
       description:
-        "Liste le catalogue complet des compétences de l'org (nom, catégorie, couleur). C'est le " +
-        "référentiel : à utiliser pour savoir quelles compétences existent, proposer une compétence " +
-        "existante dans une demande (`vaks_request_skill`), ou rapprocher un besoin d'une compétence connue.",
+        'Lists the org\'s full skill catalog (name, category, color). This is the ' +
+        'reference: use it to know which skills exist, propose an existing skill ' +
+        'in a request (`vaks_skill_requests`), or match a need to a known skill.',
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -498,35 +687,40 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_list_labels',
     {
-      title: 'Étiquettes d\'un projet',
+      title: 'Project labels',
       description:
-        "Liste les étiquettes (labels) d'un projet, avec leur couleur. Sert à connaître les labels " +
-        "existants avant d'en poser sur une tâche (via `vaks_update_task` / `vaks_create_task`, champ labelIds) " +
-        "ou d'en créer un nouveau (`vaks_create_label`).",
+        'Lists a project\'s labels, with their color. Used to know the existing labels ' +
+        'before applying them to a task (via `vaks_update_task` / `vaks_create_tasks`, labelIds field) ' +
+        'or creating a new one (`vaks_labels_manage`).',
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
+        projectId: z.string().uuid().describe('Project id (UUID).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ projectId }) => run(() => api.get(`projects/${projectId}/labels`)),
   );
 
-  register(
-    'vaks_list_expenses',
-    {
-      title: 'Coûts hors main-d\'œuvre d\'un projet',
-      description:
-        "Liste les coûts hors main-d'œuvre (non-labor) d'un projet : licences, matériel, cloud, " +
-        "sous-traitance, autres — avec montant interne et montant refacturé. ⚠️ Nécessite que " +
-        "l'admin ait activé « Exposer la finance à l'IA » (sinon refus) ET que l'utilisateur ait le " +
-        "droit finance. Utiliser pour récupérer les `expenseId` avant un `vaks_update_expense`/`vaks_delete_expense`.",
-      inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
+  // Lecture finance : même gate d'exposition que les écritures finance — pas
+  // déclaré quand l'org n'expose pas la finance à l'IA (le guard API refuse de
+  // toute façon).
+  if (allowFinance) {
+    register(
+      'vaks_list_expenses',
+      {
+        title: 'Non-labor costs of a project',
+        description:
+          'Lists a project\'s non-labor costs: licenses, hardware, cloud, ' +
+          'subcontracting, other — with internal amount and re-billed amount. ⚠️ Requires that ' +
+          'the admin has enabled "Expose finance to AI" (otherwise refused) AND that the user has the ' +
+          'finance permission. Use to fetch the `expenseId` before a `vaks_expenses_manage` update/delete.',
+        inputSchema: {
+          projectId: z.string().uuid().describe('Project id (UUID).'),
+        },
+        annotations: { readOnlyHint: true, openWorldHint: true },
       },
-      annotations: { readOnlyHint: true, openWorldHint: true },
-    },
-    async ({ projectId }) => run(() => api.get(`projects/${projectId}/expenses`)),
-  );
+      async ({ projectId }) => run(() => api.get(`projects/${projectId}/expenses`)),
+    );
+  }
 
   // --- Lecture générique : « tout ce que l'utilisateur peut voir dans l'app » ---
   // Le jeton de lecture porte le périmètre « view » complet du RBAC du user ;
@@ -539,14 +733,14 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_export_status',
     {
-      title: "État d'un export asynchrone",
+      title: 'Status of an async export',
       description:
-        "Interroge un export lancé par `vaks_export_start`. Statuts : QUEUED, RUNNING, DONE, " +
-        "FAILED, STALE. Quand DONE, `downloadUrl` donne le lien de téléchargement — il reste " +
-        "soumis au contrôle d'accès, il n'est pas public. Réinterroger toutes les quelques " +
-        "secondes plutôt qu'en boucle serrée.",
+        'Queries an export started by `vaks_export_start`. Statuses: QUEUED, RUNNING, DONE, ' +
+        'FAILED, STALE. When DONE, `downloadUrl` gives the download link — it remains ' +
+        'subject to access control, it is not public. Re-query every few ' +
+        'seconds rather than in a tight loop.',
       inputSchema: {
-        jobId: z.string().describe("Identifiant du job renvoyé par `vaks_export_start`."),
+        jobId: z.string().describe('Id of the job returned by `vaks_export_start`.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -556,11 +750,11 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_list_readable_endpoints',
     {
-      title: 'Découvrir les endpoints de lecture disponibles',
+      title: 'Discover available read endpoints',
       description:
-        "Renvoie la liste des endpoints GET de l'API publique Vaks-PM (chemin + résumé + " +
-        "paramètres), pour savoir quoi lire via `vaks_read`. La visibilité réelle reste bornée " +
-        "par les droits de l'utilisateur (un endpoint listé peut renvoyer 403 selon le rôle).",
+        'Returns the list of GET endpoints of the public Vaks-PM API (path + summary + ' +
+        'parameters), to know what to read via `vaks_read`. Actual visibility remains bounded ' +
+        'by the user\'s permissions (a listed endpoint may return 403 depending on the role).',
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -589,23 +783,23 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_read',
     {
-      title: 'Lecture générique de l\'API (avancé)',
+      title: 'Generic API read (advanced)',
       description:
-        "Effectue un GET sur n'importe quel endpoint de LECTURE de l'API (chemin relatif sous " +
-        "/api/v1, sans le préfixe). Borné par les droits de l'utilisateur (RBAC) → 403 si non " +
-        "autorisé ; lecture seule. Découvrir les chemins via `vaks_list_readable_endpoints`. " +
-        "Exemples : « clients », « clients/<id>/contacts », « projects/<id>/gantt », " +
-        "« projects/<id>/dependencies », « timesheet » (params from/to), « users » (annuaire), " +
-        "« me/pending-reviews » (livrables en attente de revue), « projects/<id>/budget-summary » " +
-        "et « projects/<id>/evm » (finance — soumis au toggle org `mcp.allowFinance`, sinon 403). " +
-        "⚠️ « projects/<id>/budget » n'existe qu'en écriture (PUT) : en lecture, utiliser " +
-        "« budget-summary ». Préférer les tools dédiés quand ils existent.",
+        'Performs a GET on any READ endpoint of the API (relative path under ' +
+        '/api/v1, without the prefix). Bounded by the user\'s permissions (RBAC) → 403 if not ' +
+        'authorized; read-only. Discover paths via `vaks_list_readable_endpoints`. ' +
+        'Examples: "clients", "clients/<id>/contacts", "projects/<id>/gantt", ' +
+        '"projects/<id>/dependencies", "timesheet" (from/to params), "users" (directory), ' +
+        '"me/pending-reviews" (deliverables awaiting review), "projects/<id>/budget-summary" ' +
+        'and "projects/<id>/evm" (finance — subject to the org toggle `mcp.allowFinance`, else 403). ' +
+        '⚠️ "projects/<id>/budget" only exists for writes (PUT): for reads, use ' +
+        '"budget-summary". Prefer the dedicated tools when they exist.',
       inputSchema: {
-        path: z.string().min(1).describe('Chemin relatif sous /api/v1 (sans préfixe).'),
+        path: z.string().min(1).describe('Relative path under /api/v1 (without prefix).'),
         query: z
           .record(z.string())
           .optional()
-          .describe('Paramètres de requête optionnels, ex. { from: "2026-06-01", to: "2026-06-30" }.'),
+          .describe('Optional query parameters, e.g. { from: "2026-06-01", to: "2026-06-30" }.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -618,11 +812,11 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_list_my_tasks',
     {
-      title: 'Mes tâches',
+      title: 'My tasks',
       description:
-        "Liste les tâches assignées à l'acteur courant (agent ou utilisateur) à travers ses " +
-        "projets ACTIVE, hors tâches terminées. C'est le point de départ d'une boucle de travail : " +
-        "récupérer une tâche à faire avancer (voir `vaks_claim_task`, puis `vaks_get_task`).",
+        'Lists the tasks assigned to the current actor (agent or user) across their ' +
+        'ACTIVE projects, excluding completed tasks. This is the starting point of a work loop: ' +
+        'fetch a task to move forward (see `vaks_claim_task`, then `vaks_get_task`).',
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -632,15 +826,15 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_next_task',
     {
-      title: 'Ma prochaine tâche',
+      title: 'My next task',
       description:
-        "Renvoie la MEILLEURE tâche revendiquable pour l'acteur courant, sans effet de bord " +
-        "(modèle pull). La sélection ne retient que des tâches TODO de projets actifs agent-activés " +
-        "dont vous êtes membre, dont les prérequis (FS) sont terminés et dont les compétences " +
-        "requises sont couvertes, et écarte celles refusées par une policy. Triées par priorité, " +
-        "échéance, tâches débloquées et adéquation des compétences. Réponse : `{ task, reason, " +
-        "candidates }` (task=null si rien — voir `reason`). Pour l'obtenir ET la revendiquer d'un " +
-        "coup, utilisez `vaks_claim_next_task`.",
+        'Returns the BEST claimable task for the current actor, with no side effect ' +
+        '(pull model). The selection only keeps TODO tasks of active, agent-enabled projects ' +
+        'you are a member of, whose prerequisites (FS) are done and whose required skills ' +
+        'are covered, and discards those refused by a policy. Sorted by priority, ' +
+        'due date, unblocked tasks and skill fit. Response: `{ task, reason, ' +
+        'candidates }` (task=null if nothing — see `reason`). To get it AND claim it in one ' +
+        'step, use `vaks_claim_next_task`.',
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -650,17 +844,17 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_verification_requirements',
     {
-      title: 'Exigence de vérification d’une tâche',
+      title: 'Verification requirement of a task',
       description:
-        "Renvoie le niveau de PREUVE attendu pour faire approuver un livrable sur une tâche, du " +
-        "point de vue de l'acteur courant. À appeler AVANT de travailler : vous saurez s'il suffit " +
-        "de déclarer le résultat (`self_attest`), s'il faut joindre la sortie d'outils/tests " +
-        "(`tool_output`), une CI signée (`ci_signed`) ou une revue humaine. Réponse : " +
-        "`{ requiredFloor, requiredMethods[], baseFloor, escalatedToHuman, capabilitiesAvailable[], " +
-        "mode, stakes, trust }`. L'exigence dépend de l'enjeu de la tâche, de votre niveau de " +
-        "confiance et des moyens de vérification disponibles sur le projet.",
+        'Returns the level of PROOF expected to get a deliverable approved on a task, from ' +
+        'the current actor\'s point of view. Call BEFORE working: you will know whether it is enough ' +
+        'to declare the result (`self_attest`), whether you must attach tool/test output ' +
+        '(`tool_output`), a signed CI (`ci_signed`) or a human review. Response: ' +
+        '`{ requiredFloor, requiredMethods[], baseFloor, escalatedToHuman, capabilitiesAvailable[], ' +
+        'mode, stakes, trust }`. The requirement depends on the task\'s stakes, your ' +
+        'trust level and the verification means available on the project.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
+        taskId: z.string().uuid().describe('Task id (UUID).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -676,17 +870,17 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_export_start',
     {
-      title: 'Lancer un export asynchrone',
+      title: 'Start an async export',
       description:
-        "Lance un export long et renvoie IMMÉDIATEMENT un identifiant de job — le fichier n'est " +
-        "pas produit dans cet appel. Suivre l'avancement avec `vaks_export_status`, qui donnera " +
-        "un lien de téléchargement une fois DONE. À utiliser quand un export synchrone risque " +
-        "d'être trop long (gros volume). Type disponible : `me_data_json` (toutes vos données " +
-        "personnelles — portabilité RGPD).",
+        'Starts a long export and returns IMMEDIATELY a job id — the file is ' +
+        'not produced in this call. Track progress with `vaks_export_status`, which will give ' +
+        'a download link once DONE. Use when a synchronous export risks ' +
+        'being too long (large volume). Available type: `me_data_json` (all your ' +
+        'personal data — GDPR portability).',
       inputSchema: {
         kind: z
           .enum(['me_data_json'])
-          .describe("Type d'export. `me_data_json` = données personnelles de l'utilisateur."),
+          .describe('Export type. `me_data_json` = the user\'s personal data.'),
       },
       // Écriture au sens « consomme des ressources et crée un artefact », d'où
       // l'héritage automatique du paramètre `justification`.
@@ -698,17 +892,17 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_claim_task',
     {
-      title: 'Revendiquer une tâche',
+      title: 'Claim a task',
       description:
-        "Revendique une tâche libre (statut TODO) : elle passe en CLAIMED et vous est assignée. " +
-        "Opération atomique — si un autre acteur la revendique en même temps, l'un des deux reçoit " +
-        "une erreur de conflit. Respecte les budgets de l'agent (tâches simultanées, revendications/jour). " +
-        "Enchaîner ensuite avec une mise à jour de statut vers IN_PROGRESS, puis le travail. " +
-        "⚠️ La revendication ouvre un BAIL D'EXÉCUTION à durée limitée : appelez " +
-        "`vaks_execution_heartbeat` régulièrement pendant un travail long, sinon la tâche vous est " +
-        "reprise et remise dans le vivier (`leaseExpiresAt` dans le contexte de travail).",
+        'Claims a free task (status TODO): it moves to CLAIMED and is assigned to you. ' +
+        'Atomic operation — if another actor claims it at the same time, one of the two receives ' +
+        'a conflict error. Respects the agent\'s budgets (concurrent tasks, claims/day). ' +
+        'Then follow with a status update to IN_PROGRESS, then the work. ' +
+        '⚠️ Claiming opens a time-limited EXECUTION LEASE: call ' +
+        '`vaks_execution_heartbeat` regularly during long work, otherwise the task is ' +
+        'taken back from you and returned to the pool (`leaseExpiresAt` in the work context).',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche à revendiquer.'),
+        taskId: z.string().uuid().describe('Id (UUID) of the task to claim.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -718,15 +912,15 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_claim_next_task',
     {
-      title: 'Tirer et revendiquer ma prochaine tâche',
+      title: 'Pull and claim my next task',
       description:
-        "Sélectionne la meilleure tâche revendiquable (comme `vaks_next_task`) ET la revendique " +
-        "atomiquement, en essayant les meilleurs candidats jusqu'au premier claim qui passe. C'est " +
-        "le cœur de la boucle de travail autonome : appelez ceci, puis passez la tâche en IN_PROGRESS, " +
-        "faites le travail, soumettez un livrable (`vaks_submit_deliverable`) et demandez la revue " +
-        "(`vaks_submit_for_review`). Respecte tous les garde-fous (budgets, backpressure de revue, " +
-        "allowlist de modèles du client, policies). Réponse : `{ claimed, reason }` (claimed=null si " +
-        "aucune tâche n'a pu être revendiquée — voir `reason`).",
+        'Selects the best claimable task (like `vaks_next_task`) AND claims it ' +
+        'atomically, trying the best candidates until the first claim that succeeds. This is ' +
+        'the heart of the autonomous work loop: call this, then move the task to IN_PROGRESS, ' +
+        'do the work, submit a deliverable (`vaks_submit_deliverable`) and request review ' +
+        '(`vaks_submit_for_review`). Respects all guardrails (budgets, review backpressure, ' +
+        'client model allowlist, policies). Response: `{ claimed, reason }` (claimed=null if ' +
+        'no task could be claimed — see `reason`).',
       inputSchema: {},
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -736,12 +930,12 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_release_task',
     {
-      title: 'Libérer une tâche revendiquée',
+      title: 'Release a claimed task',
       description:
-        "Libère une tâche que vous aviez revendiquée (CLAIMED → TODO) : elle redevient disponible " +
-        "pour un autre acteur, et votre assignation de revendication est retirée.",
+        'Releases a task you had claimed (CLAIMED → TODO): it becomes available again ' +
+        'for another actor, and your claim assignment is removed.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche à libérer.'),
+        taskId: z.string().uuid().describe('Id (UUID) of the task to release.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -751,35 +945,35 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_request_assistance',
     {
-      title: "Demander de l'aide sur la tâche en cours",
+      title: 'Request help on the current task',
       description:
-        "Signale un blocage sur la tâche que vous détenez et **alerte quelqu'un de nommément " +
-        "concerné**, contrairement à un simple commentaire. Trois effets : votre question est postée " +
-        "sur la tâche, une demande de compétence part vers le lead de l'équipe qui couvre la " +
-        "compétence manquante (l'équipe est choisie par le serveur — vous ne désignez personne), et " +
-        "si `pause` est vrai la tâche passe en pause avec votre question pour motif (elle reste à " +
-        "vous, personne ne la reprend, elle attend une réponse humaine). " +
-        "À préférer au fait de deviner : un livrable produit sur une hypothèse fausse coûte un cycle " +
-        "de revue à tout le monde.",
+        'Flags a blocker on the task you hold and **alerts someone specifically ' +
+        'concerned**, unlike a plain comment. Three effects: your question is posted ' +
+        'on the task, a skill request goes to the lead of the team that covers the ' +
+        'missing skill (the team is chosen by the server — you designate no one), and ' +
+        'if `pause` is true the task is paused with your question as the reason (it stays ' +
+        'yours, no one takes it back, it awaits a human answer). ' +
+        'Prefer this over guessing: a deliverable produced on a wrong assumption costs everyone a ' +
+        'review cycle.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Tâche que vous détenez.'),
+        taskId: z.string().uuid().describe('Task you hold.'),
         question: z
           .string()
           .min(1)
-          .describe('Ce qui vous bloque, précisément. Sera lu par un humain — soyez concret.'),
+          .describe('What is blocking you, precisely. Will be read by a human — be concrete.'),
         skillId: z
           .string()
           .uuid()
           .optional()
-          .describe('Compétence manquante (cf. `vaks_list_skills`). Défaut : celle requise par la tâche.'),
+          .describe('Missing skill (see `vaks_list_skills`). Default: the one required by the task.'),
         proposedSkillName: z
           .string()
           .optional()
-          .describe("Compétence absente du catalogue, si aucune ne correspond."),
+          .describe('Skill absent from the catalog, if none matches.'),
         pause: z
           .boolean()
           .optional()
-          .describe('Mettre la tâche en pause en attendant la réponse (recommandé si vous êtes vraiment bloqué).'),
+          .describe('Pause the task while awaiting the answer (recommended if you are truly blocked).'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -792,39 +986,39 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_create_subtask',
     {
-      title: 'Découper la tâche en cours en sous-tâches',
+      title: 'Break the current task into subtasks',
       description:
-        "Crée une SOUS-TÂCHE de la tâche que vous détenez, quand le travail s'avère trop vaste ou " +
-        "demande une compétence que vous n'avez pas. Contraintes serveur : le parent doit être une " +
-        "tâche que vous avez revendiquée (409/403 sinon), la sous-tâche vit dans le même projet, et " +
-        "on ne descend que d'UN niveau (une sous-tâche ne se redécoupe pas — signalez le besoin en " +
-        "commentaire). Vous ne pouvez pas lui fixer de budget, d'enjeu ni de critères d'acceptation : " +
-        "ce sont des décisions humaines. La sous-tâche naît en TODO et peut être tirée par un autre " +
-        "acteur (`vaks_next_task`) — précisez `requiredSkillId` si elle demande une compétence " +
-        "particulière. Le budget agent du parent COUVRE ses sous-tâches : découper n'ouvre pas " +
-        "d'enveloppe supplémentaire. " +
-        "⚠️ Une sous-tâche est un PASSAGE DE RELAIS : vous savez pourquoi vous découpez, celui qui la " +
-        "reprendra ne le saura pas. La `description` est donc obligatoire et doit suffire à travailler " +
-        "sans vous. Les livrables des sous-tâches comptent pour le parent : celui-ci ne pourra passer " +
-        "en revue que si TOUTES ses sous-tâches sont closes et prouvées au niveau exigé.",
+        'Creates a SUBTASK of the task you hold, when the work turns out too large or ' +
+        'requires a skill you do not have. Server constraints: the parent must be a ' +
+        'task you have claimed (409/403 otherwise), the subtask lives in the same project, and ' +
+        'you can only go down ONE level (a subtask is not re-split — flag the need in a ' +
+        'comment). You cannot set a budget, stakes or acceptance criteria on it: ' +
+        'these are human decisions. The subtask is born TODO and can be pulled by another ' +
+        'actor (`vaks_next_task`) — specify `requiredSkillId` if it needs a particular ' +
+        'skill. The parent\'s agent budget COVERS its subtasks: splitting does not open ' +
+        'an additional envelope. ' +
+        '⚠️ A subtask is a HAND-OFF: you know why you are splitting, whoever ' +
+        'picks it up will not. The `description` is therefore mandatory and must be enough to work ' +
+        'without you. Subtask deliverables count toward the parent: it cannot go ' +
+        'to review unless ALL its subtasks are closed and proven at the required level.',
       inputSchema: {
-        parentTaskId: z.string().uuid().describe('Tâche que vous détenez et qui est découpée.'),
-        title: z.string().min(1).describe('Titre de la sous-tâche.'),
+        parentTaskId: z.string().uuid().describe('Task you hold and that is being split.'),
+        title: z.string().min(1).describe('Subtask title.'),
         description: z
           .string()
           .min(60)
           .describe(
-            "OBLIGATOIRE : ce qu'il y a précisément à faire, ce qui est déjà connu ou décidé, et à " +
-              "quoi ressemble le résultat attendu. Écrivez-la pour quelqu'un qui n'a pas votre contexte.",
+            'MANDATORY: precisely what is to be done, what is already known or decided, and what ' +
+              'the expected result looks like. Write it for someone who does not have your context.',
           ),
-        estimateHours: z.number().positive().optional().describe('Charge estimée en heures.'),
+        estimateHours: z.number().positive().optional().describe('Estimated effort in hours.'),
         requiredSkillId: z
           .string()
           .uuid()
           .optional()
-          .describe('Compétence requise (cf. `vaks_list_skills`) — sert au dispatch.'),
-        requiredSkillLevel: z.number().int().min(1).optional().describe('Niveau visé sur cette compétence.'),
-        dueDate: z.string().optional().describe('Échéance (YYYY-MM-DD).'),
+          .describe('Required skill (see `vaks_list_skills`) — used for dispatch.'),
+        requiredSkillLevel: z.number().int().min(1).optional().describe('Target level on this skill.'),
+        dueDate: z.string().optional().describe('Due date (YYYY-MM-DD).'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -833,7 +1027,7 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
         // Le projet n'est pas demandé à l'appelant : il est déduit du parent —
         // un agent ne choisit pas dans quel projet il ouvre du travail.
         const parent = (await api.get(`tasks/${parentTaskId}`)) as { projectId?: string };
-        if (!parent?.projectId) throw new Error('Tâche parente introuvable.');
+        if (!parent?.projectId) throw new Error('Parent task not found.');
         return api.post(`projects/${parent.projectId}/tasks`, {
           parentTaskId,
           title,
@@ -849,17 +1043,17 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_get_subtasks_summary',
     {
-      title: 'Synthèse des sous-tâches',
+      title: 'Subtasks summary',
       description:
-        "État de toutes les sous-tâches d'une tâche + les SORTIES STRUCTURÉES de leurs livrables " +
-        "approuvés, en un appel. À lire AVANT de consolider votre livrable final : `allDone` dit si " +
-        "tout est terminé, `pending` liste les numéros des sous-tâches qui manquent encore. " +
-        "Le bloc `verification` donne le plancher de preuve du parent et le maillon le plus faible de " +
-        "l'arbre : `below` (sous-tâches sous le plancher) et `missing` (sans livrable approuvé) " +
-        "empêcheront la soumission en revue. " +
-        "Consolider trop tôt est le meilleur moyen de se faire renvoyer en corrections.",
+        'State of all subtasks of a task + the STRUCTURED OUTPUTS of their approved ' +
+        'deliverables, in one call. Read BEFORE consolidating your final deliverable: `allDone` says whether ' +
+        'everything is done, `pending` lists the numbers of the subtasks still missing. ' +
+        'The `verification` block gives the parent\'s proof floor and the weakest link in ' +
+        'the tree: `below` (subtasks under the floor) and `missing` (without an approved deliverable) ' +
+        'will prevent submission for review. ' +
+        'Consolidating too early is the surest way to be sent back for changes.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Tâche parente (celle que vous détenez).'),
+        taskId: z.string().uuid().describe('Parent task (the one you hold).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -869,18 +1063,18 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_execution_heartbeat',
     {
-      title: "Prolonger le bail d'exécution",
+      title: 'Extend the execution lease',
       description:
-        "Prolonge le bail de la tâche que vous exécutez — à appeler périodiquement pendant un travail " +
-        "long (traitement de plusieurs minutes, longue chaîne de raisonnement). Sans battement, le bail " +
-        "expire et la tâche est automatiquement rendue au vivier (statut TODO) : un autre acteur la " +
-        "reprendra et votre travail sera perdu. Échoue avec `LEASE_LOST` si vous ne détenez plus la " +
-        "tâche — dans ce cas ARRÊTEZ ce travail au lieu de continuer. " +
-        "La réponse renvoie aussi vos LIMITES courantes (`limits`) : budget restant par enveloppe et " +
-        "nombre de rejets de revue. Si `limits.budget.stop` est vrai, arrêtez de produire et soumettez " +
-        "immédiatement ce que vous avez.",
+        'Extends the lease of the task you are executing — call periodically during long ' +
+        'work (multi-minute processing, long reasoning chain). Without a heartbeat, the lease ' +
+        'expires and the task is automatically returned to the pool (status TODO): another actor ' +
+        'will take it and your work will be lost. Fails with `LEASE_LOST` if you no longer hold the ' +
+        'task — in that case STOP this work instead of continuing. ' +
+        'The response also returns your current LIMITS (`limits`): remaining budget per envelope and ' +
+        'number of review rejections. If `limits.budget.stop` is true, stop producing and submit ' +
+        'immediately what you have.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche en cours.'),
+        taskId: z.string().uuid().describe('Id (UUID) of the task in progress.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -890,70 +1084,70 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_submit_deliverable',
     {
-      title: 'Soumettre un livrable',
+      title: 'Submit a deliverable',
       description:
-        "Enregistre un livrable pour une tâche. Fournir l'artefact produit de l'une de ces façons : " +
-        "`content` (le document markdown/texte — vaks-pm le stocke sur S3 et l'attache, IDÉAL pour un " +
-        "agent docs), et/ou `url` (lien vers un dépôt / doc / PR externe), plus un `summary` en langage " +
-        "naturel. La revue humaine porte sur ce livrable, jamais sur une déclaration « c'est fait ». " +
-        "Soumettre AU MOINS un livrable avant de passer la tâche en revue (voir `vaks_submit_for_review`).",
+        'Records a deliverable for a task. Provide the produced artifact in one of these ways: ' +
+        '`content` (the markdown/text document — vaks-pm stores it on S3 and attaches it, IDEAL for a ' +
+        'docs agent), and/or `url` (link to an external repo / doc / PR), plus a natural-language ' +
+        '`summary`. Human review is about this deliverable, never about a "it\'s done" declaration. ' +
+        'Submit AT LEAST one deliverable before moving the task to review (see `vaks_submit_for_review`).',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
-        title: z.string().min(1).describe('Titre court du livrable.'),
+        taskId: z.string().uuid().describe('Task id (UUID).'),
+        title: z.string().min(1).describe('Short deliverable title.'),
         content: z
           .string()
           .optional()
           .describe(
-            'Contenu texte/markdown du document produit. Persisté sur S3 (Garage) et rattaché au ' +
-              'livrable — la façon recommandée pour un agent qui rédige un document.',
+            'Text/markdown content of the produced document. Persisted on S3 (Garage) and attached to the ' +
+              'deliverable — the recommended way for an agent writing a document.',
           ),
         filename: z
           .string()
           .optional()
-          .describe('Nom de fichier pour `content` (défaut `<titre>.md`).'),
+          .describe('Filename for `content` (default `<title>.md`).'),
         url: z
           .string()
           .url()
           .optional()
-          .describe("URL de l'artefact externe (dépôt, doc, PR…). Optionnel si `content` fourni."),
+          .describe('URL of the external artifact (repo, doc, PR…). Optional if `content` is provided.'),
         summary: z
           .string()
           .optional()
-          .describe('Résumé en langage naturel : ce qui a été produit, comment, les choix faits.'),
+          .describe('Natural-language summary: what was produced, how, the choices made.'),
         commitSha: z
           .string()
           .optional()
           .describe(
-            'SHA du commit associé au livrable (preuve CI). Requis pour la méthode ' +
-              '`ci_signed` : vaks-pm apparie le résultat CI SIGNÉ reçu par webhook à ce SHA — ' +
-              "le `status` que vous déclarez pour `ci_signed` est ignoré au profit du verdict CI réel.",
+            'SHA of the commit associated with the deliverable (CI proof). Required for the ' +
+              '`ci_signed` method: vaks-pm matches the SIGNED CI result received by webhook to this SHA — ' +
+              'the `status` you declare for `ci_signed` is ignored in favor of the real CI verdict.',
           ),
         structuredOutputs: z
           .record(z.union([z.string(), z.number(), z.boolean(), z.null()]))
           .optional()
           .describe(
-            "Sorties STRUCTURÉES du livrable : dictionnaire PLAT clé → valeur scalaire " +
-              '(ex. {"api_endpoint":"https://dev.api/v1","artifact_version":"2.4.0"}). Les tâches ' +
-              "qui dépendent de celle-ci les reliront telles quelles dans leur contexte de travail " +
-              "(`upstreamOutputs`) au lieu de chercher ces valeurs dans votre texte — c'est là que " +
-              "naissent les erreurs. Y mettre les FAITS réutilisables (URL, version, nom de schéma, " +
-              "identifiant), jamais le contenu du document. Propagé en aval seulement si le livrable " +
-              'est APPROUVÉ.',
+            'STRUCTURED outputs of the deliverable: a FLAT dictionary key → scalar value ' +
+              '(e.g. {"api_endpoint":"https://dev.api/v1","artifact_version":"2.4.0"}). Tasks ' +
+              'that depend on this one will read them as-is in their work context ' +
+              '(`upstreamOutputs`) instead of looking for those values in your text — that is where ' +
+              'errors are born. Put the reusable FACTS here (URL, version, schema name, ' +
+              'identifier), never the document content. Propagated downstream only if the deliverable ' +
+              'is APPROVED.',
           ),
         verification: z
           .object({
             method: z
               .enum(['self_attest', 'tool_output', 'agent_validator', 'ci_signed', 'human'])
               .describe(
-                'Méthode de preuve (AGENTS_VERIFICATION.md). Appelez `vaks_get_verification_requirements` ' +
-                  'pour connaître le plancher requis AVANT de travailler. `ci_signed` = preuve signée par la ' +
-                  'CI (fournir `commitSha`) ; `self_attest` = simple déclaration.',
+                'Proof method (AGENTS_VERIFICATION.md). Call `vaks_get_verification_requirements` ' +
+                  'to know the required floor BEFORE working. `ci_signed` = proof signed by the ' +
+                  'CI (provide `commitSha`); `self_attest` = plain declaration.',
               ),
-            status: z.string().optional().describe('Statut (passed / failed / pending). Ignoré pour `ci_signed` (corroboré serveur).'),
-            evidence: z.string().optional().describe('Lien ou extrait de preuve — optionnel.'),
+            status: z.string().optional().describe('Status (passed / failed / pending). Ignored for `ci_signed` (server-corroborated).'),
+            evidence: z.string().optional().describe('Proof link or excerpt — optional.'),
           })
           .optional()
-          .describe('Vérification du livrable (AGENTS_VERIFICATION.md) — optionnel.'),
+          .describe('Deliverable verification (AGENTS_VERIFICATION.md) — optional.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -975,15 +1169,15 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_submit_for_review',
     {
-      title: 'Soumettre une tâche en revue',
+      title: 'Submit a task for review',
       description:
-        "Passe une tâche de IN_PROGRESS à IN_REVIEW pour validation humaine. Requiert d'avoir soumis " +
-        "au moins un livrable (via `vaks_submit_deliverable`). Selon la gouvernance de l'org, peut aussi " +
-        "exiger d'avoir déclaré la consommation de la tâche (`vaks_report_run` : tokens/coût) — sinon " +
-        "erreur `NO_RUN_DECLARED`. Un reviewer humain approuvera ou demandera " +
-        "des changements ; en cas de changements demandés, reprenez le travail et resoumettez.",
+        'Moves a task from IN_PROGRESS to IN_REVIEW for human validation. Requires having submitted ' +
+        'at least one deliverable (via `vaks_submit_deliverable`). Depending on org governance, it may also ' +
+        'require having declared the task\'s consumption (`vaks_report_run`: tokens/cost) — otherwise ' +
+        'error `NO_RUN_DECLARED`. A human reviewer will approve or request ' +
+        'changes; if changes are requested, resume the work and resubmit.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche à soumettre en revue.'),
+        taskId: z.string().uuid().describe('Id (UUID) of the task to submit for review.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -993,13 +1187,13 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_claim_validation_task',
     {
-      title: 'Tirer une tâche de validation',
+      title: 'Pull a validation task',
       description:
-        "Réservé aux agents VALIDATEURS (capacité `deliverables:validate`). Tire une tâche de revue : " +
-        "le backend trouve un livrable soumis par un AUTRE agent, en attente de validation, sur un projet " +
-        "dont vous êtes membre, et vous le baille (bail de 30 min). Symétrie de `vaks_next_task` côté revue. " +
-        "Renvoie `null` s'il n'y a rien à valider. Appelez ensuite `vaks_validation_heartbeat` pendant la " +
-        "revue puis `vaks_submit_validation` pour rendre votre verdict. Vous ne validez JAMAIS votre propre travail.",
+        'Reserved for VALIDATOR agents (`deliverables:validate` capability). Pulls a review task: ' +
+        'the backend finds a deliverable submitted by ANOTHER agent, awaiting validation, on a project ' +
+        'you are a member of, and leases it to you (30 min lease). Mirror of `vaks_next_task` on the review side. ' +
+        'Returns `null` if there is nothing to validate. Then call `vaks_validation_heartbeat` during the ' +
+        'review, then `vaks_submit_validation` to render your verdict. You NEVER validate your own work.',
       inputSchema: {},
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -1009,14 +1203,14 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_validation_heartbeat',
     {
-      title: 'Heartbeat de validation',
+      title: 'Validation heartbeat',
       description:
-        "Prolonge le bail d'une tâche de validation que vous avez tirée (garde-la assignée pendant que vous " +
-        "l'examinez). À appeler périodiquement pendant une revue longue. Échoue si le bail a expiré ou a été " +
-        "repris — reprenez alors une tâche via `vaks_claim_validation_task`.",
+        'Extends the lease of a validation task you have pulled (keeps it assigned while you ' +
+        'examine it). Call periodically during a long review. Fails if the lease has expired or was ' +
+        'taken back — in that case pull a task again via `vaks_claim_validation_task`.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche du livrable en validation.'),
-        deliverableId: z.string().uuid().describe('Identifiant (UUID) du livrable (= reviewId) en validation.'),
+        taskId: z.string().uuid().describe('Id (UUID) of the task of the deliverable under validation.'),
+        deliverableId: z.string().uuid().describe('Id (UUID) of the deliverable (= reviewId) under validation.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -1027,17 +1221,17 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_submit_validation',
     {
-      title: 'Rendre un verdict de validation',
+      title: 'Render a validation verdict',
       description:
-        "Rend votre verdict d'agent validateur sur un livrable : `approve` (le livrable satisfait les critères) " +
-        "ou `changes_requested` (il faut corriger). Votre verdict est une PREUVE indépendante (force 2), pas " +
-        "l'approbation humaine finale. En mode `enforce` et si la vérification requise est exactement " +
-        "`agent_validator`, un `approve` peut auto-approuver la tâche (parfois ré-échantillonnée vers un humain).",
+        'Renders your validator-agent verdict on a deliverable: `approve` (the deliverable meets the criteria) ' +
+        'or `changes_requested` (it needs correction). Your verdict is an independent PROOF (strength 2), not ' +
+        'the final human approval. In `enforce` mode and if the required verification is exactly ' +
+        '`agent_validator`, an `approve` may auto-approve the task (sometimes re-sampled to a human).',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche du livrable.'),
-        deliverableId: z.string().uuid().describe('Identifiant (UUID) du livrable (= reviewId).'),
-        verdict: z.enum(['approve', 'changes_requested']).describe('Votre verdict.'),
-        note: z.string().optional().describe('Justification du verdict (ce qui va / ne va pas).'),
+        taskId: z.string().uuid().describe('Id (UUID) of the deliverable\'s task.'),
+        deliverableId: z.string().uuid().describe('Id (UUID) of the deliverable (= reviewId).'),
+        verdict: z.enum(['approve', 'changes_requested']).describe('Your verdict.'),
+        note: z.string().optional().describe('Justification of the verdict (what works / does not work).'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -1048,28 +1242,37 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_report_run',
     {
-      title: 'Déclarer le coût d\'un run',
+      title: 'Declare the cost of a run',
       description:
-        "Déclare la consommation d'un run de travail : tokens (entrée/sortie) et/ou coût réel en €. " +
-        "À appeler après avoir produit un livrable — sert la traçabilité et les budgets de l'agent " +
-        "(concurrence, budget jour/mois, coût max par tâche). Rattacher au `taskId` ET au " +
-        "`deliverableId` produit (requis pour passer la tâche en revue si l'org exige la déclaration). " +
-        "Fournir un `runKey` stable rend l'appel idempotent : un réessai avec la même clé met à jour le " +
-        "run au lieu de compter le coût deux fois. Vous ne déclarez que vos propres runs. " +
-        "⚠️ La réponse porte l'état des enveloppes de coût (`budget`) : si `budget.stop` est vrai, une " +
-        "enveloppe est épuisée — arrêtez de produire, soumettez ce que vous avez et ne revendiquez plus " +
-        "rien. Si `taskReleased` est vrai, la tâche vous a été RETIRÉE (reprise humaine) : cessez " +
-        "immédiatement. Déclarez vos runs au fil de l'eau plutôt qu'à la toute fin — c'est ce qui permet " +
-        "au serveur de vous arrêter avant que la facture ne dérape.",
+        'Declares the consumption of a work run: tokens (input/output) and/or actual cost in €. ' +
+        'Call after producing a deliverable — serves traceability and the agent\'s budgets ' +
+        '(concurrency, daily/monthly budget, max cost per task). Attach to the `taskId` AND the ' +
+        'produced `deliverableId` (required to submit the task for review if the org mandates declaration). ' +
+        'The cost of a deliverable is declared ONCE: if you call this again for the same `deliverableId`, ' +
+        'the server returns the existing run with `alreadyDeclared:true` and does NOT count the cost twice — ' +
+        'do not retry to "make sure". A re-declaration only creates a new run once the deliverable has been ' +
+        'rejected and you submit a NEW deliverable version. Providing an explicit `runKey` gives the same ' +
+        'idempotency for runs not tied to a deliverable. You only declare your own runs. ' +
+        'Billing unit: most providers bill in tokens (input/output). Providers billed in CREDITS ' +
+        '(Microsoft Copilot, GitHub Copilot) have a single counter — put the credit count in `tokensIn` ' +
+        'and leave `tokensOut` at 0. ' +
+        'If your runtime routes model calls through the Vaks LLM gateway, your runs are ALREADY declared ' +
+        'automatically (measured per call, idempotent via request-id) — do NOT report them again here, ' +
+        'or you would double-count. ' +
+        '⚠️ The response carries the state of the cost envelopes (`budget`): if `budget.stop` is true, an ' +
+        'envelope is exhausted — stop producing, submit what you have and claim nothing ' +
+        'more. If `taskReleased` is true, the task has been TAKEN back from you (human takeover): stop ' +
+        'immediately. Declare your runs as you go rather than at the very end — that is what lets ' +
+        'the server stop you before the bill spirals.',
       inputSchema: {
-        taskId: z.string().uuid().optional().describe('Tâche travaillée (optionnel).'),
-        deliverableId: z.string().uuid().optional().describe('Livrable produit (à rattacher).'),
-        model: z.string().optional().describe('Modèle utilisé, ex. claude-sonnet-5.'),
-        tokensIn: z.number().int().nonnegative().optional().describe('Tokens en entrée.'),
-        tokensOut: z.number().int().nonnegative().optional().describe('Tokens en sortie.'),
-        cost: z.number().nonnegative().optional().describe('Coût réel en euros (optionnel : dérivé des tokens sinon).'),
-        runKey: z.string().min(1).max(200).optional().describe("Clé d'idempotence stable (évite le double comptage sur réessai)."),
-        note: z.string().optional().describe("Ce que le run a fait (optionnel)."),
+        taskId: z.string().uuid().optional().describe('Task worked on (optional).'),
+        deliverableId: z.string().uuid().optional().describe('Produced deliverable (to attach).'),
+        model: z.string().optional().describe('Model used, e.g. claude-sonnet-5.'),
+        tokensIn: z.number().int().nonnegative().optional().describe('Input tokens (or the credit count for credit-billed providers).'),
+        tokensOut: z.number().int().nonnegative().optional().describe('Output tokens (leave 0 for credit-billed providers).'),
+        cost: z.number().nonnegative().optional().describe('Actual cost in euros (optional: derived from tokens otherwise).'),
+        runKey: z.string().min(1).max(200).optional().describe('Stable idempotency key (avoids double-counting on retry).'),
+        note: z.string().optional().describe('What the run did (optional).'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -1082,23 +1285,23 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_create_project',
     {
-      title: 'Créer un projet',
+      title: 'Create a project',
       description:
-        "Crée un nouveau projet. `key` = code court unique (ex. « ACME »), `name` = libellé. " +
-        "Nécessite que l'org ait activé l'écriture IA ET que l'utilisateur ait le droit de créer " +
-        "un projet (Admin / Portfolio / Team Manager). Le projet démarre en brouillon.",
+        'Creates a new project. `key` = unique short code (e.g. "ACME"), `name` = label. ' +
+        'Requires the org to have enabled AI writes AND the user to have permission to create ' +
+        'a project (Admin / Portfolio / Team Manager). The project starts as a draft.',
       inputSchema: {
         key: z
           .string()
           .regex(/^[A-Z0-9]{2,3}$/)
-          .describe('Code court unique : 2 à 3 caractères MAJUSCULES/chiffres (ex. « ACM », « AZ »).'),
-        name: z.string().min(1).describe('Nom du projet.'),
-        description: z.string().optional().describe('Description — optionnel.'),
-        billable: z.boolean().optional().describe('Projet facturable (défaut true) — optionnel.'),
+          .describe('Unique short code: 2 to 3 UPPERCASE characters/digits (e.g. "ACM", "AZ").'),
+        name: z.string().min(1).describe('Project name.'),
+        description: z.string().optional().describe('Description — optional.'),
+        billable: z.boolean().optional().describe('Billable project (default true) — optional.'),
         teamIds: z
           .array(z.string().uuid())
           .optional()
-          .describe('Équipes à rattacher (UUID) — requis pour un Team Manager.'),
+          .describe('Teams to attach (UUID) — required for a Team Manager.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -1107,80 +1310,46 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   );
 
   register(
-    'vaks_create_task',
+    'vaks_time_entries',
     {
-      title: 'Créer une tâche dans un projet',
+      title: 'Time entries (log / update / delete)',
       description:
-        "Crée une tâche dans un projet. Peut directement pré-assigner via `assigneeIds`. " +
-        "Récupérer l'id projet via `vaks_list_projects`, et choisir les assignés avec " +
-        "`vaks_suggest_assignees` / `vaks_get_skill_gap` (skill ∩ dispo).",
+        'Manages time entries for the current user. `action`: ' +
+        "'log' = record time on a task (requires `taskId`, `date` YYYY-MM-DD, `durationMinutes`); " +
+        "'update' = modify an existing entry (requires `id`, partial fields); " +
+        "'delete' = remove an entry (requires `id`, destructive — confirmation required).",
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
-        title: z.string().min(1).describe('Titre de la tâche.'),
-        description: z.string().optional().describe('Description — optionnel.'),
-        estimateHours: z.number().positive().optional().describe('Charge estimée en heures — optionnel.'),
-        dueDate: z.string().optional().describe('Échéance (YYYY-MM-DD) — optionnel.'),
-        assigneeIds: z
-          .array(z.string().uuid())
+        action: z.enum(['log', 'update', 'delete']).describe('Operation to perform.'),
+        taskId: z.string().uuid().optional().describe('Target task (UUID) — required for `log`.'),
+        id: z.string().uuid().optional().describe('Target entry (UUID) — required for `update`/`delete`.'),
+        date: z.string().optional().describe('Day of the entry (YYYY-MM-DD) — required for `log`.'),
+        durationMinutes: z
+          .number()
+          .int()
+          .positive()
           .optional()
-          .describe('Assignés à la création (UUID) — optionnel.'),
-        labelIds: z
-          .array(z.string().uuid())
+          .describe('Duration in minutes — required for `log`.'),
+        description: z.string().nullable().optional().describe('Comment — optional.'),
+        overtimeMinutes: z
+          .number()
+          .int()
+          .min(0)
           .optional()
-          .describe('Étiquettes à poser (UUID, cf. `vaks_list_labels`) — optionnel.'),
-        isMilestone: z.boolean().optional().describe('Jalon — optionnel.'),
+          .describe('Declared overtime (minutes, ≤ duration) — `update` only.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ projectId, title, description, estimateHours, dueDate, assigneeIds, labelIds, isMilestone }) =>
-      run(() =>
-        api.post(`projects/${projectId}/tasks`, {
-          title,
-          description,
-          estimateHours,
-          dueDate,
-          assigneeIds,
-          labelIds,
-          isMilestone,
-        }),
-      ),
-  );
-
-  register(
-    'vaks_assign_task',
-    {
-      title: 'Assigner une tâche à des personnes',
-      description:
-        "Définit la liste des assignés d'une tâche (remplace les assignés existants). " +
-        "Pour assigner selon compétences + disponibilité, appeler d'abord `vaks_suggest_assignees`.",
-      inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
-        assigneeIds: z
-          .array(z.string().uuid())
-          .describe('Liste complète des assignés (UUID). Liste vide = désassigner.'),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ taskId, assigneeIds }) => run(() => api.patch(`tasks/${taskId}`, { assigneeIds })),
-  );
-
-  register(
-    'vaks_log_time',
-    {
-      title: 'Saisir du temps sur une tâche',
-      description:
-        "Enregistre une saisie de temps sur une tâche pour l'utilisateur courant. " +
-        "`durationMinutes` en minutes, `date` au format YYYY-MM-DD.",
-      inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
-        date: z.string().describe('Jour de la saisie (YYYY-MM-DD).'),
-        durationMinutes: z.number().int().positive().describe('Durée en minutes.'),
-        description: z.string().optional().describe('Commentaire — optionnel.'),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    },
-    async ({ taskId, date, durationMinutes, description }) =>
-      run(() => api.post('time-entries', { taskId, date, durationMinutes, description })),
+    async ({ action, taskId, id, date, durationMinutes, description, overtimeMinutes }) =>
+      run(() => {
+        if (action === 'log') {
+          need(taskId && date && durationMinutes, '`log` requires `taskId`, `date` and `durationMinutes`.');
+          return api.post('time-entries', { taskId, date, durationMinutes, description });
+        }
+        need(id, `\`${action}\` requires \`id\`.`);
+        if (action === 'update')
+          return api.patch(`time-entries/${id}`, { date, durationMinutes, description, overtimeMinutes });
+        return api.delete(`time-entries/${id}`);
+      }),
   );
 
   // --- Staffing assisté : « l'IA orchestre, le MOTEUR calcule » ---
@@ -1191,20 +1360,20 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_plan_project_preview',
     {
-      title: "Planifier un projet — aperçu (n'applique rien)",
+      title: 'Plan a project — preview (applies nothing)',
       description:
-        "Calcule, via le moteur d'auto-planification, un plan d'allocation pour TOUT le projet " +
-        "(respecte capacité réelle, dépendances/CPM, compétences, priorités) **sans rien persister**. " +
-        "Retourne les allocations proposées + avertissements (dépassement d'échéance, fenêtre trop " +
-        "courte). À présenter à l'utilisateur AVANT d'appliquer via `vaks_plan_project_apply`.",
+        'Computes, via the auto-planning engine, an allocation plan for the WHOLE project ' +
+        '(respects real capacity, dependencies/CPM, skills, priorities) **without persisting anything**. ' +
+        'Returns the proposed allocations + warnings (deadline overrun, window too ' +
+        'short). Present to the user BEFORE applying via `vaks_plan_project_apply`.',
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
+        projectId: z.string().uuid().describe('Project id (UUID).'),
         preserve: z
           .enum(['manual_autosplit', 'manual', 'none'])
           .optional()
           .describe(
-            "Ce que le plan conserve (le passé/aujourd'hui est toujours gelé). " +
-              "'manual_autosplit' (défaut) garde le manuel + auto-split ; 'manual' garde le manuel ; 'none' replanifie tout le futur.",
+            'What the plan keeps (the past/today is always frozen). ' +
+              "'manual_autosplit' (default) keeps manual + auto-split; 'manual' keeps manual; 'none' replans all of the future.",
           ),
       },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
@@ -1216,17 +1385,17 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_plan_project_apply',
     {
-      title: 'Planifier un projet — appliquer',
+      title: 'Plan a project — apply',
       description:
-        "Applique le plan d'auto-planification au projet : crée/remplace les allocations FUTURES " +
-        "(le passé et aujourd'hui sont gelés). Idempotent (ré-appliquer redonne le même plan). " +
-        "Demander confirmation à l'utilisateur, idéalement après `vaks_plan_project_preview`.",
+        'Applies the auto-planning plan to the project: creates/replaces the FUTURE allocations ' +
+        '(the past and today are frozen). Idempotent (re-applying yields the same plan). ' +
+        'Ask the user for confirmation, ideally after `vaks_plan_project_preview`.',
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
+        projectId: z.string().uuid().describe('Project id (UUID).'),
         preserve: z
           .enum(['manual_autosplit', 'manual', 'none'])
           .optional()
-          .describe('Idem aperçu — défaut manual_autosplit.'),
+          .describe('Same as preview — default manual_autosplit.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
@@ -1234,56 +1403,102 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       run(() => api.post('workload/autoplan', { scope: 'project', projectId, persist: true, preserve })),
   );
 
-  // --- Compétences : création / demande (écriture) ---
-  // RBAC fin appliqué côté API : créer un skill = policy `canWriteCatalog`
-  // (défaut team_lead/admin) ; demander = policy `canRequestSkill` (PM).
+  // --- Compétences : catalogue + demandes (écriture) ---
+  // RBAC fin appliqué côté API : écrire le catalogue = policy `canWriteCatalog`
+  // (défaut team_lead/admin) ; demander = policy `canRequestSkill` (PM) ;
+  // résoudre = lead de l'équipe destinataire.
 
   register(
-    'vaks_create_skill',
+    'vaks_skills_catalog',
     {
-      title: 'Créer une compétence au catalogue',
+      title: 'Skill catalog (create / update / delete / apply pack)',
       description:
-        "Ajoute une compétence au catalogue de l'organisation. Réservé aux rôles autorisés à " +
-        "écrire le catalogue (lead d'équipe / admin selon la policy org) — sinon l'API refuse. " +
-        "Idempotent sur le nom (ne crée pas de doublon).",
+        'Manages the organization\'s skill catalog. Reserved for roles authorized to write the ' +
+        'catalog (team lead / admin depending on the org policy) — otherwise the API refuses. `action`: ' +
+        "'create' = add a skill (requires `name`; idempotent on the name); " +
+        "'update' = modify a skill (requires `skillId`, partial fields); " +
+        "'delete' = soft-delete a skill (requires `skillId`, destructive — confirmation required); " +
+        "'apply_pack' = install/update a skill pack (requires `packId`; list packs via `vaks_read` on `skills/packs`).",
       inputSchema: {
-        name: z.string().min(1).describe('Nom de la compétence (ex. « Kubernetes »).'),
-        category: z.string().optional().describe('Famille/catégorie (ex. « DevOps ») — optionnel.'),
-        description: z.string().optional().describe('Description — optionnel.'),
-        color: z.string().optional().describe('Couleur hex (ex. #3b82f6) — optionnel.'),
+        action: z.enum(['create', 'update', 'delete', 'apply_pack']).describe('Operation to perform.'),
+        skillId: z.string().uuid().optional().describe('Target skill (UUID) — required for `update`/`delete`.'),
+        name: z.string().min(1).optional().describe('Skill name (e.g. "Kubernetes") — required for `create`.'),
+        category: z.string().optional().describe('Family/category (e.g. "DevOps") — optional.'),
+        description: z.string().optional().describe('Description — optional.'),
+        color: z.string().optional().describe('Hex color (e.g. #3b82f6) — optional.'),
+        aliases: z.array(z.string()).optional().describe('Aliases — `update` only.'),
+        packId: z
+          .string()
+          .optional()
+          .describe('Pack id (e.g. aws, backend, methodology…) — required for `apply_pack`.'),
+        force: z
+          .boolean()
+          .optional()
+          .describe('`apply_pack` only: re-sync even previously deleted skills.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
-    async ({ name, category, description, color }) =>
-      run(() => api.post('skills', { name, category, description, color })),
+    async ({ action, skillId, name, category, description, color, aliases, packId, force }) =>
+      run(() => {
+        if (action === 'create') {
+          need(name, '`create` requires `name`.');
+          return api.post('skills', { name, category, description, color });
+        }
+        if (action === 'apply_pack') {
+          need(packId, '`apply_pack` requires `packId`.');
+          return api.post(`skills/packs/${packId}/apply${force ? '?force=1' : ''}`, {});
+        }
+        need(skillId, `\`${action}\` requires \`skillId\`.`);
+        if (action === 'update')
+          return api.patch(`skills/${skillId}`, { name, description, color, category, aliases });
+        return api.delete(`skills/${skillId}`);
+      }),
   );
 
   register(
-    'vaks_request_skill',
+    'vaks_skill_requests',
     {
-      title: 'Demander une compétence au lead d\'une équipe',
+      title: 'Skill requests (request / resolve)',
       description:
-        "Adresse une demande de compétence au lead d'une équipe (le produit notifie le lead par " +
-        "email + webhook). Indiquer une compétence existante (`skillId`) OU en proposer une " +
-        "nouvelle (`proposedName`). `type` : ASSIGN_SKILL (assigner un membre déjà compétent), " +
-        "TRAINING (former quelqu'un), EXTERNAL (renfort externe). Trouver le `teamId` via " +
-        "`vaks_list_teams`. Réservé aux rôles autorisés (PM) — sinon l'API refuse.",
+        '`action`: ' +
+        "'request' = address a skill request to a team's lead (the product notifies the lead by " +
+        'email + webhook). Indicate an existing skill (`skillId`) OR propose a new one ' +
+        '(`proposedName`). `type`: ASSIGN_SKILL (assign an already-skilled member), TRAINING ' +
+        '(train someone), EXTERNAL (external reinforcement). Find the `teamId` via ' +
+        "`vaks_list_teams`. Reserved for authorized roles (PM). " +
+        "'resolve' = update the status of a request (requires `id` and `status` OPEN→ACK→RESOLVED, " +
+        'or REJECTED — confirmation required) — team lead action.',
       inputSchema: {
-        teamId: z.string().uuid().describe("Équipe dont le lead reçoit la demande (UUID)."),
+        action: z.enum(['request', 'resolve']).describe('Operation to perform.'),
+        teamId: z.string().uuid().optional().describe('Team whose lead receives the request (UUID) — required for `request`.'),
         type: z
           .enum(['ASSIGN_SKILL', 'TRAINING', 'EXTERNAL'])
-          .describe('Nature de la demande.'),
-        skillId: z.string().uuid().optional().describe('Compétence existante (UUID) — ou proposedName.'),
-        proposedName: z.string().optional().describe('Nom d\'une compétence à créer — ou skillId.'),
-        desiredLevel: z.number().int().optional().describe('Niveau souhaité — optionnel.'),
-        projectId: z.string().uuid().optional().describe('Projet concerné (UUID) — optionnel.'),
-        taskId: z.string().uuid().optional().describe('Tâche concernée (UUID) — optionnel.'),
-        targetUserId: z.string().uuid().optional().describe('Personne visée (UUID) — optionnel.'),
-        note: z.string().optional().describe('Précisions libres — optionnel.'),
+          .optional()
+          .describe('Nature of the request — required for `request`.'),
+        skillId: z.string().uuid().optional().describe('Existing skill (UUID) — or proposedName.'),
+        proposedName: z.string().optional().describe('Name of a skill to create — or skillId.'),
+        desiredLevel: z.number().int().optional().describe('Desired level — optional.'),
+        projectId: z.string().uuid().optional().describe('Project concerned (UUID) — optional.'),
+        taskId: z.string().uuid().optional().describe('Task concerned (UUID) — optional.'),
+        targetUserId: z.string().uuid().optional().describe('Targeted person (UUID) — optional.'),
+        note: z.string().optional().describe('Free-form details / resolution note — optional.'),
+        id: z.string().uuid().optional().describe('Request to resolve (UUID) — required for `resolve`.'),
+        status: z
+          .enum(['OPEN', 'ACK', 'RESOLVED', 'REJECTED'])
+          .optional()
+          .describe('New status — required for `resolve`.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async (args) => run(() => api.post('skill-requests', args)),
+    async ({ action, id, status, note, ...rest }) =>
+      run(() => {
+        if (action === 'resolve') {
+          need(id && status, '`resolve` requires `id` and `status`.');
+          return api.patch(`skill-requests/${id}/status`, { status, note });
+        }
+        need(rest.teamId && rest.type, '`request` requires `teamId` and `type`.');
+        return api.post('skill-requests', { ...rest, note });
+      }),
   );
 
   // --- Cycle de vie des tâches & collaboration (écriture) ---
@@ -1291,58 +1506,63 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_update_task',
     {
-      title: 'Mettre à jour une tâche',
+      title: 'Update a task',
       description:
-        "Modifie une tâche : statut (faire avancer le travail), titre, description, priorité, " +
-        "estimé, dates, étiquettes — ET la configuration agent d'une tâche (garde-fous, critères " +
-        "d'acceptation, budget agent). Statuts usuels : TODO, IN_PROGRESS, DONE, ON_HOLD (motif via " +
-        "statusReason). Le serveur valide les transitions de statut autorisées. " +
-        "⚠️ Les champs de gouvernance (`agentGuardrails`, `acceptanceCriteria`, `agentCostBudget`) " +
-        "sont refusés à un jeton d'AGENT — un agent ne fixe pas la barre sur laquelle il est jugé. " +
-        "Ils sont destinés à un humain qui prépare la tâche.",
+        'Modifies a task: status (move the work forward), title, description, priority, ' +
+        'estimate, dates, labels, assignees — AND a task\'s agent configuration (guardrails, ' +
+        'acceptance criteria, agent budget). Usual statuses: TODO, IN_PROGRESS, DONE, ON_HOLD (reason via ' +
+        'statusReason). The server validates the allowed status transitions. To assign by ' +
+        'skills + availability, first call `vaks_suggest_assignees`. ' +
+        '⚠️ The governance fields (`agentGuardrails`, `acceptanceCriteria`, `agentCostBudget`) ' +
+        'are refused to an AGENT token — an agent does not set the bar it is judged against. ' +
+        'They are intended for a human preparing the task.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
+        taskId: z.string().uuid().describe('Task id (UUID).'),
         status: z
           .enum(['TODO', 'IN_PROGRESS', 'DONE', 'ON_HOLD'])
           .optional()
-          .describe('Nouveau statut — optionnel.'),
-        statusReason: z.string().optional().describe('Motif (utile pour ON_HOLD) — optionnel.'),
-        title: z.string().optional().describe('Nouveau titre — optionnel.'),
-        description: z.string().optional().describe('Nouvelle description — optionnel.'),
+          .describe('New status — optional.'),
+        statusReason: z.string().optional().describe('Reason (useful for ON_HOLD) — optional.'),
+        title: z.string().optional().describe('New title — optional.'),
+        description: z.string().optional().describe('New description — optional.'),
         priority: z
           .enum(['LOW', 'MEDIUM', 'HIGH', 'URGENT'])
           .optional()
-          .describe('Priorité — optionnel.'),
-        estimateHours: z.number().positive().optional().describe('Charge estimée (h) — optionnel.'),
-        dueDate: z.string().optional().describe('Échéance (YYYY-MM-DD) — optionnel.'),
-        startDate: z.string().optional().describe('Début prévu (YYYY-MM-DD) — optionnel.'),
+          .describe('Priority — optional.'),
+        estimateHours: z.number().positive().optional().describe('Estimated effort (h) — optional.'),
+        dueDate: z.string().optional().describe('Due date (YYYY-MM-DD) — optional.'),
+        startDate: z.string().optional().describe('Planned start (YYYY-MM-DD) — optional.'),
+        assigneeIds: z
+          .array(z.string().uuid())
+          .optional()
+          .describe('Replaces the task\'s assignees (UUID). Empty list = unassign — optional.'),
         labelIds: z
           .array(z.string().uuid())
           .optional()
-          .describe('Remplace les étiquettes de la tâche (UUID, cf. `vaks_list_labels`) — optionnel.'),
+          .describe('Replaces the task\'s labels (UUID, see `vaks_list_labels`) — optional.'),
         agentGuardrails: z
           .string()
           .nullable()
           .optional()
-          .describe("Garde-fous spécifiques à la tâche pour un agent (complète ceux du projet). Humain seulement."),
+          .describe('Task-specific guardrails for an agent (complements the project\'s). Human only.'),
         acceptanceCriteria: z
           .array(
             z.object({
-              text: z.string().min(1).max(500).describe("Un critère de « fait »."),
-              done: z.boolean().optional().describe('Coché ou non (défaut false).'),
+              text: z.string().min(1).max(500).describe('A "done" criterion.'),
+              done: z.boolean().optional().describe('Checked or not (default false).'),
             }),
           )
           .optional()
           .describe(
-            'Checklist de revue de la tâche (REMPLACE la liste entière). Sert de grille au reviewer et ' +
-              "cadre l'agent en entrée. Humain seulement.",
+            'Task review checklist (REPLACES the entire list). Serves as the reviewer\'s grid and ' +
+              'frames the agent up front. Human only.',
           ),
         agentCostBudget: z
           .number()
           .min(0)
           .nullable()
           .optional()
-          .describe('Enveloppe de coût agent (€) de cette tâche. null = pas de plafond. Humain seulement.'),
+          .describe('Agent cost envelope (€) for this task. null = no cap. Human only.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -1350,35 +1570,47 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   );
 
   register(
-    'vaks_create_dependency',
+    'vaks_dependencies_manage',
     {
-      title: 'Créer une dépendance entre tâches (Gantt)',
+      title: 'Task dependencies (create / update / delete)',
       description:
-        "Lie deux tâches par une dépendance (par défaut Finish-to-Start). `type` : FS, SS, FF, SF. " +
-        "`lagDays` = décalage optionnel. Sert à construire le planning / chemin critique. Le serveur " +
-        "refuse les cycles.",
+        'Manages dependencies between tasks (Gantt / critical path). `action`: ' +
+        "'create' = link two tasks (requires `predecessorId` and `successorId`; Finish-to-Start by " +
+        'default, the server refuses cycles); ' +
+        "'update' = change the type or offset of a link (requires `id`); " +
+        "'delete' = remove a link (requires `id`, destructive — confirmation required).",
       inputSchema: {
-        predecessorId: z.string().uuid().describe('Tâche prédécesseur (UUID).'),
-        successorId: z.string().uuid().describe('Tâche successeur (UUID).'),
-        type: z.enum(['FS', 'SS', 'FF', 'SF']).optional().describe('Type de lien — défaut FS.'),
-        lagDays: z.number().int().optional().describe('Décalage en jours — optionnel.'),
+        action: z.enum(['create', 'update', 'delete']).describe('Operation to perform.'),
+        id: z.string().uuid().optional().describe('Target dependency (UUID) — required for `update`/`delete`.'),
+        predecessorId: z.string().uuid().optional().describe('Predecessor task (UUID) — required for `create`.'),
+        successorId: z.string().uuid().optional().describe('Successor task (UUID) — required for `create`.'),
+        type: z.enum(['FS', 'SS', 'FF', 'SF']).optional().describe('Link type — default FS.'),
+        lagDays: z.number().int().optional().describe('Offset in days — optional.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ predecessorId, successorId, type, lagDays }) =>
-      run(() => api.post('dependencies', { predecessorId, successorId, type, lagDays })),
+    async ({ action, id, predecessorId, successorId, type, lagDays }) =>
+      run(() => {
+        if (action === 'create') {
+          need(predecessorId && successorId, '`create` requires `predecessorId` and `successorId`.');
+          return api.post('dependencies', { predecessorId, successorId, type, lagDays });
+        }
+        need(id, `\`${action}\` requires \`id\`.`);
+        if (action === 'update') return api.patch(`dependencies/${id}`, { type, lagDays });
+        return api.delete(`dependencies/${id}`);
+      }),
   );
 
   register(
     'vaks_post_comment',
     {
-      title: 'Poster un commentaire sur une tâche',
+      title: 'Post a comment on a task',
       description:
-        "Ajoute un commentaire au fil d'une tâche (les @mentions par identifiant de handle " +
-        "déclenchent une notification). Utile pour résumer, signaler un blocage, demander un avis.",
+        'Adds a comment to a task\'s thread (@mentions by handle id ' +
+        'trigger a notification). Useful to summarize, flag a blocker, ask for an opinion.',
       inputSchema: {
-        taskId: z.string().uuid().describe('Identifiant (UUID) de la tâche.'),
-        body: z.string().min(1).describe('Contenu du commentaire (markdown léger, @mentions).'),
+        taskId: z.string().uuid().describe('Task id (UUID).'),
+        body: z.string().min(1).describe('Comment content (light markdown, @mentions).'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -1388,25 +1620,25 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_notify_stakeholders',
     {
-      title: 'Prévenir les parties prenantes du projet (annonce)',
+      title: 'Notify the project stakeholders (announcement)',
       description:
-        "Envoie une ANNONCE aux parties prenantes d'un projet : email brandé + webhook (carte Teams), " +
-        "avec attribution en clair (« Envoyé par <utilisateur> via l'assistant IA »). L'audience est " +
-        "résolue CÔTÉ SERVEUR par rôles — jamais d'adresses email libres. `audience` : 'pm' (chefs de " +
-        "projet), 'sponsors' (membres tagués sponsor), 'members' (tous les membres directs), 'watchers' " +
-        "(abonnés au projet / à la tâche liée). Utilise-le quand l'utilisateur veut informer d'un " +
-        "changement (périmètre, décalage de jalon, décision). Rédige `title` court et `body` factuel " +
-        "(texte brut — le HTML/markdown n'est pas interprété, les URLs ne seront pas cliquables). " +
-        "Anti-spam : une annonce max par projet toutes les ~2 minutes.",
+        'Sends an ANNOUNCEMENT to a project\'s stakeholders: branded email + webhook (Teams card), ' +
+        'with plain attribution ("Sent by <user> via the AI assistant"). The audience is ' +
+        'resolved SERVER-SIDE by roles — never free-form email addresses. `audience`: \'pm\' (project ' +
+        'managers), \'sponsors\' (members tagged as sponsor), \'members\' (all direct members), \'watchers\' ' +
+        '(subscribers to the project / linked task). Use it when the user wants to inform of a ' +
+        'change (scope, milestone shift, decision). Write a short `title` and a factual `body` ' +
+        '(plain text — HTML/markdown is not interpreted, URLs will not be clickable). ' +
+        'Anti-spam: at most one announcement per project every ~2 minutes.',
       inputSchema: {
-        projectId: z.string().uuid().describe('Projet concerné (UUID).'),
-        title: z.string().min(1).max(200).describe("Titre de l'annonce (sujet de l'email, préfixé par org/projet)."),
-        body: z.string().min(1).max(4000).describe("Corps de l'annonce, texte brut (max 4000 caractères)."),
+        projectId: z.string().uuid().describe('Project concerned (UUID).'),
+        title: z.string().min(1).max(200).describe('Announcement title (email subject, prefixed by org/project).'),
+        body: z.string().min(1).max(4000).describe('Announcement body, plain text (max 4000 characters).'),
         audience: z
           .array(z.enum(['pm', 'members', 'watchers', 'sponsors']))
           .min(1)
-          .describe("Audiences à prévenir (résolues serveur). Ex. ['pm','sponsors']."),
-        taskId: z.string().uuid().optional().describe('Tâche de contexte — optionnel.'),
+          .describe("Audiences to notify (resolved server-side). E.g. ['pm','sponsors']."),
+        taskId: z.string().uuid().optional().describe('Context task — optional.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -1415,42 +1647,102 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   );
 
   register(
-    'vaks_create_time_off',
+    'vaks_time_off_manage',
     {
-      title: 'Déclarer une absence (time-off)',
+      title: 'Time-offs (create / update / delete)',
       description:
-        "Enregistre une absence pour un utilisateur sur une plage de dates → met sa capacité à 0 " +
-        "sur la période (le moteur de staffing en tient compte). `type` ex. VACATION, SICK, OTHER.",
+        'Manages time-offs. A time-off sets the user\'s capacity to 0 over the period (the ' +
+        'staffing engine accounts for it). `action`: ' +
+        "'create' = declare a time-off (requires `userId`, `startDate`, `endDate`); " +
+        "'update' = modify one (requires `id`, partial fields); " +
+        "'delete' = remove one (requires `id`, destructive — confirmation required).",
       inputSchema: {
-        userId: z.string().uuid().describe("Utilisateur concerné (UUID)."),
-        startDate: z.string().describe('Début (YYYY-MM-DD).'),
-        endDate: z.string().describe('Fin (YYYY-MM-DD).'),
-        type: z.string().optional().describe('Type d\'absence — optionnel.'),
-        notes: z.string().optional().describe('Note — optionnel.'),
+        action: z.enum(['create', 'update', 'delete']).describe('Operation to perform.'),
+        id: z.string().uuid().optional().describe('Target time-off (UUID) — required for `update`/`delete`.'),
+        userId: z.string().uuid().optional().describe('User concerned (UUID) — required for `create`.'),
+        startDate: z.string().optional().describe('Start (YYYY-MM-DD) — required for `create`.'),
+        endDate: z.string().optional().describe('End (YYYY-MM-DD) — required for `create`.'),
+        type: z
+          .enum(['VACATION', 'SICK', 'PERSONAL', 'PARENTAL', 'OTHER'])
+          .optional()
+          .describe('Time-off type — optional.'),
+        notes: z.string().nullable().optional().describe('Note — optional.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ userId, startDate, endDate, type, notes }) =>
-      run(() => api.post('workload/time-offs', { userId, startDate, endDate, type, notes })),
+    async ({ action, id, userId, startDate, endDate, type, notes }) =>
+      run(() => {
+        if (action === 'create') {
+          need(userId && startDate && endDate, '`create` requires `userId`, `startDate` and `endDate`.');
+          return api.post('workload/time-offs', { userId, startDate, endDate, type, notes });
+        }
+        need(id, `\`${action}\` requires \`id\`.`);
+        if (action === 'update') return api.patch(`time-offs/${id}`, { startDate, endDate, type, notes });
+        return api.delete(`time-offs/${id}`);
+      }),
   );
 
   register(
-    'vaks_set_user_skill',
+    'vaks_skills_assign',
     {
-      title: 'Définir le niveau de compétence d\'un utilisateur',
+      title: 'Assign skills (user / project / team / task)',
       description:
-        "Fixe (ou met à jour) le niveau d'une compétence pour un utilisateur. Réservé par l'API au " +
-        "lead d'une équipe de la personne / admin (ou self-edit si la policy l'autorise) — sinon 403. " +
-        "Utile après une formation pour refléter la montée en compétence.",
+        'Sets skills on any target. `action`: ' +
+        "'set_user' = set/update the level of a skill for a user (requires `userId`, `skillId`, " +
+        '`level`; reserved by the API to a lead of one of the person\'s teams / admin, or self-edit ' +
+        'if the policy allows); ' +
+        "'remove_user' = remove a skill from a user's profile (requires `userId`, `skillId`; " +
+        'destructive — confirmation required); ' +
+        "'set_project' = replace a project's required skills (requires `projectId`, `skillIds`); " +
+        "'set_team' = replace the skills covered by a team (requires `teamId`, `skillIds`); " +
+        "'set_task' = replace a task's required skills with optional levels (requires `taskId`, `items`).",
       inputSchema: {
-        userId: z.string().uuid().describe("Utilisateur (UUID)."),
-        skillId: z.string().uuid().describe('Compétence (UUID).'),
-        level: z.number().int().min(1).max(100).describe('Niveau (1..N selon la grille org).'),
+        action: z
+          .enum(['set_user', 'remove_user', 'set_project', 'set_team', 'set_task'])
+          .describe('Operation to perform.'),
+        userId: z.string().uuid().optional().describe('User (UUID) — `set_user`/`remove_user`.'),
+        skillId: z.string().uuid().optional().describe('Skill (UUID) — `set_user`/`remove_user`.'),
+        level: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe('Level (1..N per the org grid) — required for `set_user`.'),
+        projectId: z.string().uuid().optional().describe('Project (UUID) — `set_project`.'),
+        teamId: z.string().uuid().optional().describe('Team (UUID) — `set_team`.'),
+        taskId: z.string().uuid().optional().describe('Task (UUID) — `set_task`.'),
+        skillIds: z
+          .array(z.string().uuid())
+          .optional()
+          .describe('Complete skill list, replaces the existing set — `set_project`/`set_team`.'),
+        items: z
+          .array(z.object({ skillId: z.string().uuid(), level: z.number().int().min(1).max(5).optional() }))
+          .optional()
+          .describe('Complete list (replaces the existing set) — `set_task`.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
-    async ({ userId, skillId, level }) =>
-      run(() => api.put(`users/${userId}/skills/${skillId}`, { level })),
+    async ({ action, userId, skillId, level, projectId, teamId, taskId, skillIds, items }) =>
+      run(() => {
+        switch (action) {
+          case 'set_user':
+            need(userId && skillId && level != null, '`set_user` requires `userId`, `skillId` and `level`.');
+            return api.put(`users/${userId}/skills/${skillId}`, { level });
+          case 'remove_user':
+            need(userId && skillId, '`remove_user` requires `userId` and `skillId`.');
+            return api.delete(`users/${userId}/skills/${skillId}`);
+          case 'set_project':
+            need(projectId && skillIds, '`set_project` requires `projectId` and `skillIds`.');
+            return api.put(`projects/${projectId}/skills`, { skillIds });
+          case 'set_team':
+            need(teamId && skillIds, '`set_team` requires `teamId` and `skillIds`.');
+            return api.put(`teams/${teamId}/skills`, { skillIds });
+          default:
+            need(taskId && items, '`set_task` requires `taskId` and `items`.');
+            return api.put(`tasks/${taskId}/required-skills`, { items });
+        }
+      }),
   );
 
   // --- Création en lot (bootstrap projet depuis un brief) ---
@@ -1458,27 +1750,33 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_create_tasks',
     {
-      title: 'Créer plusieurs tâches d\'un coup',
+      title: 'Create one or several tasks',
       description:
-        "Crée un lot de tâches dans un projet — pour matérialiser tout un découpage en un seul appel " +
-        "(typiquement après `vaks_create_project` à partir d'un brief). Tolère les échecs partiels : " +
-        "renvoie le résultat tâche par tâche (id créé ou erreur).",
+        'Creates one task or a batch of tasks in a project — a single task is simply a batch of ' +
+        'one. Materializes a whole breakdown in a single call (typically after ' +
+        '`vaks_create_project` from a brief). Fetch the project id via `vaks_list_projects`, and ' +
+        'choose assignees with `vaks_suggest_assignees` / `vaks_get_skill_gap` (skill ∩ availability). ' +
+        'Tolerates partial failures: returns the result task by task (created id or error).',
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
+        projectId: z.string().uuid().describe('Project id (UUID).'),
         tasks: z
           .array(
             z.object({
-              title: z.string().min(1).describe('Titre de la tâche.'),
+              title: z.string().min(1).describe('Task title.'),
               description: z.string().optional(),
               estimateHours: z.number().positive().optional(),
-              dueDate: z.string().optional().describe('Échéance (YYYY-MM-DD).'),
+              dueDate: z.string().optional().describe('Due date (YYYY-MM-DD).'),
               assigneeIds: z.array(z.string().uuid()).optional(),
+              labelIds: z
+                .array(z.string().uuid())
+                .optional()
+                .describe('Labels to apply (UUID, see `vaks_list_labels`).'),
               isMilestone: z.boolean().optional(),
             }),
           )
           .min(1)
           .max(50)
-          .describe('Liste des tâches à créer (1 à 50).'),
+          .describe('List of tasks to create (1 to 50).'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -1501,378 +1799,303 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
       }),
   );
 
-  // --- Étiquettes & cycle de vie projet (écriture) ---
+  // --- Étiquettes (écriture) ---
 
   register(
-    'vaks_create_label',
+    'vaks_labels_manage',
     {
-      title: 'Créer une étiquette de projet',
+      title: 'Project labels (create / update / delete)',
       description:
-        "Ajoute une étiquette (label) à un projet. À poser ensuite sur des tâches via `labelIds` " +
-        "(`vaks_create_task` / `vaks_update_task`).",
+        'Manages a project\'s labels. Apply them to tasks via `labelIds` (`vaks_create_tasks` / ' +
+        '`vaks_update_task`). `action`: ' +
+        "'create' = add a label (requires `projectId`, `name`); " +
+        "'update' = rename/recolor a label (requires `projectId`, `labelId`); " +
+        "'delete' = remove a label (requires `projectId`, `labelId`, destructive — confirmation required).",
       inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
-        name: z.string().min(1).describe('Nom de l\'étiquette.'),
-        color: z.string().optional().describe('Couleur hex (ex. #3b82f6) — optionnel.'),
+        action: z.enum(['create', 'update', 'delete']).describe('Operation to perform.'),
+        projectId: z.string().uuid().describe('Project id (UUID).'),
+        labelId: z.string().uuid().optional().describe('Target label (UUID) — required for `update`/`delete`.'),
+        name: z.string().min(1).optional().describe('Label name — required for `create`.'),
+        color: z.string().optional().describe('Hex color (e.g. #3b82f6) — optional.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ projectId, name, color }) =>
-      run(() => api.post(`projects/${projectId}/labels`, { name, color })),
-  );
-
-  register(
-    'vaks_set_project_status',
-    {
-      title: 'Changer le statut d\'un projet (cycle de vie)',
-      description:
-        "Fait avancer un projet dans son cycle de vie : ex. activer (→ ACTIVE), clôturer (→ COMPLETED), " +
-        "archiver (→ ARCHIVED), remettre en brouillon (→ DRAFT). Les transitions autorisées dépendent " +
-        "de l'état courant — lire `allowedTransitions` via `vaks_list_projects`. NB : les étapes d'offre " +
-        "commerciale (OFFER_SENT / accept / refus) passent par d'autres actions et ne sont pas couvertes ici.",
-      inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
-        status: z
-          .enum(['DRAFT', 'ACTIVE', 'COMPLETED', 'ARCHIVED'])
-          .describe('Statut cible (doit être dans allowedTransitions du projet).'),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, status }) => run(() => api.patch(`projects/${projectId}`, { status })),
+    async ({ action, projectId, labelId, name, color }) =>
+      run(() => {
+        if (action === 'create') {
+          need(name, '`create` requires `name`.');
+          return api.post(`projects/${projectId}/labels`, { name, color });
+        }
+        need(labelId, `\`${action}\` requires \`labelId\`.`);
+        if (action === 'update') return api.patch(`projects/${projectId}/labels/${labelId}`, { name, color });
+        return api.delete(`projects/${projectId}/labels/${labelId}`);
+      }),
   );
 
   // --- Coûts hors main-d'œuvre / finance (écriture) ---
-  // Triple verrou : ce bloc n'est exposé que si l'écriture IA est ON ; l'API
-  // refuse en plus si « finance exposée à l'IA » est OFF (FinanceApiGateGuard)
-  // ou si l'utilisateur n'a pas `finance:manage` dans son RBAC.
+  // Triple verrou : ce bloc n'est exposé que si l'écriture IA est ON **et** si
+  // « finance exposée à l'IA » est ON (`allowFinance`, cf. /me/mcp-context) ;
+  // l'API refuse de toute façon via FinanceApiGateGuard (fail-closed) ou si
+  // l'utilisateur n'a pas `finance:manage` dans son RBAC.
 
-  register(
-    'vaks_add_expense',
-    {
-      title: 'Ajouter un coût hors main-d\'œuvre',
-      description:
-        "Crée un coût hors main-d'œuvre (non-labor) sur un projet : licence, matériel, cloud, " +
-        "sous-traitance, autre. ⚠️ Triple verrou : écriture IA activée + finance exposée à l'IA + " +
-        "droit `finance:manage` de l'utilisateur — sinon refus.",
-      inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
-        category: z
-          .enum(['LICENSE', 'HARDWARE', 'CLOUD', 'SUBCONTRACTOR', 'OTHER'])
-          .describe('Catégorie du coût.'),
-        label: z.string().min(1).max(200).describe('Libellé court.'),
-        amount: z.number().min(0).describe('Coût interne (par période si récurrent).'),
-        billAmount: z.number().min(0).optional().describe('Montant refacturé au client — optionnel.'),
-        quantity: z.number().min(0).optional().describe('Quantité — optionnel.'),
-        description: z.string().max(2000).optional().describe('Détail — optionnel.'),
-        status: z.enum(['PLANNED', 'INCURRED']).optional().describe('Statut (défaut PLANNED).'),
-        recurrence: z
-          .enum(['ONE_OFF', 'MONTHLY', 'ANNUAL'])
-          .optional()
-          .describe('Récurrence (défaut ONE_OFF).'),
-        startDate: z.string().optional().describe('Début (YYYY-MM-DD) — optionnel.'),
-        endDate: z.string().optional().describe('Fin (YYYY-MM-DD) — optionnel.'),
+  if (allowFinance) {
+    register(
+      'vaks_expenses_manage',
+      {
+        title: 'Non-labor costs (add / update / delete)',
+        description:
+          'Manages non-labor costs on a project: license, hardware, cloud, subcontracting, other. ' +
+          '⚠️ Triple lock: AI writes enabled + finance exposed to AI + the user\'s `finance:manage` ' +
+          'permission — otherwise refused. `action`: ' +
+          "'add' = create a cost (requires `projectId`, `category`, `label`, `amount`); " +
+          "'update' = modify one (requires `projectId`, `expenseId`, partial fields — fetch the " +
+          '`expenseId` via `vaks_list_expenses`); ' +
+          "'delete' = remove one (requires `projectId`, `expenseId`, destructive — confirmation required).",
+        inputSchema: {
+          action: z.enum(['add', 'update', 'delete']).describe('Operation to perform.'),
+          projectId: z.string().uuid().describe('Project id (UUID).'),
+          expenseId: z.string().uuid().optional().describe('Target cost (UUID) — required for `update`/`delete`.'),
+          category: z
+            .enum(['LICENSE', 'HARDWARE', 'CLOUD', 'SUBCONTRACTOR', 'OTHER'])
+            .optional()
+            .describe('Cost category — required for `add`.'),
+          label: z.string().min(1).max(200).optional().describe('Short label — required for `add`.'),
+          amount: z.number().min(0).optional().describe('Internal cost (per period if recurring) — required for `add`.'),
+          billAmount: z.number().min(0).optional().describe('Amount re-billed to the client — optional.'),
+          quantity: z.number().min(0).optional().describe('Quantity — optional.'),
+          description: z.string().max(2000).optional().describe('Detail — optional.'),
+          status: z.enum(['PLANNED', 'INCURRED']).optional().describe('Status (default PLANNED).'),
+          recurrence: z
+            .enum(['ONE_OFF', 'MONTHLY', 'ANNUAL'])
+            .optional()
+            .describe('Recurrence (default ONE_OFF).'),
+          startDate: z.string().optional().describe('Start (YYYY-MM-DD) — optional.'),
+          endDate: z.string().optional().describe('End (YYYY-MM-DD) — optional.'),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    },
-    async ({ projectId, ...body }) => run(() => api.post(`projects/${projectId}/expenses`, body)),
-  );
-
-  register(
-    'vaks_update_expense',
-    {
-      title: 'Modifier un coût hors main-d\'œuvre',
-      description:
-        "Met à jour un coût hors main-d'œuvre existant (champs partiels). Récupérer l'`expenseId` via " +
-        "`vaks_list_expenses`. ⚠️ Mêmes verrous finance que `vaks_add_expense`.",
-      inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
-        expenseId: z.string().uuid().describe('Identifiant (UUID) du coût.'),
-        category: z.enum(['LICENSE', 'HARDWARE', 'CLOUD', 'SUBCONTRACTOR', 'OTHER']).optional(),
-        label: z.string().min(1).max(200).optional(),
-        amount: z.number().min(0).optional(),
-        billAmount: z.number().min(0).optional(),
-        quantity: z.number().min(0).optional(),
-        description: z.string().max(2000).optional(),
-        status: z.enum(['PLANNED', 'INCURRED']).optional(),
-        recurrence: z.enum(['ONE_OFF', 'MONTHLY', 'ANNUAL']).optional(),
-        startDate: z.string().optional(),
-        endDate: z.string().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, expenseId, ...patch }) =>
-      run(() => api.patch(`projects/${projectId}/expenses/${expenseId}`, patch)),
-  );
-
-  register(
-    'vaks_delete_expense',
-    {
-      title: 'Supprimer un coût hors main-d\'œuvre',
-      description:
-        "Supprime un coût hors main-d'œuvre. Récupérer l'`expenseId` via `vaks_list_expenses`. " +
-        "⚠️ Mêmes verrous finance que `vaks_add_expense`.",
-      inputSchema: {
-        projectId: z.string().uuid().describe('Identifiant (UUID) du projet.'),
-        expenseId: z.string().uuid().describe('Identifiant (UUID) du coût à supprimer.'),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, expenseId }) =>
-      run(() => api.delete(`projects/${projectId}/expenses/${expenseId}`)),
-  );
+      async ({ action, projectId, expenseId, ...body }) =>
+        run(() => {
+          if (action === 'add') {
+            need(body.category && body.label && body.amount != null, '`add` requires `category`, `label` and `amount`.');
+            return api.post(`projects/${projectId}/expenses`, body);
+          }
+          need(expenseId, `\`${action}\` requires \`expenseId\`.`);
+          if (action === 'update') return api.patch(`projects/${projectId}/expenses/${expenseId}`, body);
+          return api.delete(`projects/${projectId}/expenses/${expenseId}`);
+        }),
+    );
+  }
 
   // ============================================================
   // Clients & contacts (écriture) — scope client:manage
   // ============================================================
   register(
-    'vaks_create_client',
+    'vaks_clients_manage',
     {
-      title: 'Créer un client',
-      description: 'Crée un client (compte) dans le portefeuille.',
+      title: 'Clients & contacts (create / update / delete)',
+      description:
+        'Manages the client portfolio (accounts and their contacts). `action`: ' +
+        "'create_client' = create a client (requires `name`); " +
+        "'update_client' = update a client (requires `clientId`, partial fields); " +
+        "'delete_client' = delete a client (requires `clientId`, destructive — confirmation required); " +
+        "'create_contact' = add a contact to a client (requires `clientId`, `name`); " +
+        "'update_contact' = update a contact (requires `clientId`, `contactId`); " +
+        "'delete_contact' = delete a contact (requires `clientId`, `contactId`, destructive — " +
+        'confirmation required).',
       inputSchema: {
-        name: z.string().min(1).describe('Nom du client.'),
-        company: z.string().optional(),
-        email: z.string().optional(),
-        phone: z.string().optional(),
-        address: z.string().optional(),
-        notes: z.string().optional(),
-        status: z.enum(['PROSPECT', 'ACTIVE', 'ARCHIVED']).optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    },
-    async (body) => run(() => api.post('clients', body)),
-  );
-  register(
-    'vaks_update_client',
-    {
-      title: 'Modifier un client',
-      description: 'Met à jour un client (champs partiels).',
-      inputSchema: {
-        clientId: z.string().uuid(),
-        name: z.string().min(1).optional(),
-        company: z.string().nullable().optional(),
+        action: z
+          .enum([
+            'create_client',
+            'update_client',
+            'delete_client',
+            'create_contact',
+            'update_contact',
+            'delete_contact',
+          ])
+          .describe('Operation to perform.'),
+        clientId: z
+          .string()
+          .uuid()
+          .optional()
+          .describe('Target client (UUID) — required for everything except `create_client`.'),
+        contactId: z
+          .string()
+          .uuid()
+          .optional()
+          .describe('Target contact (UUID) — required for `update_contact`/`delete_contact`.'),
+        name: z.string().min(1).optional().describe('Name — required for `create_client`/`create_contact`.'),
+        company: z.string().nullable().optional().describe('Company — client only.'),
         email: z.string().nullable().optional(),
         phone: z.string().nullable().optional(),
-        address: z.string().nullable().optional(),
+        address: z.string().nullable().optional().describe('Address — client only.'),
         notes: z.string().nullable().optional(),
-        status: z.enum(['PROSPECT', 'ACTIVE', 'ARCHIVED']).optional(),
+        status: z
+          .enum(['PROSPECT', 'ACTIVE', 'ARCHIVED'])
+          .optional()
+          .describe('Client status — client only.'),
+        title: z.string().nullable().optional().describe('Job title — contact only.'),
+        isPrimary: z.boolean().optional().describe('Primary contact — contact only.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ clientId, ...body }) => run(() => api.patch(`clients/${clientId}`, body)),
-  );
-  register(
-    'vaks_delete_client',
-    {
-      title: 'Supprimer un client',
-      description: 'Supprime un client. Action destructive.',
-      inputSchema: { clientId: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ clientId }) => run(() => api.delete(`clients/${clientId}`)),
-  );
-  register(
-    'vaks_create_contact',
-    {
-      title: 'Ajouter un contact à un client',
-      description: 'Crée un contact rattaché à un client.',
-      inputSchema: {
-        clientId: z.string().uuid(),
-        name: z.string().min(1),
-        title: z.string().optional(),
-        email: z.string().optional(),
-        phone: z.string().optional(),
-        notes: z.string().optional(),
-        isPrimary: z.boolean().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    },
-    async ({ clientId, ...body }) => run(() => api.post(`clients/${clientId}/contacts`, body)),
-  );
-  register(
-    'vaks_update_contact',
-    {
-      title: 'Modifier un contact',
-      description: 'Met à jour un contact (champs partiels).',
-      inputSchema: {
-        clientId: z.string().uuid(),
-        contactId: z.string().uuid(),
-        name: z.string().min(1).optional(),
-        title: z.string().nullable().optional(),
-        email: z.string().nullable().optional(),
-        phone: z.string().nullable().optional(),
-        notes: z.string().nullable().optional(),
-        isPrimary: z.boolean().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ clientId, contactId, ...body }) =>
-      run(() => api.patch(`clients/${clientId}/contacts/${contactId}`, body)),
-  );
-  register(
-    'vaks_delete_contact',
-    {
-      title: 'Supprimer un contact',
-      description: 'Supprime un contact. Action destructive.',
-      inputSchema: { clientId: z.string().uuid(), contactId: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ clientId, contactId }) => run(() => api.delete(`clients/${clientId}/contacts/${contactId}`)),
+    async ({ action, clientId, contactId, name, company, email, phone, address, notes, status, title, isPrimary }) =>
+      run(() => {
+        const clientBody = { name, company, email, phone, address, notes, status };
+        const contactBody = { name, title, email, phone, notes, isPrimary };
+        if (action === 'create_client') {
+          need(name, '`create_client` requires `name`.');
+          return api.post('clients', clientBody);
+        }
+        need(clientId, `\`${action}\` requires \`clientId\`.`);
+        if (action === 'update_client') return api.patch(`clients/${clientId}`, clientBody);
+        if (action === 'delete_client') return api.delete(`clients/${clientId}`);
+        if (action === 'create_contact') {
+          need(name, '`create_contact` requires `name`.');
+          return api.post(`clients/${clientId}/contacts`, contactBody);
+        }
+        need(contactId, `\`${action}\` requires \`contactId\`.`);
+        if (action === 'update_contact') return api.patch(`clients/${clientId}/contacts/${contactId}`, contactBody);
+        return api.delete(`clients/${clientId}/contacts/${contactId}`);
+      }),
   );
 
   // ============================================================
   // Équipes (écriture) — scopes team:create / team:manage_members
   // ============================================================
   register(
-    'vaks_create_team',
+    'vaks_teams_manage',
     {
-      title: 'Créer une équipe',
-      description: 'Crée une équipe (groupe de travail).',
+      title: 'Teams (create / update / members / project assignment)',
+      description:
+        'Manages teams, their members and their project assignments. `action`: ' +
+        "'create' = create a team (requires `name`); " +
+        "'update' = update a team (requires `teamId`); " +
+        "'add_member' = add a user to a team, optionally as lead (requires `teamId`, `userId`); " +
+        "'update_member' = change lead status and, for a lead/admin, default rates (requires `teamId`, `userId`); " +
+        "'remove_member' = remove a user from a team (requires `teamId`, `userId`, destructive — " +
+        'confirmation required); ' +
+        "'assign_project' = attach the team to a project, members become assignable (requires `teamId`, `projectId`); " +
+        "'unassign_project' = detach the team from a project (requires `teamId`, `projectId`).",
       inputSchema: {
-        name: z.string().min(1),
+        action: z
+          .enum([
+            'create',
+            'update',
+            'add_member',
+            'update_member',
+            'remove_member',
+            'assign_project',
+            'unassign_project',
+          ])
+          .describe('Operation to perform.'),
+        teamId: z.string().uuid().optional().describe('Target team (UUID) — required for everything except `create`.'),
+        userId: z.string().uuid().optional().describe('Member (UUID) — required for the `*_member` actions.'),
+        projectId: z
+          .string()
+          .uuid()
+          .optional()
+          .describe('Project (UUID) — required for `assign_project`/`unassign_project`.'),
+        name: z.string().min(1).optional().describe('Team name — required for `create`.'),
+        displayName: z.string().nullable().optional().describe('Display name — `update` only.'),
         description: z.string().optional(),
         color: z.string().optional(),
+        isLead: z.boolean().optional().describe('Lead status — `add_member`/`update_member`.'),
+        canCreateNonBillableProject: z.boolean().nullable().optional().describe('`update_member` only.'),
+        defaultCostRate: z.number().nullable().optional().describe('Default cost rate — `update_member`, lead/admin only.'),
+        defaultBillRate: z.number().nullable().optional().describe('Default bill rate — `update_member`, lead/admin only.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async (body) => run(() => api.post('teams', body)),
-  );
-  register(
-    'vaks_update_team',
-    {
-      title: 'Modifier une équipe',
-      description: 'Met à jour une équipe (nom, description, couleur…).',
-      inputSchema: {
-        teamId: z.string().uuid(),
-        name: z.string().min(1).optional(),
-        displayName: z.string().nullable().optional(),
-        description: z.string().optional(),
-        color: z.string().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ teamId, ...body }) => run(() => api.patch(`teams/${teamId}`, body)),
-  );
-  register(
-    'vaks_add_team_member',
-    {
-      title: 'Ajouter un membre à une équipe',
-      description: 'Ajoute un utilisateur à une équipe (optionnellement comme lead).',
-      inputSchema: {
-        teamId: z.string().uuid(),
-        userId: z.string().uuid(),
-        isLead: z.boolean().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    },
-    async ({ teamId, ...body }) => run(() => api.post(`teams/${teamId}/members`, body)),
-  );
-  register(
-    'vaks_update_team_member',
-    {
-      title: 'Modifier un membre d\'équipe',
-      description: 'Change le statut de lead (et, pour un lead/admin, les taux par défaut) d\'un membre.',
-      inputSchema: {
-        teamId: z.string().uuid(),
-        userId: z.string().uuid(),
-        isLead: z.boolean().optional(),
-        canCreateNonBillableProject: z.boolean().nullable().optional(),
-        defaultCostRate: z.number().nullable().optional(),
-        defaultBillRate: z.number().nullable().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ teamId, userId, ...body }) => run(() => api.patch(`teams/${teamId}/members/${userId}`, body)),
-  );
-  register(
-    'vaks_remove_team_member',
-    {
-      title: 'Retirer un membre d\'équipe',
-      description: 'Retire un utilisateur d\'une équipe.',
-      inputSchema: { teamId: z.string().uuid(), userId: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ teamId, userId }) => run(() => api.delete(`teams/${teamId}/members/${userId}`)),
-  );
-  register(
-    'vaks_assign_team_to_project',
-    {
-      title: 'Affecter une équipe à un projet',
-      description: 'Rattache une équipe à un projet (les membres deviennent affectables).',
-      inputSchema: { projectId: z.string().uuid(), teamId: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, teamId }) => run(() => api.post(`projects/${projectId}/teams`, { teamId })),
-  );
-  register(
-    'vaks_unassign_team_from_project',
-    {
-      title: 'Détacher une équipe d\'un projet',
-      description: 'Retire une équipe d\'un projet.',
-      inputSchema: { projectId: z.string().uuid(), teamId: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, teamId }) => run(() => api.delete(`projects/${projectId}/teams/${teamId}`)),
+    async ({
+      action,
+      teamId,
+      userId,
+      projectId,
+      name,
+      displayName,
+      description,
+      color,
+      isLead,
+      canCreateNonBillableProject,
+      defaultCostRate,
+      defaultBillRate,
+    }) =>
+      run(() => {
+        if (action === 'create') {
+          need(name, '`create` requires `name`.');
+          return api.post('teams', { name, description, color });
+        }
+        need(teamId, `\`${action}\` requires \`teamId\`.`);
+        if (action === 'update') return api.patch(`teams/${teamId}`, { name, displayName, description, color });
+        if (action === 'assign_project' || action === 'unassign_project') {
+          need(projectId, `\`${action}\` requires \`projectId\`.`);
+          return action === 'assign_project'
+            ? api.post(`projects/${projectId}/teams`, { teamId })
+            : api.delete(`projects/${projectId}/teams/${teamId}`);
+        }
+        need(userId, `\`${action}\` requires \`userId\`.`);
+        if (action === 'add_member') return api.post(`teams/${teamId}/members`, { userId, isLead });
+        if (action === 'update_member')
+          return api.patch(`teams/${teamId}/members/${userId}`, {
+            isLead,
+            canCreateNonBillableProject,
+            defaultCostRate,
+            defaultBillRate,
+          });
+        return api.delete(`teams/${teamId}/members/${userId}`);
+      }),
   );
 
   // ============================================================
   // Allocations manuelles & horaires de capacité — scope allocation:manage
   // ============================================================
   register(
-    'vaks_create_allocation',
+    'vaks_allocations_manage',
     {
-      title: 'Créer une allocation (manuelle)',
+      title: 'Allocations (create / update / delete)',
       description:
-        'Alloue un utilisateur à une tâche sur une plage de dates, à N heures/jour. Complète l\'auto-plan ' +
-        '(`vaks_plan_project_*`) pour des réglages à la main.',
+        'Manages manual allocations (a user on a task over a date range, at N hours/day). ' +
+        'Complements the auto-plan (`vaks_plan_project_*`) for manual adjustments. `action`: ' +
+        "'create' = allocate (requires `userId`, `taskId`, `startDate`, `endDate`, `hoursPerDay`); " +
+        "'update' = reassign / move dates / change hours (requires `id`); " +
+        "'delete' = remove an allocation (requires `id`, destructive — confirmation required).",
       inputSchema: {
-        userId: z.string().uuid(),
-        taskId: z.string().uuid(),
-        startDate: z.string().describe('YYYY-MM-DD.'),
-        endDate: z.string().describe('YYYY-MM-DD.'),
-        hoursPerDay: z.number().positive(),
-        notes: z.string().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    },
-    async (body) => run(() => api.post('allocations', body)),
-  );
-  register(
-    'vaks_update_allocation',
-    {
-      title: 'Modifier une allocation',
-      description: 'Met à jour une allocation (réassigner, déplacer les dates, changer les heures/jour).',
-      inputSchema: {
-        id: z.string().uuid(),
-        userId: z.string().uuid().optional(),
-        startDate: z.string().optional(),
-        endDate: z.string().optional(),
-        hoursPerDay: z.number().positive().optional(),
+        action: z.enum(['create', 'update', 'delete']).describe('Operation to perform.'),
+        id: z.string().uuid().optional().describe('Target allocation (UUID) — required for `update`/`delete`.'),
+        userId: z.string().uuid().optional().describe('User (UUID) — required for `create`.'),
+        taskId: z.string().uuid().optional().describe('Task (UUID) — required for `create`.'),
+        startDate: z.string().optional().describe('YYYY-MM-DD — required for `create`.'),
+        endDate: z.string().optional().describe('YYYY-MM-DD — required for `create`.'),
+        hoursPerDay: z.number().positive().optional().describe('Hours per day — required for `create`.'),
         notes: z.string().nullable().optional(),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ id, ...body }) => run(() => api.patch(`allocations/${id}`, body)),
-  );
-  register(
-    'vaks_delete_allocation',
-    {
-      title: 'Supprimer une allocation',
-      description: 'Supprime une allocation.',
-      inputSchema: { id: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ id }) => run(() => api.delete(`allocations/${id}`)),
+    async ({ action, id, userId, taskId, startDate, endDate, hoursPerDay, notes }) =>
+      run(() => {
+        if (action === 'create') {
+          need(
+            userId && taskId && startDate && endDate && hoursPerDay,
+            '`create` requires `userId`, `taskId`, `startDate`, `endDate` and `hoursPerDay`.',
+          );
+          return api.post('allocations', { userId, taskId, startDate, endDate, hoursPerDay, notes });
+        }
+        need(id, `\`${action}\` requires \`id\`.`);
+        if (action === 'update')
+          return api.patch(`allocations/${id}`, { userId, startDate, endDate, hoursPerDay, notes });
+        return api.delete(`allocations/${id}`);
+      }),
   );
   register(
     'vaks_set_work_schedule',
     {
-      title: 'Définir l\'horaire de capacité d\'un utilisateur',
+      title: 'Set a user\'s capacity schedule',
       description:
-        'Définit la capacité hebdomadaire (heures par jour Mon→Sun) et le taux d\'occupation d\'un utilisateur.',
+        'Sets a user\'s weekly capacity (hours per day Mon→Sun) and occupancy rate.',
       inputSchema: {
         userId: z.string().uuid(),
-        effectiveFrom: z.string().optional().describe('YYYY-MM-DD — optionnel.'),
+        effectiveFrom: z.string().optional().describe('YYYY-MM-DD — optional.'),
         hoursMon: z.number().min(0).max(24).optional(),
         hoursTue: z.number().min(0).max(24).optional(),
         hoursWed: z.number().min(0).max(24).optional(),
@@ -1886,137 +2109,120 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
     },
     async ({ userId, ...body }) => run(() => api.put(`users/${userId}/work-schedule`, body)),
   );
-  register(
-    'vaks_update_time_off',
-    {
-      title: 'Modifier une absence',
-      description: 'Met à jour une absence / un congé.',
-      inputSchema: {
-        id: z.string().uuid(),
-        startDate: z.string().optional(),
-        endDate: z.string().optional(),
-        type: z.enum(['VACATION', 'SICK', 'PERSONAL', 'PARENTAL', 'OTHER']).optional(),
-        notes: z.string().nullable().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ id, ...body }) => run(() => api.patch(`time-offs/${id}`, body)),
-  );
-  register(
-    'vaks_delete_time_off',
-    {
-      title: 'Supprimer une absence',
-      description: 'Supprime une absence / un congé.',
-      inputSchema: { id: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ id }) => run(() => api.delete(`time-offs/${id}`)),
-  );
-
   // ============================================================
-  // Finance — taux & budget (écriture) — scope finance:manage (mêmes verrous que les dépenses)
+  // Finance — taux & budget (écriture) — scope finance:manage (mêmes verrous
+  // que les dépenses, y compris le gate d'exposition `allowFinance`)
   // ============================================================
-  register(
-    'vaks_set_project_rate',
-    {
-      title: 'Définir le taux d\'un utilisateur sur un projet',
-      description:
-        'Fixe le taux coût (et refacturation) d\'un utilisateur sur un projet. ⚠️ Mêmes verrous finance que les dépenses.',
-      inputSchema: {
-        projectId: z.string().uuid(),
-        userId: z.string().uuid(),
-        costRate: z.number().min(0).describe('Taux coût horaire.'),
-        billRate: z.number().min(0).nullable().optional().describe('Taux refacturé — optionnel.'),
+  if (allowFinance) {
+    register(
+      'vaks_project_finance',
+      {
+        title: 'Project finance (budget / rates)',
+        description:
+          'Manages a project\'s financial envelope and per-user rates. ⚠️ Same finance locks as ' +
+          'expenses (AI writes + finance exposed to AI + `finance:manage`). `action`: ' +
+          "'set_budget' = set the project's budget envelope and/or default cost/re-billing rates " +
+          '(requires `projectId`); ' +
+          "'set_rate' = set the cost (and re-billing) rate of a user on the project (requires " +
+          '`projectId`, `userId`, `costRate`); ' +
+          "'delete_rate' = remove the explicit rate, back to the user/project default (requires " +
+          '`projectId`, `userId`, destructive — confirmation required).',
+        inputSchema: {
+          action: z.enum(['set_budget', 'set_rate', 'delete_rate']).describe('Operation to perform.'),
+          projectId: z.string().uuid().describe('Project id (UUID).'),
+          userId: z.string().uuid().optional().describe('User (UUID) — required for `set_rate`/`delete_rate`.'),
+          costRate: z.number().min(0).optional().describe('Hourly cost rate — required for `set_rate`.'),
+          billRate: z.number().min(0).nullable().optional().describe('Re-billed rate — `set_rate`, optional.'),
+          budgetAmount: z.number().min(0).nullable().optional().describe('Budget envelope — `set_budget`.'),
+          defaultCostRate: z.number().min(0).nullable().optional().describe('Project default cost rate — `set_budget`.'),
+          defaultBillRate: z.number().min(0).nullable().optional().describe('Project default bill rate — `set_budget`.'),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, userId, ...body }) =>
-      run(() => api.put(`projects/${projectId}/rates/${userId}`, body)),
-  );
+      async ({ action, projectId, userId, costRate, billRate, budgetAmount, defaultCostRate, defaultBillRate }) =>
+        run(() => {
+          if (action === 'set_budget')
+            return api.put(`projects/${projectId}/budget`, { budgetAmount, defaultCostRate, defaultBillRate });
+          need(userId, `\`${action}\` requires \`userId\`.`);
+          if (action === 'set_rate') {
+            need(costRate != null, '`set_rate` requires `costRate`.');
+            return api.put(`projects/${projectId}/rates/${userId}`, { costRate, billRate });
+          }
+          return api.delete(`projects/${projectId}/rates/${userId}`);
+        }),
+    );
+  }
   register(
-    'vaks_delete_project_rate',
+    'vaks_project_context',
     {
-      title: 'Supprimer le taux d\'un utilisateur sur un projet',
-      description: 'Retire le taux explicite (retour au défaut user/projet). ⚠️ Mêmes verrous finance.',
-      inputSchema: { projectId: z.string().uuid(), userId: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, userId }) => run(() => api.delete(`projects/${projectId}/rates/${userId}`)),
-  );
-  register(
-    'vaks_add_project_context',
-    {
-      title: 'Créer ou mettre à jour une note de contexte IA sur un projet',
+      title: 'AI-context notes on a project (add / update)',
       description:
-        "Dépose un document TEXTE dans l'espace documents du projet et le marque « contexte IA » : il " +
-        "devient lisible par les agents sur toutes les tâches du projet (compte rendu, décisions " +
-        "d'architecture, glossaire, consignes de style…). Le contenu est passé en clair et le fichier " +
-        "est fabriqué côté serveur. Extensions autorisées via le nom : .md, .txt, .csv, .json, .yaml, " +
-        ".html — un binaire ne peut PAS être créé par ce chemin. Plafond 1 Mo.\n\n" +
-        "**Écriture par NOM, sans identifiant** : si une note textuelle du même nom existe déjà dans " +
-        "le dossier cible, son contenu est REMPLACÉ (la réponse porte `replaced:true`). Plus besoin " +
-        "de récupérer un `docId` au préalable : réappeler ce tool avec le même nom met simplement la " +
-        "note à jour, sans empiler d'homonyme. Pour forcer un second document, passer " +
-        "`onDuplicate:\"create\"`.\n\n" +
-        "Sans `folderId`, la note atterrit dans le dossier « contexte IA » racine du projet s'il en " +
-        "existe un seul, sinon à la racine.",
+        'Manages TEXT documents in the project\'s document space marked "AI context": readable by ' +
+        'agents on all tasks of the project (report, architecture decisions, glossary, style ' +
+        'guidelines…). Allowed extensions via the name: .md, .txt, .csv, .json, .yaml, .html — a ' +
+        'binary CANNOT be created via this path. Cap 1 MB. `action`: ' +
+        "'add' = deposit a note by NAME, no id needed (requires `projectId`, `name`, `content`); if " +
+        'a text note of the same name already exists in the target folder, its content is REPLACED ' +
+        '(the response carries `replaced:true`) — pass `onDuplicate:"create"` to force a second ' +
+        'document. Without `folderId`, the note lands in the project\'s root "AI context" folder if ' +
+        'there is exactly one, otherwise at the root. ' +
+        "'update' = rewrite/move/detach an existing note by id (requires `projectId`, `docId`; " +
+        'provide `content` to rewrite, `folderId` to file it — null = root, `aiContext: false` to ' +
+        'detach without deleting; refuses non-text documents. Fetch the `docId` via `vaks_read` on ' +
+        '`projects/<id>/documents`).',
       inputSchema: {
+        action: z.enum(['add', 'update']).describe('Operation to perform.'),
         projectId: z.string().uuid(),
+        docId: z.string().uuid().optional().describe('Target document (UUID) — required for `update`.'),
         name: z
           .string()
           .min(1)
           .max(200)
-          .describe('Nom du fichier, extension comprise (ex. « decisions-archi.md »).'),
-        content: z.string().min(1).describe('Contenu texte de la note de contexte.'),
+          .optional()
+          .describe('File name, extension included (e.g. "decisions-archi.md") — required for `add`.'),
+        content: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Text content (required for `add`; for `update`, replaces entirely).'),
         folderId: z
           .string()
           .uuid()
+          .nullable()
           .optional()
-          .describe('Dossier cible (défaut : dossier « contexte IA » racine, sinon racine).'),
+          .describe('Target folder (`add`: default root "AI context" folder; `update`: null = root).'),
         aiContext: z
           .boolean()
           .optional()
-          .describe('false pour déposer sans exposer aux agents (défaut : true).'),
+          .describe('`add`: false to deposit without exposing to agents (default true). `update`: false to detach.'),
         onDuplicate: z
           .enum(['replace', 'create'])
           .optional()
-          .describe(
-            "Homonyme dans le dossier cible : « replace » (défaut) met à jour la note existante, " +
-              '« create » force un second document.',
-          ),
+          .describe('`add` only: "replace" (default) updates an existing namesake, "create" forces a second document.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async ({ projectId, ...body }) =>
-      run(() => api.post(`projects/${projectId}/documents/text`, body)),
-  );
-  register(
-    'vaks_update_project_context',
-    {
-      title: 'Mettre à jour une note de contexte IA',
-      description:
-        "Remplace le CONTENU d'une note de contexte existante (même document, même id — les agents " +
-        "voient la version à jour), et/ou la déplace, et/ou l'exclut du contexte IA. Refuse les " +
-        "documents non textuels : on ne remplace pas un PDF par du texte. Fournir `content` pour " +
-        "réécrire, `folderId` pour ranger (null = racine), `aiContext: false` pour détacher sans " +
-        "supprimer. Récupérer le `docId` via `vaks_read` sur `projects/<id>/documents`.",
-      inputSchema: {
-        projectId: z.string().uuid(),
-        docId: z.string().uuid(),
-        content: z.string().min(1).optional().describe('Nouveau contenu texte (remplace intégralement).'),
-        folderId: z.string().uuid().nullable().optional(),
-        aiContext: z.boolean().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, docId, content, ...rest }) =>
+    async ({ action, projectId, docId, name, content, folderId, aiContext, onDuplicate }) =>
       run(async () => {
+        if (action === 'add') {
+          need(name && content, '`add` requires `name` and `content`.');
+          return api.post(`projects/${projectId}/documents/text`, {
+            name,
+            content,
+            folderId: folderId ?? undefined,
+            aiContext,
+            onDuplicate,
+          });
+        }
+        need(docId, '`update` requires `docId`.');
         // Deux mutations distinctes côté API : le contenu vit dans S3, les
         // métadonnées en base. On réécrit d'abord, on range ensuite — ainsi un
         // échec de rangement ne laisse pas un contenu périmé derrière lui.
-        const meta = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
+        const meta = Object.fromEntries(
+          Object.entries({ folderId, aiContext }).filter(([, v]) => v !== undefined),
+        );
         if (content === undefined && !Object.keys(meta).length) {
-          throw new Error('Rien à mettre à jour : fournir `content`, `folderId` ou `aiContext`.');
+          throw new Error('Nothing to update: provide `content`, `folderId` or `aiContext`.');
         }
         // Toujours renvoyer LE DOCUMENT, jamais la liste : les deux routes
         // sérialisent le document, on garde donc la dernière écriture faite.
@@ -2029,96 +2235,85 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
           : afterText;
       }),
   );
-  register(
-    'vaks_set_project_budget',
-    {
-      title: 'Définir le budget / taux par défaut d\'un projet',
-      description:
-        'Fixe l\'enveloppe budgétaire et/ou les taux coût/refacturation par défaut du projet. ⚠️ Mêmes verrous finance.',
-      inputSchema: {
-        projectId: z.string().uuid(),
-        budgetAmount: z.number().min(0).nullable().optional(),
-        defaultCostRate: z.number().min(0).nullable().optional(),
-        defaultBillRate: z.number().min(0).nullable().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, ...body }) => run(() => api.put(`projects/${projectId}/budget`, body)),
-  );
-
   // ============================================================
   // Projet (métadonnées) & tâches — scopes project:update / task:delete
   // ============================================================
   register(
     'vaks_update_project',
     {
-      title: 'Modifier un projet (métadonnées + configuration agents IA)',
+      title: 'Update a project (metadata, lifecycle status, AI agents configuration)',
       description:
-        'Met à jour un projet : métadonnées (nom, description, dates, client) ET toute la ' +
-        "configuration des agents IA (activation, brief, garde-fous, budget, exigence de " +
-        "vérification). Sert typiquement à PRÉPARER un projet pour les agents dans la foulée de sa " +
-        "création. Pour le STATUT (cycle de vie), utiliser `vaks_set_project_status` ; pour le budget " +
-        "financier humain, `vaks_set_project_budget`. " +
-        "⚠️ Activer les agents (`agentsEnabled:true`) EXIGE un brief non vide (`agentContext` ou " +
-        "`agentBrief`) — le serveur refuse sinon. Réservé aux humains : les jetons d'agent n'ont pas " +
-        "la permission de modifier un projet.",
+        'Updates a project: metadata (name, description, dates, client), lifecycle `status`, AND ' +
+        'the entire AI agents configuration (activation, brief, guardrails, budget, verification ' +
+        'requirement). Typically used to PREPARE a project for agents right after its ' +
+        'creation. For the human financial budget, `vaks_project_finance`. ' +
+        'Lifecycle: the allowed `status` transitions depend on the current state — read ' +
+        '`allowedTransitions` via `vaks_list_projects`; the commercial-offer steps (OFFER_SENT / ' +
+        'accept / reject) go through other actions and are not covered here. ' +
+        '⚠️ Enabling agents (`agentsEnabled:true`) REQUIRES a non-empty brief (`agentContext` or ' +
+        '`agentBrief`) — the server refuses otherwise. Reserved for humans: agent tokens do not have ' +
+        'permission to modify a project.',
       inputSchema: {
         projectId: z.string().uuid(),
         name: z.string().min(1).optional(),
         description: z.string().nullable().optional(),
-        startDate: z.string().nullable().optional().describe('YYYY-MM-DD ou null pour effacer.'),
-        dueDate: z.string().nullable().optional().describe('YYYY-MM-DD ou null pour effacer.'),
-        clientId: z.string().uuid().nullable().optional().describe('Rattacher à un client, ou null pour détacher.'),
+        status: z
+          .enum(['DRAFT', 'ACTIVE', 'COMPLETED', 'ARCHIVED'])
+          .optional()
+          .describe('Lifecycle status (must be in the project\'s allowedTransitions) — optional.'),
+        startDate: z.string().nullable().optional().describe('YYYY-MM-DD or null to clear.'),
+        dueDate: z.string().nullable().optional().describe('YYYY-MM-DD or null to clear.'),
+        clientId: z.string().uuid().nullable().optional().describe('Attach to a client, or null to detach.'),
         agentsEnabled: z
           .boolean()
           .optional()
-          .describe('Ouvrir le projet aux agents IA. Exige un brief (agentContext/agentBrief) non vide.'),
+          .describe('Open the project to AI agents. Requires a non-empty brief (agentContext/agentBrief).'),
         agentContext: z
           .string()
           .nullable()
           .optional()
-          .describe('Brief libre (markdown) : rôle des agents, conventions de sortie, où déposer, hors-périmètre.'),
+          .describe('Free-form brief (markdown): agents\' role, output conventions, where to deposit, out-of-scope.'),
         agentBrief: z
           .object({
-            role: z.string().nullable().optional().describe("Rôle et mission de l'agent sur ce projet."),
-            outputConventions: z.string().nullable().optional().describe('Format, style, langue, structure attendue.'),
-            deliveryTarget: z.string().nullable().optional().describe('Où déposer les livrables.'),
-            outOfScope: z.string().nullable().optional().describe("Ce que l'agent ne doit surtout pas faire."),
+            role: z.string().nullable().optional().describe('The agent\'s role and mission on this project.'),
+            outputConventions: z.string().nullable().optional().describe('Expected format, style, language, structure.'),
+            deliveryTarget: z.string().nullable().optional().describe('Where to deposit the deliverables.'),
+            outOfScope: z.string().nullable().optional().describe('What the agent must absolutely not do.'),
           })
           .nullable()
           .optional()
-          .describe('Brief STRUCTURÉ (alternative à agentContext) — quatre champs courts.'),
+          .describe('STRUCTURED brief (alternative to agentContext) — four short fields.'),
         agentGuardrails: z
           .string()
           .nullable()
           .optional()
-          .describe("Garde-fous au niveau projet : ce qu'aucun agent ne doit faire ici."),
+          .describe('Project-level guardrails: what no agent must do here.'),
         agentAutoCloseOnApproval: z
           .boolean()
           .nullable()
           .optional()
-          .describe('Clôturer automatiquement une tâche à l\'approbation. null = hériter du réglage org.'),
+          .describe('Automatically close a task on approval. null = inherit the org setting.'),
         agentCostBudget: z
           .number()
           .min(0)
           .nullable()
           .optional()
-          .describe('Enveloppe totale de coût agent (€) du projet. null = pas de plafond.'),
+          .describe('Total agent cost envelope (€) for the project. null = no cap.'),
         stakes: z
           .enum(['low', 'medium', 'high', 'critical'])
           .nullable()
           .optional()
-          .describe("Enjeu du projet : dérive le niveau de preuve exigé des livrables d'agents."),
+          .describe('Project stakes: derives the proof level required of agent deliverables.'),
         verificationCapabilities: z
           .array(z.enum(['tool_output', 'agent_validator', 'ci_signed']))
           .nullable()
           .optional()
-          .describe('Méthodes de vérification mécaniques disponibles sur ce projet.'),
+          .describe('Mechanical verification methods available on this project.'),
         verificationMode: z
           .enum(['report_only', 'enforce'])
           .nullable()
           .optional()
-          .describe('report_only = journalise ; enforce = bloque sous le plancher. null = hérite de l\'org.'),
+          .describe('report_only = logs; enforce = blocks below the floor. null = inherits from the org.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -2127,211 +2322,12 @@ export function registerTools(server: McpServer, api: ApiClient, allowWrite: boo
   register(
     'vaks_delete_task',
     {
-      title: 'Supprimer une tâche',
-      description: 'Supprime (soft-delete) une tâche. Action destructive.',
+      title: 'Delete a task',
+      description: 'Deletes (soft-delete) a task. Destructive action.',
       inputSchema: { taskId: z.string().uuid() },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
     async ({ taskId }) => run(() => api.delete(`tasks/${taskId}`)),
   );
 
-  // ============================================================
-  // Labels (modif/suppr) — scope project:update
-  // ============================================================
-  register(
-    'vaks_update_label',
-    {
-      title: 'Modifier une étiquette',
-      description: 'Renomme / recolore une étiquette de projet.',
-      inputSchema: {
-        projectId: z.string().uuid(),
-        labelId: z.string().uuid(),
-        name: z.string().min(1).optional(),
-        color: z.string().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, labelId, ...body }) =>
-      run(() => api.patch(`projects/${projectId}/labels/${labelId}`, body)),
-  );
-  register(
-    'vaks_delete_label',
-    {
-      title: 'Supprimer une étiquette',
-      description: 'Supprime une étiquette de projet.',
-      inputSchema: { projectId: z.string().uuid(), labelId: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, labelId }) => run(() => api.delete(`projects/${projectId}/labels/${labelId}`)),
-  );
-
-  // ============================================================
-  // Dépendances (modif/suppr) — scope task:update
-  // ============================================================
-  register(
-    'vaks_update_dependency',
-    {
-      title: 'Modifier une dépendance',
-      description: 'Change le type (FS/SS/FF/SF) ou le décalage (lagDays) d\'une dépendance.',
-      inputSchema: {
-        id: z.string().uuid(),
-        type: z.enum(['FS', 'SS', 'FF', 'SF']).optional(),
-        lagDays: z.number().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ id, ...body }) => run(() => api.patch(`dependencies/${id}`, body)),
-  );
-  register(
-    'vaks_delete_dependency',
-    {
-      title: 'Supprimer une dépendance',
-      description: 'Supprime un lien de dépendance entre deux tâches.',
-      inputSchema: { id: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ id }) => run(() => api.delete(`dependencies/${id}`)),
-  );
-
-  // ============================================================
-  // Saisies de temps (modif/suppr) — scope time:log
-  // ============================================================
-  register(
-    'vaks_update_time_entry',
-    {
-      title: 'Modifier une saisie de temps',
-      description: 'Met à jour une saisie de temps existante.',
-      inputSchema: {
-        id: z.string().uuid(),
-        date: z.string().optional().describe('YYYY-MM-DD.'),
-        durationMinutes: z.number().int().positive().optional(),
-        description: z.string().nullable().optional(),
-        overtimeMinutes: z.number().int().min(0).optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ id, ...body }) => run(() => api.patch(`time-entries/${id}`, body)),
-  );
-  register(
-    'vaks_delete_time_entry',
-    {
-      title: 'Supprimer une saisie de temps',
-      description: 'Supprime une saisie de temps.',
-      inputSchema: { id: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ id }) => run(() => api.delete(`time-entries/${id}`)),
-  );
-
-  // ============================================================
-  // Compétences (écriture avancée) — scopes project:view / project:update / task:update
-  // ============================================================
-  register(
-    'vaks_resolve_skill_request',
-    {
-      title: 'Traiter une demande de compétence',
-      description:
-        'Met à jour le statut d\'une demande de compétence (OPEN→ACK→RESOLVED, ou REJECTED) — action du lead d\'équipe.',
-      inputSchema: {
-        id: z.string().uuid(),
-        status: z.enum(['OPEN', 'ACK', 'RESOLVED', 'REJECTED']),
-        note: z.string().optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ id, ...body }) => run(() => api.patch(`skill-requests/${id}/status`, body)),
-  );
-  register(
-    'vaks_update_skill',
-    {
-      title: 'Modifier une compétence du catalogue',
-      description: 'Met à jour une compétence (nom, description, couleur, catégorie, alias).',
-      inputSchema: {
-        skillId: z.string().uuid(),
-        name: z.string().min(1).optional(),
-        description: z.string().optional(),
-        color: z.string().optional(),
-        category: z.string().optional(),
-        aliases: z.array(z.string()).optional(),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ skillId, ...body }) => run(() => api.patch(`skills/${skillId}`, body)),
-  );
-  register(
-    'vaks_delete_skill',
-    {
-      title: 'Supprimer une compétence du catalogue',
-      description: 'Supprime (soft-delete) une compétence du catalogue.',
-      inputSchema: { skillId: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ skillId }) => run(() => api.delete(`skills/${skillId}`)),
-  );
-  register(
-    'vaks_remove_user_skill',
-    {
-      title: 'Retirer une compétence d\'un utilisateur',
-      description: 'Retire une compétence du profil d\'un utilisateur. (Pour l\'ajouter/ajuster : `vaks_set_user_skill`.)',
-      inputSchema: { userId: z.string().uuid(), skillId: z.string().uuid() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ userId, skillId }) => run(() => api.delete(`users/${userId}/skills/${skillId}`)),
-  );
-  register(
-    'vaks_set_project_skills',
-    {
-      title: 'Définir les compétences requises d\'un projet',
-      description: 'Remplace l\'ensemble des compétences requises d\'un projet par la liste fournie.',
-      inputSchema: {
-        projectId: z.string().uuid(),
-        skillIds: z.array(z.string().uuid()).describe('Liste complète des compétences requises (remplace l\'existant).'),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ projectId, skillIds }) => run(() => api.put(`projects/${projectId}/skills`, { skillIds })),
-  );
-  register(
-    'vaks_set_team_skills',
-    {
-      title: 'Définir les compétences couvertes par une équipe',
-      description: 'Remplace l\'ensemble des compétences couvertes par une équipe par la liste fournie.',
-      inputSchema: {
-        teamId: z.string().uuid(),
-        skillIds: z.array(z.string().uuid()).describe('Liste complète (remplace l\'existant).'),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ teamId, skillIds }) => run(() => api.put(`teams/${teamId}/skills`, { skillIds })),
-  );
-  register(
-    'vaks_set_task_required_skills',
-    {
-      title: 'Définir les compétences requises d\'une tâche',
-      description: 'Remplace les compétences requises d\'une tâche (avec niveau optionnel par compétence).',
-      inputSchema: {
-        taskId: z.string().uuid(),
-        items: z
-          .array(z.object({ skillId: z.string().uuid(), level: z.number().int().min(1).max(5).optional() }))
-          .describe('Liste complète (remplace l\'existant).'),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ taskId, items }) => run(() => api.put(`tasks/${taskId}/required-skills`, { items })),
-  );
-  register(
-    'vaks_apply_skill_pack',
-    {
-      title: 'Appliquer un pack de compétences',
-      description:
-        'Installe / met à jour un pack de compétences au catalogue (crée les manquantes). Lister les packs via `vaks_read` sur `skills/packs`.',
-      inputSchema: {
-        packId: z.string().describe('Identifiant du pack (ex. aws, backend, methodology…).'),
-        force: z.boolean().optional().describe('Re-synchroniser même les compétences précédemment supprimées.'),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ packId, force }) =>
-      run(() => api.post(`skills/packs/${packId}/apply${force ? '?force=1' : ''}`, {})),
-  );
 }

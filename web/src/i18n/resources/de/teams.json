@@ -151,6 +151,7 @@
     "usageCost": "Gesamtkosten",
     "usageAvg": "Ø / Aufgabe",
     "usageTokens": "Token",
+    "usageCredits": "Credits",
     "usageEmpty": "Noch kein Lauf gemeldet.",
     "projects": "Aktive Projekte",
     "projectsEmpty": "Keinem aktiven Projekt zugewiesen.",

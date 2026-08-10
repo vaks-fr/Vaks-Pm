@@ -619,6 +619,10 @@ export default function Workspace() {
   const [myPermissions, setMyPermissions] = useState<string[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
   const [managesAnyProject, setManagesAnyProject] = useState(false);
+  // Team lead d'au moins une équipe (ou admin), renvoyé par `/auth/me`. Conditionne
+  // la visibilité de l'entrée de nav « Team KPI » — l'endpoint la réserve déjà aux
+  // Team Managers, on masque juste l'item plutôt que d'offrir un clic qui échoue.
+  const [isTeamLead, setIsTeamLead] = useState(false);
   // Bump pour re-render quand les colonnes du board (binding module `data.ts`)
   // changent hors du flux `setTasks` — ex. édition de la limite WIP.
   const [boardVersion, setBoardVersion] = useState(0);
@@ -678,6 +682,7 @@ export default function Workspace() {
         setMyPermissions(meResp?.permissions ?? []);
         setIsAdmin(!!meResp?.isAdmin);
         setManagesAnyProject(!!meResp?.managesAnyProject);
+        setIsTeamLead(!!meResp?.isTeamLead);
         setLoading(false);
       } catch (e) {
         if (cancelled) return;
@@ -1631,16 +1636,18 @@ export default function Workspace() {
           <Icon name="zap" size={18} />
           <span className="nav-label">{tr('nav.agents', { defaultValue: 'AI Agents' })}</span>
         </button>
-        <button
-          className={'nav-item' + (view === 'teamreport' ? ' nav-on' : '')}
-          onClick={() => {
-            setView('teamreport');
-            setDrawer(false);
-          }}
-        >
-          <Icon name="gauge" size={18} />
-          <span className="nav-label">{tr('nav.teamKpi')}</span>
-        </button>
+        {isTeamLead && (
+          <button
+            className={'nav-item' + (view === 'teamreport' ? ' nav-on' : '')}
+            onClick={() => {
+              setView('teamreport');
+              setDrawer(false);
+            }}
+          >
+            <Icon name="gauge" size={18} />
+            <span className="nav-label">{tr('nav.teamKpi')}</span>
+          </button>
+        )}
         {canSeeProjectsPanel && (
           <button
             className={'nav-item' + (view === 'projects' ? ' nav-on' : '')}

@@ -12,10 +12,17 @@ import { palette } from './finance-charts';
 // SANS pastilles et labels collés (audit UI 2026-08-02). On l'importe ici pour que
 // tout consommateur de ces charts ait le style, quelle que soit la vue.
 import './finances.css';
+// Le FOLD des statuts agents et `foldedStatusCount` vivent dans le module
+// central `taskStatus.ts` (source unique de vérité). On les ré-exporte ici
+// pour ne pas casser les consommateurs (TeamReportView) qui les importaient
+// depuis ce fichier.
+export { foldedStatusCount } from './taskStatus';
 
 /* ---- task status palette (shared by CFD + status columns) ----
    Labels are resolved via i18n at call sites; the map carries colors +
-   the translation key for the status label. */
+   the translation key for the status label. Palette d'affichage propre à ces
+   graphes (5 colonnes canoniques) — distincte des teintes Gantt / couleurs
+   Reports ; le fold, lui, est centralisé. */
 export const TASK_STATUS_META: Record<string, { labelKey: string; color: string }> = {
   TODO: { labelKey: 'reports:charts.status.todo', color: 'oklch(0.7 0.02 260)' },
   IN_PROGRESS: { labelKey: 'reports:charts.status.inProgress', color: 'oklch(0.62 0.14 250)' },
@@ -24,26 +31,6 @@ export const TASK_STATUS_META: Record<string, { labelKey: string; color: string 
   DONE: { labelKey: 'reports:charts.status.done', color: 'oklch(0.62 0.13 155)' },
 };
 export const STATUS_ORDER = ['TODO', 'IN_PROGRESS', 'IN_REVIEW', 'ON_HOLD', 'DONE'];
-
-/** Statuts agents repliés sur leurs colonnes canoniques (même mapping que le
- *  Kanban : CLAIMED→TODO, CHANGES_REQUESTED→IN_PROGRESS, APPROVED→IN_REVIEW).
- *  Les rapports n'affichent que les 5 statuts de base. */
-const AGENT_STATUS_FOLD: Record<string, string> = {
-  CLAIMED: 'TODO',
-  CHANGES_REQUESTED: 'IN_PROGRESS',
-  APPROVED: 'IN_REVIEW',
-};
-
-/** Compteur d'une colonne canonique en **repliant** les statuts agents — sinon
- *  les tâches d'agents (CLAIMED/CHANGES_REQUESTED/APPROVED) sont silencieusement
- *  omises des totaux de statut (audit frontend 2026-08-02). */
-export function foldedStatusCount(counts: Record<string, number>, canonical: string): number {
-  let total = counts[canonical] ?? 0;
-  for (const [agentStatus, base] of Object.entries(AGENT_STATUS_FOLD)) {
-    if (base === canonical) total += counts[agentStatus] ?? 0;
-  }
-  return total;
-}
 
 const MONTH_KEYS = ['', 'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 

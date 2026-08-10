@@ -105,6 +105,14 @@
     "dueBeforeStart": "Due date is before the start date.",
     "span": "{{from}} → {{to}} · <0>{{days}}</0> days · {{weeks}} weeks",
     "description": "Description",
+    "clientStatus": "Client status report",
+    "clientStatusHint": "Health and summary are used in the client-facing “Project status (PowerPoint)” export.",
+    "statusSummaryPlaceholder": "Status summary for the client: what progressed, key points, next steps…",
+    "health": {
+      "onTrack": "On track",
+      "atRisk": "At risk",
+      "offTrack": "Off track"
+    },
     "client": "Client",
     "noClient": "— No client —",
     "saved": "Updated {{key}}",

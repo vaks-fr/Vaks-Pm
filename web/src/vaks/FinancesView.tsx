@@ -369,7 +369,7 @@ export function FinancesView({ projectId, pushToast }: Props) {
               <div className="fin-tr fin-th">
                 <span>{t('finances:project.agentRates.agent')}</span>
                 <span className="ar">{t('finances:project.agentRates.billPerKTokens')}</span>
-                <span className="ar">{t('finances:project.agentRates.kTokens')}</span>
+                <span className="ar">{t('finances:project.agentRates.kUnits')}</span>
                 <span className="ar">{t('finances:project.agentRates.runs')}</span>
                 <span className="ar">{t('finances:project.agentRates.cost')}</span>
                 <span className="ar">{t('finances:project.agentRates.billed')}</span>
@@ -399,8 +399,8 @@ export function FinancesView({ projectId, pushToast }: Props) {
                 <span className="ar" />
                 <span className="ar mono">{agentRates.totalKTokens}</span>
                 <span className="ar" />
-                <span className="ar mono">{money(agentRates.totalCost)}</span>
-                <span className="ar mono fin-bill">{money(agentRates.totalBilled)}</span>
+                <span className="ar mono">{fmtMoney(agentRates.totalCost, cur)}</span>
+                <span className="ar mono fin-bill">{fmtMoney(agentRates.totalBilled, cur)}</span>
               </div>
             </div>
           </div>
@@ -609,7 +609,12 @@ function AgentRateRow({
             {inherited && <span className="fin-member-role">{t('finances:project.agentRates.defaultRate')}</span>}
             {row.billRatePerKTokens == null && <span className="fin-member-role">{t('finances:project.agentRates.noRate')}</span>}
           </div>
-          {row.model && <div className="fin-member-role truncate">{row.model}</div>}
+          {(row.model || row.billingUnit === 'credits') && (
+            <div className="fin-member-role truncate">
+              {row.model}
+              {row.billingUnit === 'credits' && `${row.model ? ' · ' : ''}${t('finances:project.agentRates.unitCredits')}`}
+            </div>
+          )}
         </div>
       </div>
       <div className="ar">
@@ -627,8 +632,10 @@ function AgentRateRow({
       </div>
       <div className="ar mono fin-dim">{row.kTokens > 0 ? row.kTokens : '—'}</div>
       <div className="ar mono fin-dim">{row.runs || '—'}</div>
-      <div className="ar mono">{row.cost ? money(row.cost) : '—'}</div>
-      <div className="ar mono fin-bill">{row.billed != null && row.billed > 0 ? money(row.billed) : '—'}</div>
+      {/* Coûts agents en CENTIMES : `money` arrondit à l'euro (budgets projet),
+          ce qui écrase un coût d'agent < 1 € en « €0.00 ». `fmtMoney` garde 2 déc. */}
+      <div className="ar mono">{row.cost ? fmtMoney(row.cost, cur) : '—'}</div>
+      <div className="ar mono fin-bill">{row.billed != null && row.billed > 0 ? fmtMoney(row.billed, cur) : '—'}</div>
     </div>
   );
 }

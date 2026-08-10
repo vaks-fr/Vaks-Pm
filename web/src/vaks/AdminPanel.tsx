@@ -46,6 +46,7 @@ import TicketingConnectorsSection from './TicketingConnectorsSection';
 import AgentsSection from './AgentsSection';
 import AgentPoliciesSection from './AgentPoliciesSection';
 import AgentRunsSection from './AgentRunsSection';
+import AgentWebhookSubscriptionsSection from './AgentWebhookSubscriptionsSection';
 import AgentConnectorsSection from './AgentConnectorsSection';
 import CiConnectorsSection from './CiConnectorsSection';
 import AgentTrustIssuersSection from './AgentTrustIssuersSection';
@@ -227,6 +228,7 @@ const SECTION_KEY: Record<string, string> = {
   Agents: 'agents',
   Policies: 'agentPolicies',
   'Usage & cost ledger': 'agentRuns',
+  'Agent nudges': 'agentNudges',
   Teams: 'teams',
   Roles: 'roles',
   'Single sign-on': 'sso',
@@ -2170,6 +2172,11 @@ const TEMPLATE_PLACEHOLDERS: Record<string, string[]> = {
     'milestones', 'stakeholders', 'sponsor', 'assumptions', 'constraints',
     'risks', 'budgetEstimate', 'successCriteria',
   ],
+  CLIENT_STATUS_PPTX: [
+    'projectKey', 'projectName', 'client', 'startDate', 'dueDate', 'reportDate',
+    'preparedBy', 'health', 'statusSummary', 'progressPct', 'totalTasks',
+    'doneTasks', 'overdueTasks',
+  ],
 };
 
 function TemplatePlaceholders({
@@ -2271,11 +2278,22 @@ function DocumentTemplatesSection({
     kind: import('@vaks-pm/shared').DocumentTemplateKind;
     label: string;
     desc: string;
+    ext: string;
+    accept: string;
   }> = [
     {
       kind: 'CHARTER',
       label: t('docTemplates.charterLabel'),
       desc: t('docTemplates.charterDesc'),
+      ext: '.docx',
+      accept: '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    },
+    {
+      kind: 'CLIENT_STATUS_PPTX',
+      label: t('docTemplates.clientStatusLabel'),
+      desc: t('docTemplates.clientStatusDesc'),
+      ext: '.pptx',
+      accept: '.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation',
     },
   ];
 
@@ -2374,10 +2392,10 @@ function DocumentTemplatesSection({
                 className="btn btn-accent"
                 style={{ cursor: busy ? 'wait' : 'pointer' }}
               >
-                {busy ? t('docTemplates.uploading') : tpl ? t('docTemplates.replaceTemplate') : t('docTemplates.uploadTemplate')}
+                {busy ? t('docTemplates.uploading') : tpl ? t('docTemplates.replaceTemplate', { ext: k.ext }) : t('docTemplates.uploadTemplate', { ext: k.ext })}
                 <input
                   type="file"
-                  accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  accept={k.accept}
                   disabled={busy}
                   onChange={(e) => {
                     const f = e.target.files?.[0];
@@ -3978,7 +3996,7 @@ export interface AdminPanelProps {
 }
 
 /** Sections réservées à l'« AI administrator » (mode restreint). */
-const AGENT_SECTION_KINDS = new Set(['agentlist', 'agentconnectors', 'agentpolicies', 'agentruns', 'ciconnectors', 'agenttrustissuers']);
+const AGENT_SECTION_KINDS = new Set(['agentlist', 'agentconnectors', 'agentpolicies', 'agentruns', 'agentnudges', 'ciconnectors', 'agenttrustissuers']);
 
 export function AdminPanel({ onExit, lockedNoSeat, agentAdminOnly }: AdminPanelProps) {
   const { t } = useTranslation('admin');
@@ -4585,6 +4603,7 @@ export function AdminPanel({ onExit, lockedNoSeat, agentAdminOnly }: AdminPanelP
     if (sec.kind === 'agentlist') return <AgentsSection flash={flash} />;
     if (sec.kind === 'agentpolicies') return <AgentPoliciesSection flash={flash} />;
     if (sec.kind === 'agentruns') return <AgentRunsSection flash={flash} />;
+    if (sec.kind === 'agentnudges') return <AgentWebhookSubscriptionsSection flash={flash} />;
     if (sec.kind === 'agentconnectors') return <AgentConnectorsSection flash={flash} />;
     if (sec.kind === 'ciconnectors') return <CiConnectorsSection flash={flash} />;
     if (sec.kind === 'agenttrustissuers') return <AgentTrustIssuersSection flash={flash} />;

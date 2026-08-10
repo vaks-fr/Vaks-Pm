@@ -1,5 +1,5 @@
 import { IsArray, IsBoolean, IsDateString, IsEnum, IsIn, IsNumber, IsObject, IsOptional, IsString, Length, Min, ValidateIf } from 'class-validator';
-import { ProjectStatus } from '@db';
+import { ProjectStatus, ProjectHealth } from '@db';
 
 export class UpdateProjectDto {
   /**
@@ -23,6 +23,19 @@ export class UpdateProjectDto {
   @IsOptional()
   @IsEnum(ProjectStatus)
   status?: ProjectStatus;
+
+  /** Santé projet (RAG) pour le point de statut client. `null` = effacer. */
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsEnum(ProjectHealth)
+  statusHealth?: ProjectHealth | null;
+
+  /** Résumé narratif du statut (rendu dans le deck client). `null`/'' = effacer. */
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  @Length(0, 4000)
+  statusSummary?: string | null;
 
   @IsOptional()
   @ValidateIf((_, v) => v !== null)

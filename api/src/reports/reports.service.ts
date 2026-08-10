@@ -1,13 +1,17 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, TaskStatus } from '@db';
+import { billingUnitForProvider, type AgentBillingUnit } from '@vaks-pm/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProjectAccessService } from '../rbac/project-access.service';
 import { CapacityService } from '../workload/capacity.service';
+import { WorkloadService } from '../workload/workload.service';
 import { FinanceService } from '../finance/finance.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { CacheService } from '../common/cache.service';
+import { S3Service } from '../storage/s3.service';
 import { blankStatusCounts } from '../common/task-status.util';
 import { BurndownDto, TimeBreakdownDto } from './dto/reports.dto';
+import type { StatusDeckModel } from './status-deck';
 
 @Injectable()
 export class ReportsService {
@@ -15,9 +19,11 @@ export class ReportsService {
     private readonly prisma: PrismaService,
     private readonly access: ProjectAccessService,
     private readonly capacity: CapacityService,
+    private readonly workload: WorkloadService,
     private readonly finance: FinanceService,
     private readonly settings: AdminSettingsService,
     private readonly cache: CacheService,
+    private readonly s3: S3Service,
   ) {}
 
   // ============================================================
@@ -260,6 +266,7 @@ export class ReportsService {
       perAgent: [] as {
         agentId: string;
         name: string;
+        billingUnit: AgentBillingUnit;
         tasksCompleted: number;
         deliverables: number;
         approved: number;
@@ -275,11 +282,12 @@ export class ReportsService {
     // attribué). kind est indexé (organizationId, kind).
     const agents = await this.prisma.user.findMany({
       where: { organizationId: orgId, kind: 'AGENT' },
-      select: { id: true, name: true },
+      select: { id: true, name: true, modelProvider: true },
     });
     if (agents.length === 0) return base;
     const agentIds = agents.map((a) => a.id);
     const nameOf = new Map(agents.map((a) => [a.id, a.name]));
+    const providerOf = new Map(agents.map((a) => [a.id, a.modelProvider]));
 
     const [doneEvents, delivs, runAgg] = await Promise.all([
       this.prisma.taskStatusHistory.findMany({
@@ -392,6 +400,7 @@ export class ReportsService {
       .map(([agentId, s]) => ({
         agentId,
         name: nameOf.get(agentId) ?? agentId,
+        billingUnit: billingUnitForProvider(providerOf.get(agentId)),
         tasksCompleted: s.tasksCompleted,
         deliverables: s.deliverables,
         approved: s.approvedV.length,
@@ -670,6 +679,190 @@ export class ReportsService {
         })),
       })),
     };
+  }
+
+  // ============================================================
+  // Statut projet composite — agrège en UN aller-retour ce que 4 endpoints
+  // séparés (stats + due-adherence + tasks-in-window + workload) rendraient
+  // en 4. Pensé pour un tool MCP unique (`vaks_project_status`) : côté
+  // Copilot Studio, la facturation est au TOOL appelé, pas à l'appel API
+  // interne — un composite coûte 1 action au lieu de 4-5.
+  // ============================================================
+  async projectStatus(
+    orgId: string,
+    projectId: string,
+    requester: { userId: string; isAdmin: boolean },
+    opts: { from?: string; to?: string } = {},
+  ) {
+    // Défaut serveur : une semaine de recul + un mois à venir, pour ne pas
+    // exiger de dates côté appelant (agent ou humain via Copilot).
+    const today = startOfToday();
+    const from = opts.from ?? addDays(today, -7).toISOString().slice(0, 10);
+    const to = opts.to ?? addDays(today, 30).toISOString().slice(0, 10);
+    if (toDateOnly(to).getTime() < toDateOnly(from).getTime()) {
+      throw new BadRequestException("'from' doit précéder 'to'");
+    }
+    const window = { from, to } as BurndownDto;
+
+    const [stats, dueAdherence, tasksInWindow, workload] = await Promise.all([
+      this.projectStats(orgId, projectId),
+      this.dueAdherence(orgId, projectId),
+      this.tasksInWindow(orgId, projectId, window),
+      // Requester {userId, isAdmin} propagé : un non-admin ne doit voir que
+      // le workload de ses propres équipes (self-scope, cf. workloadGrid).
+      this.workload.workloadGrid(orgId, requester, { from, to, projectId }),
+    ]);
+
+    return { projectId, from, to, stats, dueAdherence, tasksInWindow, workload };
+  }
+
+  // ============================================================
+  // Point de statut client (deck PPTX) — modèle de contenu
+  // ============================================================
+  /**
+   * Agrège le contenu du POINT DE STATUT destiné au client. Volontairement
+   * dépouillé : statut éditorial, avancement, jalons, prochaines étapes, risques.
+   * **Exclut** temps passé, agents IA, skill gap, coûts internes — c'est un
+   * livrable client, pas un rapport d'ops (≠ `report.pdf`).
+   */
+  async statusDeckModel(
+    orgId: string,
+    projectId: string,
+    opts: { preparedById: string; preparedByFallback: string; lang: string },
+  ): Promise<StatusDeckModel> {
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, organizationId: orgId, deletedAt: null, kind: 'STANDARD' },
+      select: {
+        key: true,
+        name: true,
+        startDate: true,
+        dueDate: true,
+        statusHealth: true,
+        statusSummary: true,
+        client: { select: { name: true, company: true } },
+      },
+    });
+    if (!project) throw new NotFoundException('Projet introuvable');
+
+    const tasks = await this.prisma.task.findMany({
+      where: { projectId, organizationId: orgId, deletedAt: null },
+      select: {
+        title: true,
+        status: true,
+        dueDate: true,
+        isMilestone: true,
+        assignees: { select: { user: { select: { name: true } } } },
+      },
+      orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    const now = new Date();
+    const isDone = (s: TaskStatus) => s === TaskStatus.DONE;
+    const isOverdue = (t: { dueDate: Date | null; status: TaskStatus }) =>
+      !!t.dueDate && !isDone(t.status) && t.dueDate.getTime() < now.getTime();
+    const fmt = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : '');
+
+    const total = tasks.length;
+    const done = tasks.filter((t) => isDone(t.status)).length;
+    const overdueTasks = tasks.filter((t) => !t.isMilestone && isOverdue(t));
+
+    const milestones = tasks.filter((t) => t.isMilestone);
+    const milestonesDone = milestones
+      .filter((t) => isDone(t.status))
+      .map((t) => ({ name: t.title, date: fmt(t.dueDate) }));
+    const milestonesAtRisk = milestones
+      .filter((t) => isOverdue(t))
+      .map((t) => ({ name: t.title, date: fmt(t.dueDate) }));
+    const milestonesUpcoming = milestones
+      .filter((t) => !isDone(t.status) && !isOverdue(t))
+      .map((t) => ({ name: t.title, date: fmt(t.dueDate) }));
+
+    // Prochaines étapes : tâches non terminées, avec échéance, les plus proches.
+    const nextSteps = tasks
+      .filter((t) => !t.isMilestone && !isDone(t.status) && !!t.dueDate)
+      .slice(0, 8)
+      .map((t) => ({
+        name: t.title,
+        due: fmt(t.dueDate),
+        assignees: t.assignees.map((a) => a.user.name).join(', '),
+      }));
+
+    const clientName = project.client
+      ? `${project.client.name}${project.client.company ? ` (${project.client.company})` : ''}`
+      : '';
+
+    const preparer = await this.prisma.user.findFirst({
+      where: { id: opts.preparedById, organizationId: orgId },
+      select: { name: true },
+    });
+
+    // Données de graphiques (best-effort — un deck sort même si l'un échoue).
+    const due = await this.dueAdherence(orgId, projectId).catch(() => null);
+    const bFrom = project.startDate
+      ? project.startDate.toISOString().slice(0, 10)
+      : new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10);
+    const bEndDate = project.dueDate && project.dueDate.getTime() > now.getTime() ? project.dueDate : now;
+    const bTo = bEndDate.toISOString().slice(0, 10);
+    const burn =
+      bFrom <= bTo
+        ? await this.burndown(orgId, projectId, { from: bFrom, to: bTo } as BurndownDto).catch(() => null)
+        : null;
+    // Sous-échantillonne le burndown à ~24 points max (lisibilité du chart).
+    const burndown =
+      burn && burn.totalScopeHours > 0
+        ? {
+            totalScope: burn.totalScopeHours,
+            points: sampleEvenly(burn.points, 24).map((p) => ({
+              date: p.date,
+              ideal: p.idealRemainingHours,
+              actual: p.actualRemainingHours,
+            })),
+          }
+        : null;
+
+    return {
+      projectKey: project.key,
+      projectName: project.name,
+      client: clientName,
+      startDate: fmt(project.startDate),
+      dueDate: fmt(project.dueDate),
+      reportDate: now.toISOString().slice(0, 10),
+      preparedBy: preparer?.name || opts.preparedByFallback,
+      lang: opts.lang,
+      health: project.statusHealth ?? null,
+      statusSummary: project.statusSummary ?? '',
+      progressPct: total === 0 ? 0 : Math.round((done / total) * 100),
+      totalTasks: total,
+      doneTasks: done,
+      overdueTasks: overdueTasks.length,
+      milestonesDone,
+      milestonesUpcoming,
+      milestonesAtRisk,
+      nextSteps,
+      dueAdherence: due
+        ? { onTime: due.onTime, late: due.late, noDeadline: due.noDeadline, onTimePct: due.onTimePct, totalCompleted: due.totalCompleted }
+        : { onTime: 0, late: 0, noDeadline: 0, onTimePct: 0, totalCompleted: 0 },
+      burndown,
+    };
+  }
+
+  /**
+   * Charge le template PPTX de statut client uploadé par l'org (kind
+   * `CLIENT_STATUS_PPTX`), ou `null` si aucun → le builder retombe sur le deck
+   * par défaut brandé Vaks.
+   */
+  async loadClientStatusTemplate(orgId: string): Promise<Buffer | null> {
+    const row = await this.prisma.organizationDocumentTemplate.findUnique({
+      where: { organizationId_kind: { organizationId: orgId, kind: 'CLIENT_STATUS_PPTX' } },
+      select: { storageKey: true },
+    });
+    if (!row) return null;
+    try {
+      return await this.s3.getObjectBuffer(this.s3.buckets.templates, row.storageKey);
+    } catch {
+      // Blob manquant (template supprimé côté S3 sans la ligne) → deck par défaut.
+      return null;
+    }
   }
 
   // ============================================================
@@ -988,4 +1181,14 @@ function daysBetween(a: Date, b: Date): number {
 }
 function round(n: number): number {
   return Math.round(n * 10) / 10;
+}
+
+/** Sous-échantillonne un tableau à au plus `max` éléments, bornes incluses,
+ *  répartis uniformément (pour garder un chart lisible). */
+function sampleEvenly<T>(arr: T[], max: number): T[] {
+  if (arr.length <= max) return arr;
+  const out: T[] = [];
+  const step = (arr.length - 1) / (max - 1);
+  for (let i = 0; i < max; i++) out.push(arr[Math.round(i * step)]);
+  return out;
 }

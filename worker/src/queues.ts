@@ -2,6 +2,7 @@
 export const QUEUES = {
   EMAIL: 'email',
   WEBHOOK: 'webhook',
+  AGENT_NUDGE: 'agent-nudge',
   AUDIT_SYSLOG: 'audit-syslog',
   TEAMS: 'teams',
   EXPORT: 'export',
@@ -51,6 +52,32 @@ export interface WebhookJob {
   payload: unknown;
   /** Slug du tenant (mode pooled) — renvoyé à l'API en header `X-Tenant-Slug`
    *  pour router les appels internes vers la base du tenant. */
+  tenantSlug?: string | null;
+}
+
+/**
+ * Nudge sortant vers un agent IA (chantier « réveil sur assignation »). Le
+ * worker relit la conf de la souscription via `/internal/agent-nudges/:id`, POST
+ * un signal léger `{ event, taskId, projectId, agentId }` signé HMAC vers le
+ * callback du provider, puis rapporte l'issue. Shape dupliqué volontairement
+ * (pas de dépendance partagée, comme `WebhookJob`).
+ */
+export interface AgentNudgeJob {
+  deliveryId: string;
+  subscriptionId: string;
+  organizationId: string;
+  event: string;
+  taskId: string | null;
+  projectId: string | null;
+  agentId: string;
+  /** Email/nom de l'agent — relayés en body + headers `X-Vaks-Agent-*` pour le
+   *  dispatch côté provider (un seul flow qui branche sur l'email). */
+  agentEmail: string | null;
+  agentName: string | null;
+  /** CIDR internes approuvés (mode on-prem) → autorisent les IP privées matchantes
+   *  côté safe-fetch. Vides / absents = anti-SSRF strict. Déjà gatés côté API. */
+  allowedInternalCidrs?: string[];
+  /** Slug tenant (pooled) → header `X-Tenant-Slug` sur les appels internes. */
   tenantSlug?: string | null;
 }
 

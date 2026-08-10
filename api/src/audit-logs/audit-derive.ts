@@ -51,6 +51,22 @@ export function deriveAction(
   return { action, resource: base };
 }
 
+/** Mode de journalisation forensic des lectures (`OrgSetting audit.logReads`). */
+export type AuditReadMode = 'off' | 'agents' | 'all';
+
+/**
+ * Décide si une requête de LECTURE (GET, non `@Audited`) doit être capturée,
+ * selon le mode de l'org et la nature du principal. Pure : testable sans Nest.
+ * `off` (défaut) → jamais ; `all` → toujours ; `agents` → uniquement si le
+ * principal est un compte agent (même critère que `isAgentPrincipal` dans
+ * l'interceptor : `viaApiToken && actorKind === 'AGENT'`).
+ */
+export function shouldCaptureRead(mode: AuditReadMode, isAgentPrincipal: boolean): boolean {
+  if (mode === 'all') return true;
+  if (mode === 'agents') return isAgentPrincipal;
+  return false;
+}
+
 /** Valeur du DERNIER `:param` du pattern de route (l'entité la plus spécifique). */
 export function lastParamValue(
   routePattern: string,

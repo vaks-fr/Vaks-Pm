@@ -13,8 +13,9 @@ import type {
   GanttTaskDto,
   TaskAssigneeDto,
 } from '@vaks-pm/shared';
-import { DependencyType, TaskStatus } from '@vaks-pm/shared';
+import { DependencyType } from '@vaks-pm/shared';
 import { api } from '../api/client';
+import { statusMeta } from './taskStatus';
 import { useAuth } from '../auth/AuthContext';
 import { useFormat } from '../lib/format';
 import { Avatar, Icon } from './primitives';
@@ -46,17 +47,6 @@ const GROUP_H = 32;
 const MILE_H = 42;
 const ROW_H = 38;
 const BAR_H = 24;
-
-const STATUS_HUE: Record<TaskStatus, number> = {
-  [TaskStatus.TODO]: 250,
-  [TaskStatus.CLAIMED]: 250,
-  [TaskStatus.IN_PROGRESS]: 240,
-  [TaskStatus.CHANGES_REQUESTED]: 240,
-  [TaskStatus.IN_REVIEW]: 90,
-  [TaskStatus.APPROVED]: 90,
-  [TaskStatus.ON_HOLD]: 300,
-  [TaskStatus.DONE]: 150,
-};
 
 const DOW = ['D', 'L', 'M', 'M', 'J', 'V', 'S'];
 
@@ -809,7 +799,7 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
     const widthDays = Math.max(1, daysBetween(sStart, sEnd));
     const left = xAtDay(startIdx);
     const w = widthDays * dayW;
-    const hue = STATUS_HUE[t.status];
+    const hue = statusMeta(t.status).hue;
     const done = t.progressPct >= 100;
     const assigneeDto = t.assignees[0];
     const assignee = assigneeDto ? assigneeUser(assigneeDto) : undefined;
@@ -1827,7 +1817,7 @@ function GanttMobile({ data, onOpen }: { data: GanttDto; onOpen: (id: string) =>
         const e = parseDay(tk.scheduledEnd);
         const left = clamp(daysBetween(projStart, s) / span, 0, 1) * 100;
         const width = Math.max(clamp(daysBetween(s, e) / span, 0, 1) * 100, 2);
-        const hue = STATUS_HUE[tk.status] ?? 250;
+        const hue = statusMeta(tk.status).hue;
         const color = tk.critical ? 'var(--c-over)' : `oklch(0.62 0.15 ${hue})`;
         const prog = Math.round(tk.progressPct);
         return (

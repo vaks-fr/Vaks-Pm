@@ -10,6 +10,7 @@ import type {
 import { AGENT_POLICY_ACTIONS, AGENT_TASK_STAKES, AGENT_TRUST_LEVELS } from '@vaks-pm/shared';
 import { api } from '../api/client';
 import { Icon } from './primitives';
+import { ModelPricingPanel } from './AgentsSection';
 
 type Flash = (msg: string) => void;
 
@@ -103,6 +104,14 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
   const [preauthorize, setPreauthorize] = useState(false);
   const [leaseMinutes, setLeaseMinutes] = useState(30);
   const [budgetBreaker, setBudgetBreaker] = useState(false);
+  // Mesure du coût : secret partagé passerelle (existence seule côté serveur) +
+  // nouvelle valeur à écrire (vide = conserver).
+  const [gatewaySecretSet, setGatewaySecretSet] = useState(false);
+  const [gatewaySecretInput, setGatewaySecretInput] = useState('');
+  // Estimation coût Copilot (agents crédits non mesurables).
+  const [copilotEnabled, setCopilotEnabled] = useState(false);
+  const [copilotBaseline, setCopilotBaseline] = useState(7);
+  const [copilotCreditPrice, setCopilotCreditPrice] = useState(0);
   /**
    * Brief agent par défaut de l'organisation. Hérité CHAMP PAR CHAMP par les
    * projets : les conventions maison (langue, format des livrables) se règlent
@@ -132,6 +141,12 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
         const lease = Number(s['agents.executionLeaseMinutes']);
         setLeaseMinutes(Number.isInteger(lease) && lease >= 0 ? lease : 30);
         setBudgetBreaker(s['agents.budgetBreaker'] === true);
+        setGatewaySecretSet(s['agents.gateway.secretSet'] === true);
+        setCopilotEnabled(s['agents.copilotEstimate.enabled'] === true);
+        const cb = Number(s['agents.copilotEstimate.baselineCreditsPerTask']);
+        setCopilotBaseline(Number.isFinite(cb) && cb >= 0 ? cb : 7);
+        const cp = Number(s['agents.copilotEstimate.creditPriceEur']);
+        setCopilotCreditPrice(Number.isFinite(cp) && cp >= 0 ? cp : 0);
         const bd = (s['agents.briefDefault'] ?? null) as Record<string, unknown> | null;
         setBriefDefault({
           role: typeof bd?.role === 'string' ? bd.role : '',
@@ -177,6 +192,12 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
         'agents.preauthorizeBudget': preauthorize,
         'agents.executionLeaseMinutes': leaseMinutes,
         'agents.budgetBreaker': budgetBreaker,
+        'agents.copilotEstimate.enabled': copilotEnabled,
+        'agents.copilotEstimate.baselineCreditsPerTask': copilotBaseline,
+        'agents.copilotEstimate.creditPriceEur': copilotCreditPrice,
+        // Secret partagé passerelle : écrit seulement si une nouvelle valeur est
+        // saisie (vide = conserver l'existant, jamais réexposé en lecture).
+        ...(gatewaySecretInput.trim() ? { 'agents.gateway.sharedSecret': gatewaySecretInput.trim() } : {}),
         // Tout-vide → `null` : pas de défaut org plutôt qu'un objet creux.
         'agents.briefDefault': BRIEF_FIELDS.some((f) => briefDefault[f].trim())
           ? Object.fromEntries(BRIEF_FIELDS.map((f) => [f, briefDefault[f].trim() || null]))
@@ -184,6 +205,10 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
       } as Record<string, unknown>));
       const raw = s['agents.policies'];
       setRules(Array.isArray(raw) ? (raw as AgentPolicyRule[]) : []);
+      if (gatewaySecretInput.trim()) {
+        setGatewaySecretSet(true);
+        setGatewaySecretInput('');
+      }
       setDirty(false);
       flash(t('agentPolicies.saved', { defaultValue: 'Policies saved.' }));
     } catch (e) {
@@ -204,6 +229,107 @@ export default function AgentPoliciesSection({ flash }: { flash: Flash }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+      {/* Prix catalogue des modèles (AGENT_COST_UNITS) — rangé ici (gouvernance)
+          plutôt que dans la liste des agents. */}
+      <ModelPricingPanel flash={flash} />
+
+      {/* Mesure du coût — secret partagé passerelle + rappel du contrat */}
+      <div style={cardStyle}>
+        <div style={{ fontWeight: 600, fontSize: 14 }}>
+          {t('agentCost.measureTitle', { defaultValue: 'Cost measurement' })}
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 3, lineHeight: 1.5, maxWidth: 640 }}>
+          {t('agentCost.measureDesc', {
+            defaultValue:
+              'The exact token usage of an agent can be measured by a producer that reports to POST /api/v1/agent-runs: the Vaks LLM gateway, your own external gateway (e.g. LiteLLM), or the runtime usage-log collector (Claude Code / Agent SDK). The shared secret below proves a report is measured (source=gateway / runtime_log) and exempts it from declaration anomalies.',
+          })}
+        </div>
+        <div style={{ marginTop: 12, maxWidth: 420 }}>
+          <label style={labelStyle}>
+            {t('agentCost.sharedSecret', { defaultValue: 'Gateway shared secret' })}
+            <input
+              type="password"
+              value={gatewaySecretInput}
+              placeholder={
+                gatewaySecretSet
+                  ? t('agentCost.secretSetPlaceholder', { defaultValue: '•••••••• (set — leave blank to keep)' })
+                  : t('agentCost.secretUnsetPlaceholder', { defaultValue: 'Not set — paste a strong secret' })
+              }
+              onChange={(e) => {
+                setGatewaySecretInput(e.target.value);
+                setDirty(true);
+              }}
+              autoComplete="new-password"
+              style={inputStyle}
+            />
+          </label>
+          <div style={{ fontSize: 12, color: 'var(--text-faint)', marginTop: 6, lineHeight: 1.5 }}>
+            {t('agentCost.secretHint', {
+              defaultValue:
+                'Set this value as VAKS_GATEWAY_SECRET on the gateway/collector, or X-Vaks-Gateway-Secret in your external adapter. Reporting without it still works but stays source=self (declared).',
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Estimation coût Copilot (agents crédits non mesurables) */}
+      <div style={cardStyle}>
+        <div style={{ fontWeight: 600, fontSize: 14 }}>
+          {t('agentCost.copilotTitle', { defaultValue: 'Copilot cost estimation' })}
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 3, lineHeight: 1.5, maxWidth: 640 }}>
+          {t('agentCost.copilotDesc', {
+            defaultValue:
+              'Copilot-style agents run their model inside Microsoft and can never be measured by the gateway. When enabled, completing a task with a credit-billed agent creates an ESTIMATED run from the public Copilot Studio credit rate card × the activity Vaks observed, plus a baseline for the generative part it cannot see. Always shown as “estimated”, never “measured”; skipped if a real (declared/measured) run already exists for the task.',
+          })}
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={copilotEnabled}
+            onChange={(e) => {
+              setCopilotEnabled(e.target.checked);
+              setDirty(true);
+            }}
+          />
+          <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
+            {t('agentCost.copilotToggle', { defaultValue: 'Estimate credit-agent cost on task completion' })}
+          </span>
+        </label>
+        {copilotEnabled && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, marginTop: 14 }}>
+            <label style={labelStyle}>
+              {t('agentCost.copilotBaseline', { defaultValue: 'Baseline credits per task' })}
+              <input
+                type="number"
+                min={0}
+                max={100000}
+                value={copilotBaseline}
+                onChange={(e) => {
+                  setCopilotBaseline(Math.max(0, Math.min(100000, Number(e.target.value) || 0)));
+                  setDirty(true);
+                }}
+                style={{ ...inputStyle, width: 140 }}
+              />
+            </label>
+            <label style={labelStyle}>
+              {t('agentCost.copilotCreditPrice', { defaultValue: 'Credit price (€ / 1000 credits)' })}
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                value={copilotCreditPrice}
+                onChange={(e) => {
+                  setCopilotCreditPrice(Math.max(0, Number(e.target.value) || 0));
+                  setDirty(true);
+                }}
+                style={{ ...inputStyle, width: 180 }}
+              />
+            </label>
+          </div>
+        )}
+      </div>
+
       {/* Brief agent par défaut de l'organisation */}
       <div style={cardStyle}>
         <div style={{ fontWeight: 600, fontSize: 14 }}>

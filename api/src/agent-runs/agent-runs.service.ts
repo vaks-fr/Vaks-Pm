@@ -7,13 +7,32 @@ import { AgentBudgetService } from '../agents/agent-budget.service';
 import { PolicyEngineService } from '../agents/policy-engine.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
 import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { AdminSettingsService } from '../admin/admin-settings.service';
+import {
+  billingUnitForProvider,
+  estimateCopilotCredits,
+  COPILOT_STUDIO_RATE_CARD,
+} from '@vaks-pm/shared';
 import { CreateAgentRunDto } from './dto/create-agent-run.dto';
+import { detectAnomaly, resolveRunSource } from './agent-run-logic';
+import { McpToolUsageService } from '../mcp/mcp-tool-usage.service';
 
 const toNum = (d: Prisma.Decimal | null): number | null => (d == null ? null : Number(d));
 
-/** En dessous de ce ratio (coût déclaré / coût de référence dérivé), on
- *  considère le coût déclaré comme implausiblement bas → alerte owner. */
-const ANOMALY_UNDERREPORT_RATIO = 0.5;
+/** Parse une valeur de setting en nombre borné (défaut si non finie). */
+function clampNum(v: unknown, def: number, min: number, max: number): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, n));
+}
+
+/** Config de meter d'un agent crédits, dérivée des settings + profil (cachée). */
+interface MeterCfg {
+  baseline: number;
+  rateCard: typeof COPILOT_STUDIO_RATE_CARD;
+  ratePerK: number;
+  model: string | null;
+}
 
 /**
  * Runs d'agent — **coût réel déclaratif** (chantier finance agents). L'agent
@@ -29,8 +48,12 @@ const ANOMALY_UNDERREPORT_RATIO = 0.5;
  * l'**anti-triche** : un `cost` déclaré implausiblement bas déclenche une alerte
  * à l'owner (automation `agent_run_anomaly`), sans jamais fausser la facturation.
  *
- * **Idempotence** : si l'agent fournit un `runKey`, un retour du même appel met
- * à jour le run au lieu d'en créer un doublon (double comptage du coût évité).
+ * **Idempotence** : une déclaration de coût = un livrable. La clé de
+ * dédoublonnage (`runKey`) est dérivée du `deliverableId` quand l'agent n'en
+ * fournit pas — un second `report_run` sur le même livrable est un no-op qui
+ * renvoie le run existant (`alreadyDeclared:true`), jamais un doublon de coût.
+ * Une nouvelle version de livrable (après refus humain/CI) a un nouvel id, donc
+ * une nouvelle clé, donc une nouvelle déclaration légitime.
  */
 @Injectable()
 export class AgentRunsService {
@@ -42,13 +65,26 @@ export class AgentRunsService {
     private readonly policies: PolicyEngineService,
     private readonly audit: AuditLogService,
     private readonly moduleRef: ModuleRef,
+    private readonly settings: AdminSettingsService,
   ) {}
 
-  /** L'acteur courant (un agent) déclare un de SES runs. */
+  /**
+   * L'acteur courant (un agent) déclare un de SES runs.
+   *
+   * `gatewaySecret` (Lot 3) = header `X-Vaks-Gateway-Secret` porté par la
+   * passerelle LLM Vaks. S'il matche le setting org `agents.gateway.sharedSecret`,
+   * le run est marqué `source='gateway'` (usage MESURÉ) et échappe aux anomalies
+   * « déclaré sans tokens / sous la référence ». Jamais accepté via le DTO.
+   */
   async report(
     orgId: string,
     actor: { userId: string; actorKind: 'HUMAN' | 'AGENT' },
     dto: CreateAgentRunDto,
+    gatewaySecret?: string | null,
+    /** Header `X-Vaks-Run-Source` : raffine la source MESURÉE (`gateway` par
+     *  défaut vs `runtime_log` pour le collecteur de logs). Honoré uniquement si
+     *  le secret passerelle matche — sinon ignoré (reste `self`). */
+    sourceHint?: string | null,
   ) {
     if (actor.actorKind !== 'AGENT') {
       throw new ForbiddenException('Seul un agent peut déclarer un run.');
@@ -102,9 +138,31 @@ export class AgentRunsService {
       }
     }
     // Coût facturé/budgété : déclaré s'il existe (cache/tiers), sinon la
-    // référence dérivée.
+    // référence dérivée. **Sauf agent crédits (Copilot)** : leur coût est
+    // MESURÉ par le meter d'appels MCP (`persistMeteredRun`), pas déclaré —
+    // l'outil `vaks_report_run` leur est d'ailleurs masqué. On garde la ligne
+    // (tokens/note pour trace) mais `cost=null` : elle ne compte ni au budget ni
+    // en finance, sinon elle doublerait la ligne metered. Défensif (client en
+    // cache) — le cas nominal est que l'outil n'est jamais appelé.
+    const billingUnit = billingUnitForProvider(
+      (
+        await this.prisma.user.findFirst({
+          where: { id: actor.userId, organizationId: orgId },
+          select: { modelProvider: true },
+        })
+      )?.modelProvider,
+    );
     const declaredCost = dto.cost != null ? new Prisma.Decimal(dto.cost) : null;
-    const cost = declaredCost ?? derivedCost;
+    const cost = billingUnit === 'credits' ? null : declaredCost ?? derivedCost;
+
+    // Provenance : source MESURÉE UNIQUEMENT si le secret partagé matche le
+    // setting org (jamais depuis le DTO). Un secret manquant/faux → 'self'. Le
+    // hint raffine le libellé mesuré : `runtime_log` (collecteur de logs) vs
+    // `gateway` (relais sur le fil) — défaut `gateway`.
+    let source = 'self';
+    if (await this.isGatewayAuthenticated(orgId, gatewaySecret)) {
+      source = sourceHint?.trim() === 'runtime_log' ? 'runtime_log' : 'gateway';
+    }
 
     const data = {
       organizationId: orgId,
@@ -118,28 +176,59 @@ export class AgentRunsService {
       cost,
       derivedCost,
       note: dto.note?.trim() || null,
+      source,
     };
 
-    // Idempotence : un `runKey` fourni → upsert (retry sans double comptage).
-    const runKey = dto.runKey?.trim() || null;
-    const run = runKey
-      ? await this.prisma.agentRun.upsert({
-          where: {
-            organizationId_agentId_runKey: { organizationId: orgId, agentId: actor.userId, runKey },
-          },
-          create: { ...data, runKey },
-          update: data,
-        })
-      : await this.prisma.agentRun.create({ data });
+    // Idempotence : une déclaration de coût = UN livrable. Sans `runKey`
+    // explicite, on en dérive un du `deliverableId` → un agent qui rappelle
+    // `report_run` pour le MÊME livrable ne double jamais le coût : il reçoit
+    // le run existant avec `alreadyDeclared:true` (aucune 2ᵉ ligne, aucune
+    // ré-alerte). Une nouvelle VERSION de livrable (après revue humaine
+    // « changements demandés » ou CI en échec) porte un nouvel id — donc une
+    // nouvelle clé — et une nouvelle déclaration est bien acceptée.
+    const runKey =
+      dto.runKey?.trim() || (data.deliverableId ? `deliverable:${data.deliverableId}` : null);
+    const whereKey = runKey
+      ? { organizationId_agentId_runKey: { organizationId: orgId, agentId: actor.userId, runKey } }
+      : null;
+    const { run, alreadyDeclared } = await (async () => {
+      if (!whereKey) {
+        return { run: await this.prisma.agentRun.create({ data }), alreadyDeclared: false };
+      }
+      const existing = await this.prisma.agentRun.findUnique({ where: whereKey });
+      if (existing) return { run: existing, alreadyDeclared: true };
+      try {
+        return {
+          run: await this.prisma.agentRun.create({ data: { ...data, runKey } }),
+          alreadyDeclared: false,
+        };
+      } catch (e) {
+        // Course concurrente (deux déclarations simultanées de la même clé) :
+        // la contrainte unique tranche, on renvoie la déclaration gagnante.
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+          return {
+            run: await this.prisma.agentRun.findUniqueOrThrow({ where: whereKey }),
+            alreadyDeclared: true,
+          };
+        }
+        throw e;
+      }
+    })();
 
     // Anti-triche (fire-and-forget, fail-open) : coût déclaré implausiblement
     // bas vs la référence, ou livrable produit « gratuitement ». Alerte l'owner.
-    const anomaly = this.detectAnomaly({
-      hasDeliverable: !!dto.deliverableId,
-      tokensTotal: tokensIn + tokensOut,
-      declaredCost: declaredCost != null ? Number(declaredCost) : null,
-      derivedCost: derivedCost != null ? Number(derivedCost) : null,
-    });
+    // Les runs 'gateway' sont MESURÉS → aucune anomalie de déclaration.
+    // Sur un no-op (coût déjà déclaré pour ce livrable), l'anomalie a déjà été
+    // évaluée à la première déclaration : ne pas la rejouer.
+    const anomaly = alreadyDeclared
+      ? null
+      : detectAnomaly({
+          hasDeliverable: !!dto.deliverableId,
+          tokensTotal: tokensIn + tokensOut,
+          declaredCost: declaredCost != null ? Number(declaredCost) : null,
+          derivedCost: derivedCost != null ? Number(derivedCost) : null,
+          source,
+        });
     if (anomaly) {
       void this.hooks()?.onAgentRunReported(orgId, {
         runId: run.id,
@@ -160,15 +249,214 @@ export class AgentRunsService {
       .snapshot(orgId, actor.userId, { taskId: dto.taskId ?? null, projectId })
       .catch(() => null);
     let taskReleased = false;
-    if (budget?.stop) {
+    if (!alreadyDeclared && budget?.stop) {
       taskReleased = await this.tripBudgetBreaker(orgId, actor.userId, dto.taskId ?? null, projectId, budget);
     }
 
     return {
       ...this.toDto(run),
+      ...(alreadyDeclared ? { alreadyDeclared: true } : {}),
       ...(budget ? { budget } : {}),
       ...(taskReleased ? { taskReleased: true } : {}),
     };
+  }
+
+  /**
+   * ESTIMATION du coût d'un agent Copilot (non mesurable : inférence chez
+   * Microsoft, jamais routable par la passerelle) à la complétion d'une tâche.
+   * On applique la **grille tarifaire Copilot Studio** (crédits/activité,
+   * déterministe et publique) à l'activité OBSERVÉE par Vaks + une baseline
+   * réglable (part générative non vue), converti en € via le prix crédit.
+   *
+   * Crée un `AgentRun source='estimated'` (affiché « estimé », jamais « mesuré »).
+   * **Opt-in** (`agents.copilotEstimate.enabled`), **idempotent par tâche**
+   * (`runKey='estimate:<taskId>'`), **sauté** si un run RÉEL (déclaré/mesuré)
+   * existe déjà pour la tâche (le vrai chiffre prime). Fail-open : ne jette
+   * jamais (appelé depuis un hook de complétion).
+   */
+  /** `McpToolUsageService` en lazy (vit dans `McpModule`, non importé ici). */
+  private usage(): McpToolUsageService | null {
+    try {
+      return this.moduleRef.get(McpToolUsageService, { strict: false });
+    } catch {
+      return null;
+    }
+  }
+
+  // ============================================================
+  // Meter d'appels MCP — coût MESURÉ des agents crédits (Copilot)
+  // ============================================================
+  //
+  // Pour un agent facturé en crédits, Microsoft facture **chaque appel d'outil**
+  // (5 crédits/action) + des tours génératifs invisibles (baseline). On ne peut
+  // pas mesurer ses tokens → on compte ses appels MCP. Ce meter est **la vérité**
+  // pour ces agents : ce qu'ils déclareraient via `vaks_report_run` n'est plus
+  // compté (l'outil leur est d'ailleurs masqué). Voir `AGENT_MCP_CALL_METER.md`.
+  //
+  // Le compteur vit en Redis (INCR par appel, gratuit). On le PERSISTE en une
+  // ligne `AgentRun` metered par (agent, tâche/projet), **recalculée** à chaque
+  // passage depuis le total cumulé (upsert idempotent — jamais de double compte).
+  // Persistance déclenchée aux points naturels (claim, heartbeat, submit, DONE)
+  // + un balayage horaire de rattrapage. Le compteur Redis survivant à un crash
+  // de l'agent, aucun appel n'est perdu.
+
+  // Caches mémoire (TTL court) : la persistance tourne À CHAQUE APPEL MCP, donc
+  // ses lectures (settings, profil agent, membership, task→projet) — toutes
+  // stables à la seconde — sont mises en cache pour ne laisser au chemin chaud
+  // que l'upsert. Par réplica, staleness ≤ TTL, acceptable pour du bookkeeping.
+  private meterCfgCache = new Map<string, { exp: number; cfg: MeterCfg | null }>();
+  private memberCache = new Map<string, { exp: number; ok: boolean }>();
+  private taskProjCache = new Map<string, { exp: number; projectId: string | null }>();
+
+  /** Config de meter d'un agent (null = pas concerné : non-crédits ou toggle off). */
+  private async meterCfg(orgId: string, agentId: string): Promise<MeterCfg | null> {
+    const key = `${orgId}:${agentId}`;
+    const hit = this.meterCfgCache.get(key);
+    if (hit && hit.exp > Date.now()) return hit.cfg;
+    let cfg: MeterCfg | null = null;
+    const settings = await this.settings.getAll(orgId);
+    if (String(settings['agents.copilotEstimate.enabled']) === 'true') {
+      const agent = await this.prisma.user.findFirst({
+        where: { id: agentId, organizationId: orgId, kind: 'AGENT' },
+        select: { modelProvider: true, model: true, costRateInPerKTokens: true },
+      });
+      if (agent && billingUnitForProvider(agent.modelProvider) === 'credits') {
+        const rc = settings['agents.copilotEstimate.rateCard'];
+        const rateCard = (
+          rc && typeof rc === 'object'
+            ? { ...COPILOT_STUDIO_RATE_CARD, ...(rc as Record<string, unknown>) }
+            : COPILOT_STUDIO_RATE_CARD
+        ) as typeof COPILOT_STUDIO_RATE_CARD;
+        const globalPrice = clampNum(settings['agents.copilotEstimate.creditPriceEur'], 0, 0, 1000);
+        cfg = {
+          baseline: clampNum(settings['agents.copilotEstimate.baselineCreditsPerTask'], 7, 0, 100_000),
+          rateCard,
+          ratePerK: globalPrice > 0 ? globalPrice : Number(agent.costRateInPerKTokens ?? 0),
+          model: agent.model ?? null,
+        };
+      }
+    }
+    this.meterCfgCache.set(key, { exp: Date.now() + 30_000, cfg });
+    return cfg;
+  }
+
+  private async cachedMember(orgId: string, agentId: string, projectId: string): Promise<boolean> {
+    const key = `${agentId}:${projectId}`;
+    const hit = this.memberCache.get(key);
+    if (hit && hit.exp > Date.now()) return hit.ok;
+    const ok = await this.isProjectMember(orgId, agentId, projectId);
+    this.memberCache.set(key, { exp: Date.now() + 60_000, ok });
+    return ok;
+  }
+
+  private async cachedTaskProject(orgId: string, taskId: string): Promise<string | null> {
+    const hit = this.taskProjCache.get(taskId);
+    if (hit && hit.exp > Date.now()) return hit.projectId;
+    const task = await this.prisma.task.findFirst({
+      where: { id: taskId, organizationId: orgId },
+      select: { projectId: true },
+    });
+    const projectId = task?.projectId ?? null;
+    this.taskProjCache.set(taskId, { exp: Date.now() + 60_000, projectId });
+    return projectId;
+  }
+
+  /** DONE d'une tâche par un agent : persistance finale. On NE vide PAS le compteur
+   *  — un appel tardif après DONE le recréerait à 1 et ferait CHUTER la ligne
+   *  metered de sa valeur cumulée à ~une action. Le TTL 7 j nettoie de lui-même. */
+  async recordEstimatedRun(orgId: string, agentId: string, taskId: string): Promise<void> {
+    await this.persistMeteredRun(orgId, agentId, { taskId });
+  }
+
+  /** Persiste tous les compteurs d'UN agent (avant un contrôle de budget au claim). */
+  async persistAgentMeters(orgId: string, agentId: string): Promise<void> {
+    const usage = this.usage();
+    if (!usage) return;
+    const rows = (await usage.scanAccrued()).filter((r) => r.agentId === agentId);
+    for (const r of rows) {
+      await this.persistMeteredRun(orgId, agentId, { taskId: r.taskId, projectId: r.projectId });
+    }
+  }
+
+  /** Balayage de rattrapage (cron horaire) : persiste TOUS les compteurs du tenant. */
+  async sweepMeters(orgId: string): Promise<void> {
+    const usage = this.usage();
+    if (!usage) return;
+    for (const r of await usage.scanAccrued()) {
+      await this.persistMeteredRun(orgId, r.agentId, { taskId: r.taskId, projectId: r.projectId });
+    }
+  }
+
+  /**
+   * Persiste (upsert) UNE ligne metered depuis le compteur d'appels Redis d'un
+   * périmètre. No-op si l'agent n'est pas facturé en crédits, ou si l'estimation
+   * Copilot est désactivée pour l'org, ou si le compteur est vide.
+   *
+   * `ctx` porte soit un `taskId` (row de tâche, avec baseline), soit un
+   * `projectId` (overhead projet : exploration ciblée, sans baseline), soit rien
+   * (overhead org : `next_task`/`list_*`). La baseline (tours génératifs) ne vaut
+   * que pour une TÂCHE.
+   */
+  async persistMeteredRun(
+    orgId: string,
+    agentId: string,
+    ctx: { taskId?: string | null; projectId?: string | null },
+  ): Promise<void> {
+    try {
+      const usage = this.usage();
+      if (!usage) return;
+      // Décision de meter (cachée) : null = agent non concerné ou toggle off.
+      const cfg = await this.meterCfg(orgId, agentId);
+      if (!cfg) return;
+
+      const taskId = ctx.taskId ?? null;
+      // Tâche → projet (caché) + garde membership anti-injection (cachée) : un
+      // agent ne doit pas imputer sa dépense à un projet dont il n'est pas
+      // membre (même raison que `report()`). Un scope non légitime est abandonné
+      // (le compteur reste, sans ligne facturée — pas d'imputation cross-projet).
+      let projectId = ctx.projectId ?? null;
+      if (taskId) projectId = await this.cachedTaskProject(orgId, taskId);
+      if (projectId && !(await this.cachedMember(orgId, agentId, projectId))) return;
+
+      const count = await usage.readAccrued(agentId, { taskId, projectId: ctx.projectId ?? null });
+      if (count <= 0) return;
+
+      // Baseline (tours génératifs) UNIQUEMENT pour une tâche — l'exploration
+      // (project/overhead) n'a pas de tour génératif propre.
+      const baseline = taskId ? cfg.baseline : 0;
+      const credits =
+        Math.round((baseline + estimateCopilotCredits({ agentActions: count }, cfg.rateCard)) * 100) / 100;
+      if (credits <= 0) return;
+
+      const costEur = Math.round((credits / 1000) * cfg.ratePerK * 10_000) / 10_000;
+
+      const runKey = taskId
+        ? `metered:task:${taskId}`
+        : ctx.projectId
+          ? `metered:project:${ctx.projectId}`
+          : 'metered:overhead';
+      const data = {
+        organizationId: orgId,
+        agentId,
+        taskId,
+        projectId,
+        deliverableId: null,
+        model: cfg.model ?? 'copilot-credits',
+        tokensIn: Math.round(credits), // crédits (convention : tout dans tokensIn, out=0)
+        tokensOut: 0,
+        cost: costEur > 0 ? new Prisma.Decimal(costEur) : null,
+        derivedCost: null,
+        note: taskId ? 'mesuré (appels MCP × grille Copilot)' : 'mesuré (exploration hors tâche)',
+        source: 'metered',
+      };
+      await this.prisma.agentRun.upsert({
+        where: { organizationId_agentId_runKey: { organizationId: orgId, agentId, runKey } },
+        create: { ...data, runKey },
+        update: data,
+      });
+    } catch (e) {
+      this.log.warn(`persistMeteredRun failed: ${(e as Error).message}`);
+    }
   }
 
   /**
@@ -256,32 +544,6 @@ export class AgentRunsService {
   }
 
   /**
-   * Décide si un run déclaré est suspect. Trois signaux binaires (v1) :
-   *  - `no_tokens`       : un livrable a été produit mais 0 token déclaré ;
-   *  - `zero_cost`       : coût déclaré à 0 alors qu'un coût de référence > 0 existe ;
-   *  - `below_reference` : coût déclaré < 50 % du coût de référence dérivé.
-   */
-  private detectAnomaly(x: {
-    hasDeliverable: boolean;
-    tokensTotal: number;
-    declaredCost: number | null;
-    derivedCost: number | null;
-  }): 'no_tokens' | 'zero_cost' | 'below_reference' | null {
-    if (x.hasDeliverable && x.tokensTotal === 0) return 'no_tokens';
-    if (x.declaredCost === 0 && (x.derivedCost ?? 0) > 0) return 'zero_cost';
-    if (
-      x.declaredCost != null &&
-      x.declaredCost > 0 &&
-      x.derivedCost != null &&
-      x.derivedCost > 0 &&
-      x.declaredCost < x.derivedCost * ANOMALY_UNDERREPORT_RATIO
-    ) {
-      return 'below_reference';
-    }
-    return null;
-  }
-
-  /**
    * Un agent n'impute un run qu'à un projet dont il est **membre** (direct ou via
    * une équipe affectée) — garde-fou anti-injection de coût cross-projet (audit
    * sécu 2026-08-01). Même définition d'appartenance que `DeliverablesService`.
@@ -300,6 +562,24 @@ export class AgentRunsService {
       }),
     ]);
     return direct > 0 || viaTeam > 0;
+  }
+
+  /**
+   * Vrai si le run est authentifié comme venant de la passerelle LLM : un secret
+   * non vide fourni ET égal au setting org `agents.gateway.sharedSecret`. Toute
+   * défaillance (setting absent, lecture KO) → false (retombe sur 'self').
+   */
+  private async isGatewayAuthenticated(orgId: string, provided?: string | null): Promise<boolean> {
+    if (!provided?.trim()) return false;
+    try {
+      const all = await this.settings.getAll(orgId);
+      const expected = typeof all['agents.gateway.sharedSecret'] === 'string'
+        ? (all['agents.gateway.sharedSecret'] as string)
+        : '';
+      return resolveRunSource(provided, expected) === 'gateway';
+    } catch {
+      return false;
+    }
   }
 
   /** Hooks automations en lazy (évite un cycle de modules ; fail-open). */
@@ -360,15 +640,16 @@ export class AgentRunsService {
     // méthode), donc ce passage scalaire reste bon marché.
     const scalarRows = await this.prisma.agentRun.findMany({
       where,
-      select: { id: true, cost: true, derivedCost: true, tokensIn: true, tokensOut: true, deliverableId: true },
+      select: { id: true, cost: true, derivedCost: true, tokensIn: true, tokensOut: true, deliverableId: true, source: true },
     });
     const anomalousIds = scalarRows
       .filter((r) =>
-        this.detectAnomaly({
+        detectAnomaly({
           hasDeliverable: !!r.deliverableId,
           tokensTotal: (r.tokensIn ?? 0) + (r.tokensOut ?? 0),
           declaredCost: r.cost != null ? Number(r.cost) : null,
           derivedCost: r.derivedCost != null ? Number(r.derivedCost) : null,
+          source: r.source,
         }),
       )
       .map((r) => r.id);
@@ -398,11 +679,12 @@ export class AgentRunsService {
     ]);
 
     const items = rows.map((r) => {
-      const anomaly = this.detectAnomaly({
+      const anomaly = detectAnomaly({
         hasDeliverable: !!r.deliverableId,
         tokensTotal: (r.tokensIn ?? 0) + (r.tokensOut ?? 0),
         declaredCost: r.cost != null ? Number(r.cost) : null,
         derivedCost: r.derivedCost != null ? Number(r.derivedCost) : null,
+        source: r.source,
       });
       const task = r.taskId ? tasks.get(r.taskId) : null;
       return {
@@ -517,6 +799,7 @@ export class AgentRunsService {
     derivedCost?: Prisma.Decimal | null;
     runKey?: string | null;
     note: string | null;
+    source?: string | null;
     createdAt: Date;
   }) {
     return {
@@ -532,6 +815,7 @@ export class AgentRunsService {
       derivedCost: r.derivedCost != null ? toNum(r.derivedCost) : null,
       runKey: r.runKey ?? null,
       note: r.note,
+      source: r.source ?? 'self',
       createdAt: r.createdAt.toISOString(),
     };
   }

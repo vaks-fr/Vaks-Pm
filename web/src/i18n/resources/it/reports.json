@@ -57,7 +57,9 @@
     "panelTitle": "Esportazioni",
     "fullDataset": "Dataset completo (non solo la vista). Periodo {{from}} → {{to}}.",
     "pdfReports": "Report PDF",
+    "clientDeck": "Stato del progetto per il cliente",
     "items": {
+      "clientStatusDeck": "Stato progetto (PowerPoint)",
       "projectStats": "Statistiche progetto",
       "burndown": "Burndown",
       "dueAdherence": "Rispetto delle scadenze",

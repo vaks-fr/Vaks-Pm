@@ -7,8 +7,27 @@ import { PUBLIC_API_KEY } from '../../rbac/require-permissions.decorator';
 import { SEAT_EXEMPT_KEY } from '../seat-exempt.decorator';
 
 /**
+ * Extrait le jeton porteur d'une requête : `Authorization: Bearer …` en premier,
+ * repli sur `X-Api-Key` (une passerelle comme Power Platform / Copilot strippe
+ * parfois `Authorization` — même repli que le serveur MCP `mcp/src/main.ts`).
+ * Le repli ne concerne QUE le transport du jeton : la validation (ApiTokens) et
+ * le RBAC restent inchangés, et le gate `@PublicApi` s'applique toujours.
+ */
+function extractBearer(req: Request): string | null {
+  const auth = req.headers['authorization'];
+  if (typeof auth === 'string' && auth.startsWith('Bearer ')) return auth.slice(7).trim() || null;
+  const rawKey = req.headers['x-api-key'];
+  const alt = Array.isArray(rawKey) ? rawKey[0] : rawKey;
+  if (typeof alt === 'string' && alt.trim()) {
+    const v = alt.trim();
+    return v.startsWith('Bearer ') ? v.slice(7).trim() || null : v;
+  }
+  return null;
+}
+
+/**
  * Authentification : soit un JWT (session utilisateur, via passport-jwt), soit
- * un **jeton d'API** (`Authorization: Bearer vaks_…`).
+ * un **jeton d'API** (`Authorization: Bearer vaks_…`, repli `X-Api-Key`).
  *
  * Un jeton d'API n'est accepté QUE sur les routes marquées `@PublicApi`
  * (l'API publique). Sur une route app-privée → refus (les jetons ne peuvent
@@ -25,8 +44,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<Request>();
-    const auth = req.headers['authorization'];
-    const raw = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
+    const raw = extractBearer(req);
 
     if (raw && raw.startsWith('vaks_')) {
       const principal = await this.apiTokens.verify(raw);

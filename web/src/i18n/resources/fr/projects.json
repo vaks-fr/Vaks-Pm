@@ -105,6 +105,14 @@
     "dueBeforeStart": "La date d'échéance est antérieure à la date de début.",
     "span": "{{from}} → {{to}} · <0>{{days}}</0> jours · {{weeks}} semaines",
     "description": "Description",
+    "clientStatus": "Point de statut client",
+    "clientStatusHint": "Santé et résumé repris dans l'export « Statut projet (PowerPoint) » destiné au client.",
+    "statusSummaryPlaceholder": "Résumé du statut pour le client : ce qui a avancé, points clés, prochaines étapes…",
+    "health": {
+      "onTrack": "Dans les temps",
+      "atRisk": "À risque",
+      "offTrack": "En dérive"
+    },
     "client": "Client",
     "noClient": "— Aucun client —",
     "saved": "{{key}} mis à jour",

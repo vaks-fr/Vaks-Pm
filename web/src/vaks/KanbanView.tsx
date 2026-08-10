@@ -11,6 +11,19 @@ import { Avatar, AvatarStack, effectiveColor, fmt, Icon, PriorityDot, subOf, Tag
 import { localizeColName } from './colLabel';
 import { useConfirm } from './confirm';
 import { startPointerDrag } from './dnd';
+import { STATUS_META, isAgentStatus } from './taskStatus';
+import { TaskStatus } from '@vaks-pm/shared';
+
+/** Statuts agents rendus comme sous-conteneurs VIRTUELS dans leur colonne foldée
+ *  (CLAIMED/CHANGES_REQUESTED → En cours, APPROVED → En revue). Purement visuels,
+ *  en lecture seule — aucune persistance ni `CustomStatus`. */
+const AGENT_VSUB_STATUSES: readonly TaskStatus[] = [
+  TaskStatus.CLAIMED,
+  TaskStatus.CHANGES_REQUESTED,
+  TaskStatus.APPROVED,
+];
+const AGENT_VSUB_ID = (s: TaskStatus | string): string => `__agent__${s}`;
+const isAgentVSubId = (id: string): boolean => id.startsWith('__agent__');
 
 interface ToastInput {
   actor: User;
@@ -652,6 +665,23 @@ export function KanbanView({
     [subStatuses],
   );
 
+  /** Zone virtuelle « statut agent » : si la tâche porte un statut agent dont la
+   *  colonne foldée == colonne courante, renvoie l'id du sous-conteneur virtuel.
+   *  Prioritaire sur `subZoneOf` (un statut agent n'a pas de sous-statut custom
+   *  cohérent). Fallback null → carte en zone principale (jamais orpheline). */
+  const agentZoneOf = useCallback((t: Task, colId: string): string | null => {
+    if (!t.status || !isAgentStatus(t.status)) return null;
+    const colStatus = COLUMNS.find((c) => c.id === colId)?.status;
+    const meta = STATUS_META[t.status];
+    return meta && meta.colKey === colStatus ? AGENT_VSUB_ID(t.status) : null;
+  }, []);
+
+  /** Zone effective combinée : statut agent d'abord, puis sous-statut custom. */
+  const zoneOf = useCallback(
+    (t: Task, colId: string): string | null => agentZoneOf(t, colId) ?? subZoneOf(t, colId),
+    [agentZoneOf, subZoneOf],
+  );
+
   function moveTaskTo(ts: Task[], id: string, toCol: string, toIndex: number, toSub: string | null = null): Task[] {
     const moving = ts.find((t) => t.id === id);
     if (!moving) return ts;
@@ -684,7 +714,7 @@ export function KanbanView({
     const matchesTarget = (t: Task) =>
       toCol === GROUPS_COL.id
         ? !!t.isGroup
-        : !t.isGroup && t.col === toCol && subZoneOf(t, toCol) === (toGroups ? null : toSub);
+        : !t.isGroup && t.col === toCol && zoneOf(t, toCol) === (toGroups ? null : toSub);
     const result: Task[] = [];
     let colCount = 0;
     let inserted = false;
@@ -705,6 +735,20 @@ export function KanbanView({
   function onCardPointerDown(e: React.PointerEvent, task: Task) {
     if (e.button != null && e.button !== 0) return;
     if ((e.target as HTMLElement).closest('[data-no-drag]')) return;
+    // Cartes en statut agent : LECTURE SEULE sur le board (les transitions sont
+    // pilotées par le cycle revue/livrables + permission `task:review`). Pas de
+    // drag ; on ouvre le détail sur un clic simple (pointerup sans déplacement).
+    if (task.status && isAgentStatus(task.status)) {
+      const el = e.currentTarget as HTMLElement;
+      const sx = e.clientX;
+      const sy = e.clientY;
+      const onUp = (ev: PointerEvent) => {
+        el.removeEventListener('pointerup', onUp);
+        if (Math.hypot(ev.clientX - sx, ev.clientY - sy) <= 6) onOpen && onOpen(task.id);
+      };
+      el.addEventListener('pointerup', onUp);
+      return;
+    }
     const sourceEl = e.currentTarget as HTMLElement;
     startPointerDrag({
       startEvent: e.nativeEvent,
@@ -1022,12 +1066,23 @@ export function KanbanView({
           // Sous-statuts de cette colonne (containers). Une carte dont le
           // sous-statut est inconnu / d'un autre parent reste en zone
           // principale (fallback subZoneOf). Containers vides masqués.
-          const colSubs = isGroupsCol ? [] : subStatuses.filter((s) => s.status === col.status);
+          const realSubs = isGroupsCol ? [] : subStatuses.filter((s) => s.status === col.status);
+          // Sous-conteneurs VIRTUELS des statuts agents dont la colonne foldée =
+          // cette colonne (couleur/libellé dérivés du fold centralisé).
+          const agentSubs: BoardSubStatus[] = isGroupsCol
+            ? []
+            : AGENT_VSUB_STATUSES.filter((s) => STATUS_META[s].colKey === col.status).map((s) => ({
+                id: AGENT_VSUB_ID(s),
+                name: t('reports:status.' + STATUS_META[s].labelSubkey),
+                color: STATUS_META[s].reportColor,
+                status: col.status,
+              }));
+          const colSubs = [...realSubs, ...agentSubs];
           const mainItems = colSubs.length
-            ? items.filter((tk) => subZoneOf(tk, col.id) === null)
+            ? items.filter((tk) => zoneOf(tk, col.id) === null)
             : items;
           const subGroups = colSubs
-            .map((s) => ({ sub: s, items: items.filter((tk) => subZoneOf(tk, col.id) === s.id) }))
+            .map((s) => ({ sub: s, items: items.filter((tk) => zoneOf(tk, col.id) === s.id), virtual: isAgentVSubId(s.id) }))
             .filter((g) => g.items.length > 0);
           const isDropMain = !!isDropCol && drag!.overSub === null;
           return (
@@ -1169,13 +1224,15 @@ export function KanbanView({
                     colonne). Masqués si vides — la première pose d'un
                     sous-statut passe par le détail de tâche. */}
                 {subGroups.map((g) => {
-                  const isDropSub = !!isDropCol && drag!.overSub === g.sub.id;
+                  // Conteneurs virtuels (statuts agents) = LECTURE SEULE : pas de
+                  // `data-dropzone`/`data-subzone` → jamais cible de drop.
+                  const isDropSub = !g.virtual && !!isDropCol && drag!.overSub === g.sub.id;
+                  const dropAttrs = g.virtual ? {} : { 'data-dropzone': col.id, 'data-subzone': g.sub.id };
                   return (
                     <div
                       key={g.sub.id}
-                      className="subcol"
-                      data-dropzone={col.id}
-                      data-subzone={g.sub.id}
+                      className={'subcol' + (g.virtual ? ' subcol-agent' : '')}
+                      {...dropAttrs}
                       style={g.sub.color ? { borderColor: `color-mix(in oklch, ${g.sub.color} 45%, var(--border))` } : undefined}
                     >
                       <div className="subcol-head">

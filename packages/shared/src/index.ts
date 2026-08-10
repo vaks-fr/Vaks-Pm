@@ -84,6 +84,13 @@ export const PERMISSIONS = [
   // il DÉCLARE le lien, il ne modifie rien d'autre du projet (`project:update`
   // serait bien trop large). Pas dans les bundles de rôles : ORG_ADMIN l'a via ALL.
   'collab:link',
+  // Gestion de l'abonnement de nudge sortant (réveil des agents). Scope
+  // **volontairement minimal** pour une clé org dédiée collée dans le provider
+  // (Copilot/n8n) : elle ne peut QUE créer/supprimer un abonnement de nudge sur
+  // `POST/DELETE /me/webhook-subscriptions`, RIEN d'autre (pas de lecture de
+  // tâches contrairement à `task:view`). Si elle fuite, elle n'expose aucune
+  // donnée. Pas dans les rôles : réservé aux clés org générées par la feature.
+  'nudge:manage',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -594,6 +601,44 @@ export enum TaskStatus {
   DONE = 'DONE',
 }
 
+/** Les 5 statuts « de base » = les 5 colonnes de board. Les 3 statuts agents
+ *  (CLAIMED / CHANGES_REQUESTED / APPROVED) se replient sur l'un d'eux. */
+export const BASE_TASK_STATUSES: readonly TaskStatus[] = [
+  TaskStatus.TODO,
+  TaskStatus.IN_PROGRESS,
+  TaskStatus.IN_REVIEW,
+  TaskStatus.ON_HOLD,
+  TaskStatus.DONE,
+];
+
+/** Repli d'un statut agent vers sa colonne de base. SOURCE DE VÉRITÉ unique,
+ *  partagée par le placement front (board / vues fold-driven) et le
+ *  réalignement `boardColumnId` back — pour qu'ils ne divergent jamais.
+ *  CLAIMED = agent au travail → IN_PROGRESS ; CHANGES_REQUESTED = retravail
+ *  → IN_PROGRESS ; APPROVED = revue passée, pas encore clôturé → IN_REVIEW. */
+export const AGENT_STATUS_FOLD: Readonly<Partial<Record<TaskStatus, TaskStatus>>> = {
+  [TaskStatus.CLAIMED]: TaskStatus.IN_PROGRESS,
+  [TaskStatus.CHANGES_REQUESTED]: TaskStatus.IN_PROGRESS,
+  [TaskStatus.APPROVED]: TaskStatus.IN_REVIEW,
+};
+
+/** true si le statut appartient au cycle de vie agent (hors 5 colonnes de base). */
+export function isAgentStatus(status: TaskStatus | string): boolean {
+  return (
+    status === TaskStatus.CLAIMED ||
+    status === TaskStatus.CHANGES_REQUESTED ||
+    status === TaskStatus.APPROVED
+  );
+}
+
+/** Replie un statut sur sa colonne de base (l'une des 5). Un statut de base se
+ *  renvoie lui-même ; un statut inconnu retombe sur TODO (défensif). */
+export function foldToBaseStatus(status: TaskStatus | string): TaskStatus {
+  const folded = AGENT_STATUS_FOLD[status as TaskStatus];
+  if (folded) return folded;
+  return BASE_TASK_STATUSES.includes(status as TaskStatus) ? (status as TaskStatus) : TaskStatus.TODO;
+}
+
 export enum TaskPriority {
   LOW = 'LOW',
   NORMAL = 'NORMAL',
@@ -609,6 +654,10 @@ export enum ProjectStatus {
   COMPLETED = 'COMPLETED',
   ARCHIVED = 'ARCHIVED',
 }
+
+/** Santé projet (RAG) éditoriale pour le point de statut client. Distincte de
+ *  `ProjectStatus` (cycle de vie commercial). */
+export type ProjectHealth = 'ON_TRACK' | 'AT_RISK' | 'OFF_TRACK';
 
 export enum DependencyType {
   FS = 'FS', // finish-to-start
@@ -1019,6 +1068,23 @@ export interface UserDto {
 
 // ---------- Agents IA — DTOs (chantier 1) ----------
 
+/**
+ * Unité de facturation d'un run d'agent. La plupart des providers facturent en
+ * **tokens** (in/out distincts) ; Microsoft/GitHub Copilot facturent en
+ * **crédits** (compteur unique, pas de séparation entrée/sortie). En crédits, la
+ * quantité vit dans `tokensIn` (out=0) et seul le taux d'entrée (=€/1000 crédits)
+ * compte — la formule `derivedCost` existante reste valable telle quelle.
+ */
+export type AgentBillingUnit = 'tokens' | 'credits';
+
+/** Providers facturés en crédits (compteur unique) plutôt qu'en tokens. */
+const CREDIT_BILLED_PROVIDERS = new Set(['microsoft-copilot', 'github-copilot']);
+
+/** Déduit l'unité de facturation depuis le provider du modèle (défaut: tokens). */
+export function billingUnitForProvider(provider?: string | null): AgentBillingUnit {
+  return provider && CREDIT_BILLED_PROVIDERS.has(provider) ? 'credits' : 'tokens';
+}
+
 /** Fiche agent renvoyée par `/admin/agents` (jamais de secret). */
 export interface AgentDto {
   id: string;
@@ -1037,6 +1103,9 @@ export interface AgentDto {
   modelProvider?: string | null;
   model?: string | null;
   hostingRegion?: string | null;
+  /** Unité de facturation dérivée du provider (tokens | credits). Renseignée
+   *  serveur — jamais éditable. En crédits, `costRateOutPerKTokens` est null. */
+  billingUnit?: AgentBillingUnit;
   /** Coût interne € / 1000 tokens d'ENTRÉE. Dérive le coût d'un run déclaré
    *  avec tokens mais sans `cost` explicite (l'output coûte plus cher → taux
    *  distinct ci-dessous). */
@@ -1048,6 +1117,18 @@ export interface AgentDto {
   defaultBillRatePerKTokens?: number | null;
   dailyCostBudget?: number | null;
   monthlyCostBudget?: number | null;
+  /** Lot 2 — en mode d'application `per_agent`, l'agent suit les prix catalogue. */
+  followCatalogPricing?: boolean;
+  /** Lot 2 — prix catalogue résolu pour (provider, model) de l'agent, si connu.
+   *  Sert au badge « drift » et au bouton « appliquer le prix catalogue ». */
+  catalogPrice?: {
+    unit: AgentBillingUnit;
+    costInPerKUnits: number;
+    costOutPerKUnits: number | null;
+    source: 'feed' | 'manual' | 'builtin';
+  } | null;
+  /** Lot 2 — vrai si le taux de coût de l'agent dévie du catalogue (>5 %). */
+  priceDrift?: boolean;
   /** Provenance : 'manual' | 'api' | 'entra-agent' | … (idpSource). */
   source: string;
   /** Id externe côté plateforme (object ID Entra, ARN…) si provisionné. */
@@ -1055,6 +1136,32 @@ export interface AgentDto {
   /** Jetons PAT actifs de l'agent (métadonnées seulement). */
   tokens?: { id: string; name: string; prefix: string; expiresAt: string | null; lastUsedAt: string | null }[];
   createdAt: string;
+}
+
+/** Une entrée du catalogue de prix des modèles (`GET /admin/agents/model-catalog`).
+ *  Fusion `ModelPrice` (DB, source feed|manual) par-dessus `KNOWN_AGENT_MODELS`
+ *  (source builtin, fallback air-gap). */
+export interface ModelCatalogEntryDto {
+  provider: string;
+  model: string;
+  label?: string | null;
+  unit: AgentBillingUnit;
+  costInPerKUnits: number | null;
+  costOutPerKUnits: number | null;
+  source: 'feed' | 'manual' | 'builtin';
+  feedUpdatedAt?: string | null;
+}
+
+/** Réponse de `GET /admin/agents/model-catalog`. */
+export interface ModelCatalogDto {
+  entries: ModelCatalogEntryDto[];
+  /** État de la dernière synchro du feed (pour le panneau admin). */
+  feedEnabled: boolean;
+  applyMode: 'off' | 'all' | 'per_agent';
+  usdToEurRate: number;
+  lastSyncAt?: string | null;
+  lastSyncOk?: boolean | null;
+  lastSyncError?: string | null;
 }
 
 /**
@@ -1075,6 +1182,9 @@ export interface KnownAgentModel {
    */
   suggestedCostInPerKTokens?: number;
   suggestedCostOutPerKTokens?: number;
+  /** Unité de facturation du modèle. Absent = tokens (défaut). Les modèles
+   *  Copilot facturent en crédits (compteur unique, pas de taux sortie). */
+  unit?: AgentBillingUnit;
 }
 
 export const KNOWN_AGENT_MODELS: KnownAgentModel[] = [
@@ -1089,7 +1199,82 @@ export const KNOWN_AGENT_MODELS: KnownAgentModel[] = [
   { provider: 'google', model: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', suggestedCostInPerKTokens: 0.0011, suggestedCostOutPerKTokens: 0.0092 },
   { provider: 'google', model: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', suggestedCostInPerKTokens: 0.0003, suggestedCostOutPerKTokens: 0.0023 },
   { provider: 'mistral', model: 'mistral-large', label: 'Mistral Large', suggestedCostInPerKTokens: 0.0018, suggestedCostOutPerKTokens: 0.0055 },
+  // Providers facturés en crédits (compteur unique, pas de taux suggéré : le
+  // prix d'un crédit dépend du contrat client). Unité = credits.
+  { provider: 'github-copilot', model: 'copilot-premium-requests', label: 'GitHub Copilot (premium requests)', unit: 'credits' },
+  { provider: 'microsoft-copilot', model: 'copilot-credits', label: 'Microsoft Copilot (credits)', unit: 'credits' },
 ];
+
+/**
+ * Grille tarifaire Copilot Studio (crédits Copilot par type d'activité), tirée de
+ * la doc publique Microsoft `requirements-messages-management`. Déterministe et
+ * publique → appliquée à l'activité observée d'un agent Copilot pour ESTIMER son
+ * coût par tâche (agents hébergés non mesurables : l'inférence tourne chez
+ * Microsoft, jamais routable par la passerelle). Le prix d'un crédit en € dépend
+ * du contrat client (réglé séparément). Voir `estimateCopilotCredits`.
+ */
+export interface CopilotStudioRateCard {
+  /** Réponse prédéfinie (statique). */
+  classicResponse: number;
+  /** Réponse générée dynamiquement par le modèle. */
+  generativeResponse: number;
+  /** Action d'agent (déclencheur, raisonnement, transition, CUA…). */
+  agentAction: number;
+  /** Ancrage RAG sur le Microsoft Graph du locataire. */
+  tenantGraphGrounding: number;
+  /** Actions de flux d'agent, facturées par lot de 100. */
+  agentFlowActionsPer100: number;
+  /** Outils texte/IA générative, crédits par 1K tokens (basic|standard|premium). */
+  genAiToolsPer1kTokens: { basic: number; standard: number; premium: number };
+  /** Traitement de contenu, par page. */
+  contentProcessingPerPage: number;
+}
+
+export const COPILOT_STUDIO_RATE_CARD: CopilotStudioRateCard = {
+  classicResponse: 1,
+  generativeResponse: 2,
+  agentAction: 5,
+  tenantGraphGrounding: 10,
+  agentFlowActionsPer100: 13,
+  genAiToolsPer1kTokens: { basic: 0.1, standard: 1.5, premium: 10 },
+  contentProcessingPerPage: 8,
+};
+
+/**
+ * Activité observée d'un agent Copilot pour une tâche — sert de base à
+ * l'estimation. Vaks n'observe que sa TRANCHE (actions MCP, livrables,
+ * transitions) ; la part générative/tokens qu'il ne voit pas est couverte par un
+ * `baselineCreditsPerTask` réglable, ajouté par l'appelant (hors de cette
+ * fonction pure).
+ */
+export interface CopilotActivity {
+  /** Actions d'agent observées (≈ appels MCP, livrables, transitions de statut). */
+  agentActions?: number;
+  /** Réponses génératives connues (souvent inconnu côté Vaks → 0). */
+  generativeResponses?: number;
+  /** Réponses classiques connues. */
+  classicResponses?: number;
+  /** Tokens de raisonnement premium connus. */
+  premiumTokens?: number;
+}
+
+/**
+ * Estime les crédits Copilot consommés par une activité, via la grille. PURE et
+ * testable. N'inclut PAS la baseline par tâche (ajoutée par l'appelant). Les
+ * compteurs négatifs sont clampés à 0.
+ */
+export function estimateCopilotCredits(
+  a: CopilotActivity,
+  card: CopilotStudioRateCard = COPILOT_STUDIO_RATE_CARD,
+): number {
+  const nn = (v?: number) => (typeof v === 'number' && v > 0 ? v : 0);
+  const credits =
+    nn(a.agentActions) * card.agentAction +
+    nn(a.generativeResponses) * card.generativeResponse +
+    nn(a.classicResponses) * card.classicResponse +
+    (nn(a.premiumTokens) / 1000) * card.genAiToolsPer1kTokens.premium;
+  return Math.round(credits * 100) / 100;
+}
 
 /** Un projet sur lequel un agent est affecté (`GET /me/agents/:id`). */
 export interface WorkspaceAgentProjectDto {
@@ -1119,12 +1304,16 @@ export interface WorkspaceAgentDetailDto extends WorkspaceAgentDto {
 export interface WorkspaceAgentDto {
   id: string;
   name: string;
+  /** Email synthétique `agent-<slug>@agents.invalid` (identifiant, jamais de mail envoyé). */
+  email: string;
   status: 'ACTIVE' | 'SUSPENDED';
   trustLevel: AgentTrustLevel;
   ownerId: string;
   ownerName: string | null;
   model: string | null;
   modelProvider: string | null;
+  /** Unité de facturation dérivée du provider (tokens | credits). */
+  billingUnit?: AgentBillingUnit;
   capabilities: string[];
   skills: { skillId: string; name: string; level: number }[];
   /** L'utilisateur courant est l'owner (responsable) de cet agent. */
@@ -1159,6 +1348,8 @@ export interface CreateAgentDto {
   defaultBillRatePerKTokens?: number | null;
   dailyCostBudget?: number | null;
   monthlyCostBudget?: number | null;
+  /** Lot 2 — l'agent suit les prix catalogue (mode `per_agent`). */
+  followCatalogPricing?: boolean;
 }
 
 export type UpdateAgentDto = Partial<CreateAgentDto> & { status?: 'ACTIVE' | 'SUSPENDED' };
@@ -1299,6 +1490,10 @@ export interface ProjectDto {
   name: string;
   description: string | null;
   status: ProjectStatus;
+  /** Santé projet (RAG) pour le point de statut client. `null` = non renseignée. */
+  statusHealth?: ProjectHealth | null;
+  /** Résumé narratif du statut (rendu dans le deck client). */
+  statusSummary?: string | null;
   startDate: string | null;
   dueDate: string | null;
   createdAt: string;
@@ -1524,7 +1719,7 @@ export type UpsertProjectCharterDto = Partial<
   >
 >;
 
-export type DocumentTemplateKind = 'CHARTER';
+export type DocumentTemplateKind = 'CHARTER' | 'CLIENT_STATUS_PPTX';
 
 export interface DocumentTemplateDto {
   kind: DocumentTemplateKind;
@@ -1561,6 +1756,10 @@ export interface UpdateProjectDto {
   name?: string;
   description?: string | null;
   status?: ProjectStatus;
+  /** Santé projet (RAG) pour le point de statut client. null pour effacer. */
+  statusHealth?: ProjectHealth | null;
+  /** Résumé narratif du statut. null/'' pour effacer. */
+  statusSummary?: string | null;
   /** ISO date YYYY-MM-DD or null to clear */
   startDate?: string | null;
   dueDate?: string | null;
@@ -1735,6 +1934,8 @@ export interface AgentRateRowDto {
   name: string;
   /** Modèle du profil agent (ex. 'claude-sonnet-5'). */
   model: string | null;
+  /** Unité de facturation dérivée du provider (tokens | credits). */
+  billingUnit?: AgentBillingUnit;
   /** Taux résolu € / 1000 tokens (null = non facturable). */
   billRatePerKTokens: number | null;
   /** D'où vient le taux : override projet, défaut agent, ou aucun. */
@@ -1770,6 +1971,8 @@ export interface ProjectAgentRatesDto {
 export interface AgentReportPerAgentDto {
   agentId: string;
   name: string;
+  /** Unité de facturation dérivée du provider (tokens | credits). */
+  billingUnit?: AgentBillingUnit;
   /** Tâches passées à DONE par cet agent dans la fenêtre. */
   tasksCompleted: number;
   /** Chaînes de livrables soumises (finals, toutes revues confondues). */
@@ -3704,6 +3907,9 @@ export interface AgentRunDto {
   /** Clé d'idempotence si l'agent en a fourni une (sinon null). */
   runKey: string | null;
   note: string | null;
+  /** Provenance (Lot 3) : 'self' = déclaré par l'agent ; 'gateway' = mesuré par
+   *  la passerelle LLM Vaks (usage exact). Défaut 'self' sur l'historique. */
+  source: string;
   createdAt: string;
   /**
    * État des enveloppes de coût APRÈS ce run (coupe-circuit lot A). Présent

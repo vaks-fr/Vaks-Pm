@@ -395,14 +395,19 @@ function RequiredSkillChip({
 /**
  * Sous-ensemble des utilisateurs assignables aux tâches du projet courant.
  * Si `availableAssigneeIds` est null (config non chargée / aucune équipe), on
- * retombe sur l'annuaire complet. Les agents IA sont exclus : en v1 ils ne
- * sont jamais assignés par un humain (modèle pull — chantier 2), même s'ils
- * sont membres du projet (la map USERS les contient pour l'AFFICHAGE).
+ * retombe sur l'annuaire complet.
+ *
+ * Les agents IA sont exclus par défaut (le modèle historique est « pull » — un
+ * agent claim, il n'est pas assigné). `includeAgents` (projets `agentsEnabled`)
+ * les réintègre : un humain peut alors assigner un agent **membre** du projet
+ * (le nudge se déclenche sur `task.assigned`). `availableAssigneeIds` contient
+ * déjà les membres directs (agents inclus), donc seuls les agents membres
+ * apparaissent ; le serveur re-valide de toute façon (agentsEnabled + membership).
  */
-function pickableUsers(): User[] {
-  const humans = USERS.filter((u) => u.kind !== 'AGENT');
-  if (!availableAssigneeIds || availableAssigneeIds.size === 0) return humans;
-  return humans.filter((u) => availableAssigneeIds!.has(u.id));
+function pickableUsers(includeAgents = false): User[] {
+  const base = includeAgents ? USERS : USERS.filter((u) => u.kind !== 'AGENT');
+  if (!availableAssigneeIds || availableAssigneeIds.size === 0) return base;
+  return base.filter((u) => availableAssigneeIds!.has(u.id));
 }
 
 /* ---- mention-aware comment body ---- */
@@ -1959,8 +1964,9 @@ export function TaskDetail({
                   {(() => {
                     // Fusionne suggestions API (triées skill×dispo) + fallback
                     // local. Garde tous les pickables pour ne jamais cacher
-                    // un user que la suggestion n'aurait pas renvoyé.
-                    const local = pickableUsers();
+                    // un user que la suggestion n'aurait pas renvoyé. Sur un
+                    // projet agents-enabled, les agents membres sont assignables.
+                    const local = pickableUsers(!!proj?.agentsEnabled);
                     const byId = new Map(local.map((u) => [u.id, u]));
                     type Row = {
                       user: User;

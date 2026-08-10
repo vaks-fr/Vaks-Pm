@@ -12,6 +12,7 @@ import { DemoHttpError, type DemoResult } from './routes-shared';
 import * as m from './mutations';
 import * as cv from './compute-views';
 import { DEMO_TEAM_MEMBERS } from './seed';
+import { resolveDemoLanguage, DEMO_LOCALE_BY_LANG } from './config';
 
 // Ré-export pour handler.ts (qui importe depuis './routes').
 export { DemoHttpError };
@@ -52,9 +53,10 @@ const DELETE = (p: string, h: Handler) => route('DELETE', p, h);
    Settings + licence + auth
    ============================================================ */
 
+const DEMO_LANG = resolveDemoLanguage();
 const PUBLIC_SETTINGS = {
-  locale: 'fr-FR',
-  defaultLanguage: 'fr',
+  locale: DEMO_LANG ? (DEMO_LOCALE_BY_LANG[DEMO_LANG] ?? 'fr-FR') : 'fr-FR',
+  defaultLanguage: DEMO_LANG ?? 'fr',
   enabledLanguages: ['en', 'fr', 'it', 'de'],
   weekStart: 'monday' as const,
   hoursPerDay: 8,

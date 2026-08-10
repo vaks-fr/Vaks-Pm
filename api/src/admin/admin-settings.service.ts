@@ -267,6 +267,12 @@ export class AdminSettingsService {
         throw new BadRequestException('Fenêtre d’alerte brute-force : entre 1 et 120 minutes');
       }
     }
+    if ('audit.logReads' in values) {
+      const v = values['audit.logReads'];
+      if (v != null && v !== '' && !['off', 'agents', 'all'].includes(String(v))) {
+        throw new BadRequestException(`Mode de journalisation des lectures invalide : ${String(v)} (off|agents|all)`);
+      }
+    }
   }
 
   /**
@@ -334,6 +340,28 @@ export class AdminSettingsService {
         );
       }
       values['agents.executionLeaseMinutes'] = n;
+    }
+    // Lot 2 (AGENT_COST_UNITS) — feed de prix des modèles.
+    if ('agents.pricing.applyMode' in values) {
+      const v = values['agents.pricing.applyMode'];
+      if (v != null && v !== '' && !['off', 'all', 'per_agent'].includes(String(v))) {
+        throw new BadRequestException(
+          'agents.pricing.applyMode invalide : off | all | per_agent.',
+        );
+      }
+    }
+    if (
+      'agents.pricing.usdToEurRate' in values &&
+      values['agents.pricing.usdToEurRate'] != null &&
+      values['agents.pricing.usdToEurRate'] !== ''
+    ) {
+      const n = Number(values['agents.pricing.usdToEurRate']);
+      if (!Number.isFinite(n) || n < 0.1 || n > 10) {
+        throw new BadRequestException(
+          'agents.pricing.usdToEurRate : nombre entre 0.1 et 10.',
+        );
+      }
+      values['agents.pricing.usdToEurRate'] = n;
     }
   }
 
@@ -868,6 +896,17 @@ export class AdminSettingsService {
     return 'balanced';
   }
 
+  /**
+   * Mode de journalisation forensic des lectures (`OrgSetting audit.logReads`,
+   * cf. `AuditLogInterceptor`). Défaut `off` (comportement historique : seules
+   * les mutations sont auditées).
+   */
+  async getAuditLogReadsMode(orgId: string): Promise<'off' | 'agents' | 'all'> {
+    const v = await this.getValue(orgId, 'audit.logReads');
+    if (v === 'agents' || v === 'all') return v;
+    return 'off';
+  }
+
   /** Retourne 7 booléens [mon..sun]. Défaut Mon-Fri. */
   async getDefaultWorkDays(orgId: string): Promise<boolean[]> {
     const v = await this.getValue(orgId, 'defaultWorkDays');
@@ -1142,6 +1181,45 @@ export class AdminSettingsService {
       .filter((d) => GUID.test(d));
   }
 
+  /**
+   * CIDR internes approuvés pour les callbacks de nudge agent (mode on-prem).
+   * Format "X.X.X.X/XX" (v4/v6). Vide = aucun → anti-SSRF strict. N'a d'effet que
+   * si le double-gate est actif (déploiement `dedicated` ou
+   * `ALLOW_INTERNAL_NUDGE_CALLBACKS=true`) — gate évalué dans `AgentNudgeService`.
+   */
+  async getInternalNudgeCidrs(orgId: string): Promise<string[]> {
+    const v = await this.getValue(orgId, 'nudge.internalCallbackCidrs');
+    const raw = Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[\s,]+/) : [];
+    return raw.map((d) => String(d).trim()).filter(Boolean);
+  }
+
+  /**
+   * Gate de capacité du nudge (AGENT_NUDGE_CAPACITY.md) — **ON par défaut**.
+   *
+   * Interrupteur de sûreté : le gate change le comportement de réveil de tous
+   * les agents, et une dérive silencieuse (réservations qui fuient, `room`
+   * coincé à 0) serait invisible de l'extérieur. Le passer à `false` restaure le
+   * comportement d'avant (un nudge par événement, sans plafond).
+   */
+  async getNudgeCapacityGating(orgId: string): Promise<boolean> {
+    const v = await this.getValue(orgId, 'agents.nudge.capacityGating');
+    return v === undefined || v === null ? true : v === true || v === 'true';
+  }
+
+  /**
+   * Plafond de réveils simultanés par agent (0 = pas de plafond explicite, on
+   * retombe sur `DEFAULT_FANOUT_CAP`).
+   *
+   * Repli si le provider **sérialise** ses runs (concurrency control d'un
+   * trigger Logic Apps / Power Automate) : à 1, on revient à un réveil à la fois
+   * sans rien redéployer.
+   */
+  async getNudgeMaxParallel(orgId: string): Promise<number> {
+    const v = await this.getValue(orgId, 'agents.nudge.maxParallel');
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 50) : 0;
+  }
+
   // ---------- MCP (connecteur IA, phase 11) ----------
 
   /**
@@ -1229,9 +1307,11 @@ export class AdminSettingsService {
       }
       const normalized: Record<string, number> = {};
       for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-        if (!/^(vaks_[a-z0-9_]{1,60}|\*)$/.test(k)) {
+        // Accepte aussi les identifiants composites `tool:action` des tools
+        // fusionnés (ex. `vaks_teams_manage:remove_member`).
+        if (!/^(vaks_[a-z0-9_]{1,60}(:[a-z_]{1,30})?|\*)$/.test(k)) {
           throw new BadRequestException(
-            `mcp.toolQuotas : clé invalide « ${k} » (attendu un nom de tool vaks_… ou « * »).`,
+            `mcp.toolQuotas : clé invalide « ${k} » (attendu un nom de tool vaks_…, un composite vaks_…:action ou « * »).`,
           );
         }
         const n = Number(v);

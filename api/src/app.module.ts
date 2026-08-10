@@ -49,6 +49,7 @@ import { FileSourcesModule } from './filesources/filesources.module';
 import { AgentContextModule } from './agent-context/agent-context.module';
 import { TicketingModule } from './ticketing/ticketing.module';
 import { AgentsModule } from './agents/agents.module';
+import { AgentNudgeModule } from './agents/agent-nudge.module';
 import { CiWebhooksModule } from './ci-webhooks/ci-webhooks.module';
 import { AutomationsModule } from './automations/automations.module';
 import { AnnouncementsModule } from './announcements/announcements.module';
@@ -153,6 +154,7 @@ import { APP_GUARD, DiscoveryModule } from '@nestjs/core';
     AgentContextModule,
     TicketingModule,
     AgentsModule,
+    AgentNudgeModule,
     CiWebhooksModule,
     AutomationsModule,
     AnnouncementsModule,

@@ -25,13 +25,29 @@ import {
   validateDocxTemplate,
   CHARTER_TEMPLATE_KEYS,
 } from '../projects/charter-docx';
+import { CLIENT_STATUS_TEMPLATE_KEYS, validateStatusDeckTemplate } from '../reports/status-deck';
 
 const TEMPLATE_MAX_BYTES = 5 * 1024 * 1024;
-const TEMPLATE_KINDS = ['CHARTER'] as const;
+const TEMPLATE_KINDS = ['CHARTER', 'CLIENT_STATUS_PPTX'] as const;
 type TemplateKind = (typeof TEMPLATE_KINDS)[number];
-const TEMPLATE_ALLOWED_MIME = new Set([
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-]);
+
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+
+/** MIME attendu par type de template (le validateur docxtemplater lit aussi bien
+ *  un .docx qu'un .pptx — c'est le même conteneur OOXML). */
+const KIND_MIME: Record<TemplateKind, string> = {
+  CHARTER: DOCX_MIME,
+  CLIENT_STATUS_PPTX: PPTX_MIME,
+};
+const KIND_EXT: Record<TemplateKind, string> = {
+  CHARTER: '.docx',
+  CLIENT_STATUS_PPTX: '.pptx',
+};
+const KIND_KEYS: Record<TemplateKind, readonly string[]> = {
+  CHARTER: CHARTER_TEMPLATE_KEYS,
+  CLIENT_STATUS_PPTX: CLIENT_STATUS_TEMPLATE_KEYS,
+};
 
 @ApiTags('admin/document-templates')
 @ApiBearerAuth()
@@ -64,16 +80,20 @@ export class DocumentTemplatesController {
   ) {
     const kind = this.parseKind(kindRaw);
     if (!file) throw new BadRequestException('Fichier manquant (champ "file")');
-    if (!TEMPLATE_ALLOWED_MIME.has(file.mimetype)) {
+    if (file.mimetype !== KIND_MIME[kind]) {
       throw new BadRequestException(
-        `MIME non autorisé (${file.mimetype}). Attendu : .docx`,
+        `MIME non autorisé (${file.mimetype}). Attendu : ${KIND_EXT[kind]}`,
       );
     }
     // Validation docxtemplater : rejette un template cassé (zip invalide ou
-    // balise non fermée) AVANT de l'enregistrer. Les tags inconnus du modèle
-    // sont remontés comme avertissement non bloquant. (chantier #7)
-    const knownKeys = kind === 'CHARTER' ? CHARTER_TEMPLATE_KEYS : [];
-    const validation = validateDocxTemplate(file.buffer, knownKeys);
+    // balise non fermée) AVANT de l'enregistrer. Le validateur ouvre un .docx
+    // comme un .pptx (conteneur OOXML) ; le kind PPTX utilise un validateur
+    // qui charge le module image (sinon les tags `{%chart}` cassent le parse).
+    // Les tags inconnus du modèle sont remontés comme avertissement non bloquant.
+    const validation =
+      kind === 'CLIENT_STATUS_PPTX'
+        ? validateStatusDeckTemplate(file.buffer)
+        : validateDocxTemplate(file.buffer, KIND_KEYS[kind]);
     if (!validation.ok) {
       throw new BadRequestException(
         `Template invalide : ${validation.error}. Vérifie que chaque balise {placeholder} est bien fermée.`,

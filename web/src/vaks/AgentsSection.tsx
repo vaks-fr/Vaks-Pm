@@ -6,15 +6,15 @@ import type {
   AgentRunSummaryDto,
   AgentTrustLevel,
   CreateAgentDto,
+  ModelCatalogDto,
   UserDto,
   UserSkillDto,
 } from '@vaks-pm/shared';
-import { AGENT_TRUST_LEVELS, KNOWN_AGENT_MODELS, permissionsForCapabilities } from '@vaks-pm/shared';
+import { AGENT_TRUST_LEVELS, KNOWN_AGENT_MODELS, permissionsForCapabilities, billingUnitForProvider } from '@vaks-pm/shared';
 import { api } from '../api/client';
 import { Icon } from './primitives';
-import { useConfirm } from './confirm';
 import { useAuth } from '../auth/AuthContext';
-import { UserSkillsDialog } from './TeamView';
+import { AgentEditorModal } from './AgentEditorModal';
 
 type Flash = (msg: string) => void;
 
@@ -44,6 +44,14 @@ export default function AgentsSection({ flash }: { flash: Flash }) {
   const [statusTab, setStatusTab] = useState<'ACTIVE' | 'SUSPENDED'>('ACTIVE');
   const [page, setPage] = useState(1);
 
+  // ⚠️ Deps VIDES volontaires. `load` appelle `refreshLicense()` (→ setLicense),
+  // ce qui re-render tout consommateur `useAuth` — dont AdminPanel, qui recrée la
+  // prop `flash` inline. Si `flash`/`refreshLicense`/`t` étaient dans les deps,
+  // `load` changerait d'identité à chaque appel et `useEffect([load])` bouclerait
+  // à l'infini (symptôme : liste qui recharge en boucle + rate-limit). On fige
+  // donc `load` : les refs capturées au montage suffisent (flash = juste un toast
+  // d'erreur, refreshLicense est idempotent). eslint-disable assumé.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -65,7 +73,7 @@ export default function AgentsSection({ flash }: { flash: Flash }) {
     } finally {
       setLoading(false);
     }
-  }, [flash, t, refreshLicense]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -230,6 +238,113 @@ export default function AgentsSection({ flash }: { flash: Flash }) {
 }
 
 // ---------------------------------------------------------------------------
+// Prix catalogue (Lot 2 AGENT_COST_UNITS) — feed opt-in, mode d'application,
+// taux USD→EUR, synchro manuelle. Air-gap : feed off par défaut.
+// ---------------------------------------------------------------------------
+
+export function ModelPricingPanel({ flash, onApplied }: { flash: Flash; onApplied?: () => void }) {
+  const { t, i18n } = useTranslation('admin');
+  const [cat, setCat] = useState<ModelCatalogDto | null>(null);
+  const [feedEnabled, setFeedEnabled] = useState(false);
+  const [applyMode, setApplyMode] = useState<'off' | 'all' | 'per_agent'>('off');
+  const [usdRate, setUsdRate] = useState('0.92');
+  const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const c = await api.getModelCatalog();
+      setCat(c);
+      setFeedEnabled(c.feedEnabled);
+      setApplyMode(c.applyMode);
+      setUsdRate(String(c.usdToEurRate));
+    } catch {
+      /* AI-admin restreint sans accès : panneau simplement absent. */
+    }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  if (!cat) return null;
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.putAgentPolicies({
+        'agents.pricing.feedEnabled': feedEnabled,
+        'agents.pricing.applyMode': applyMode,
+        'agents.pricing.usdToEurRate': Number(usdRate) || 0.92,
+      });
+      flash(t('agents.pricing.saved'));
+      await load();
+    } catch (e) {
+      flash((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const sync = async () => {
+    setSyncing(true);
+    try {
+      const r = await api.syncModelPricing();
+      if (!r.enabled) flash(t('agents.pricing.syncDisabled'));
+      else if (r.error) flash(t('agents.pricing.syncFailed', { message: r.error }));
+      else flash(t('agents.pricing.syncDone', { upserted: r.upserted, applied: r.applied }));
+      await load();
+      onApplied?.();
+    } catch (e) {
+      flash((e as Error).message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const lastSync = cat.lastSyncAt ? new Date(cat.lastSyncAt).toLocaleString(i18n.language) : null;
+
+  return (
+    <div style={{ margin: '0 0 12px', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)' }}>
+      <div className="row gap2" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>{t('agents.pricing.title')}</span>
+        {lastSync && (
+          <span className="pill" style={{ fontSize: 10, background: 'var(--surface-2)', color: cat.lastSyncOk === false ? '#b45309' : 'var(--text-3)' }}>
+            {cat.lastSyncOk === false
+              ? t('agents.pricing.lastSyncFailed')
+              : t('agents.pricing.lastSync', { date: lastSync })}
+          </span>
+        )}
+        <button className="btn btn-line btn-sm" style={{ marginLeft: 'auto' }} disabled={syncing || !feedEnabled} onClick={sync}>
+          <Icon name="refresh" size={13} /> {syncing ? t('agents.pricing.syncing') : t('agents.pricing.syncNow')}
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-3)', margin: '4px 0 8px' }}>{t('agents.pricing.blurb')}</div>
+      <div className="row gap2" style={{ alignItems: 'center', flexWrap: 'wrap', fontSize: 12.5 }}>
+        <label className="row gap1" style={{ alignItems: 'center', cursor: 'pointer' }}>
+          <input type="checkbox" checked={feedEnabled} onChange={(e) => setFeedEnabled(e.target.checked)} />
+          <span>{t('agents.pricing.feedEnabled')}</span>
+        </label>
+        <label className="row gap1" style={{ alignItems: 'center' }}>
+          <span>{t('agents.pricing.applyMode')}</span>
+          <select className="td-in" style={{ width: 'auto' }} value={applyMode} onChange={(e) => setApplyMode(e.target.value as 'off' | 'all' | 'per_agent')}>
+            <option value="off">{t('agents.pricing.mode.off')}</option>
+            <option value="all">{t('agents.pricing.mode.all')}</option>
+            <option value="per_agent">{t('agents.pricing.mode.per_agent')}</option>
+          </select>
+        </label>
+        <label className="row gap1" style={{ alignItems: 'center' }} title={t('agents.pricing.usdHint')}>
+          <span>{t('agents.pricing.usdRate')}</span>
+          <input className="td-in" type="number" min={0.1} max={10} step="0.01" style={{ width: 80 }} value={usdRate} onChange={(e) => setUsdRate(e.target.value)} />
+        </label>
+        <button className="btn btn-accent btn-sm" disabled={saving} onClick={save}>{t('common:save')}</button>
+      </div>
+      {/* Mention prestataires tiers / réseau (récupération liste + prix externes). */}
+      <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 8, lineHeight: 1.5, maxWidth: 720 }}>
+        {t('agents.pricing.externalNotice')}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Ligne compacte (nom · owner · pills · Edit)
 // ---------------------------------------------------------------------------
 
@@ -282,15 +397,26 @@ function AgentRow({ agent: a, onEdit }: { agent: AgentDto; onEdit: () => void })
             {t('agents.agentBadge', { defaultValue: 'Agent' })}
           </span>
         </div>
+        <div className="dir-email mono">{a.email}</div>
         <div className="dir-email">
           {t('agents.owner')} : {a.ownerName ?? a.ownerEmail ?? '—'}
         </div>
       </div>
-      <div className="dir-title" style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
+      <div className="dir-title row gap1" style={{ color: 'var(--text-3)', fontSize: 12.5, alignItems: 'center', flexWrap: 'wrap' }}>
         {a.model ? (
           <span>{a.modelProvider ? `${a.modelProvider}/` : ''}{a.model}</span>
         ) : (
           <span style={{ color: 'var(--text-faint)' }}>—</span>
+        )}
+        {a.billingUnit === 'credits' && (
+          <span className="pill" style={{ background: 'var(--surface-2)', color: 'var(--text-3)', fontSize: 10 }}>
+            {t('agents.unitCredits')}
+          </span>
+        )}
+        {a.priceDrift && (
+          <span className="pill" title={t('agents.driftHint')} style={{ background: 'color-mix(in oklch, #f59e0b 20%, var(--surface))', color: '#b45309', fontSize: 10 }}>
+            {t('agents.driftBadge')}
+          </span>
         )}
       </div>
       <div className="row gap2" style={{ justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -310,584 +436,6 @@ function AgentRow({ agent: a, onEdit }: { agent: AgentDto; onEdit: () => void })
           <Icon name="pencil" size={14} /> {t('common:edit')}
         </button>
       </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Modale d'édition — champs + jetons + zone de danger (suspend/suppression)
-// ---------------------------------------------------------------------------
-
-function AgentEditorModal({
-  agent,
-  users,
-  capabilities,
-  onClose,
-  onChanged,
-  onMinted,
-  flash,
-}: {
-  agent: AgentDto | null;
-  users: UserDto[];
-  capabilities: string[];
-  onClose: () => void;
-  onChanged: () => Promise<void> | void;
-  onMinted: (agentName: string, token: string) => void;
-  flash: Flash;
-}) {
-  const { t, i18n } = useTranslation('admin');
-  const confirm = useConfirm();
-  const [name, setName] = useState(agent?.name ?? '');
-  const [ownerId, setOwnerId] = useState(agent?.ownerId ?? '');
-  const [trustLevel, setTrustLevel] = useState<AgentTrustLevel>(agent?.trustLevel ?? 'DRAFT_ONLY');
-  const [caps, setCaps] = useState<string[]>(agent?.capabilities ?? ['read:project']);
-  const [modelProvider, setModelProvider] = useState(agent?.modelProvider ?? '');
-  const [model, setModel] = useState(agent?.model ?? '');
-  const [hostingRegion, setHostingRegion] = useState(agent?.hostingRegion ?? '');
-  const [maxConcurrent, setMaxConcurrent] = useState<string>(agent?.maxConcurrentTasks?.toString() ?? '');
-  const [dailyRuns, setDailyRuns] = useState<string>(agent?.dailyRunBudget?.toString() ?? '');
-  const [costInPerK, setCostInPerK] = useState<string>(agent?.costRateInPerKTokens?.toString() ?? '');
-  const [costOutPerK, setCostOutPerK] = useState<string>(agent?.costRateOutPerKTokens?.toString() ?? '');
-  const [billPerK, setBillPerK] = useState<string>(agent?.defaultBillRatePerKTokens?.toString() ?? '');
-  const [dailyCost, setDailyCost] = useState<string>(agent?.dailyCostBudget?.toString() ?? '');
-  const [monthlyCost, setMonthlyCost] = useState<string>(agent?.monthlyCostBudget?.toString() ?? '');
-  const [tokens, setTokens] = useState(agent?.tokens ?? []);
-  const [saving, setSaving] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [usage, setUsage] = useState<AgentRunSummaryDto | null>(null);
-  // Compétences de l'agent (UserSkill) — ce qu'il sait faire. Le niveau encode la
-  // fiabilité sur ce type de tâche ; sert au filtre `next_task` (chantier 4).
-  // Édition via le MÊME dialogue que les users (`UserSkillsDialog`) — ici on
-  // n'affiche qu'un résumé lecture seule + bouton d'ouverture.
-  const [agentSkills, setAgentSkills] = useState<UserSkillDto[]>([]);
-  const [skillsOpen, setSkillsOpen] = useState(false);
-  // Identifiants machine (refresh rotatif — agents headless sans plateforme).
-  const [credentials, setCredentials] = useState<AgentCredentialDto[]>([]);
-  const [newCredSecret, setNewCredSecret] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!agent) return;
-    let alive = true;
-    api.getAgentRuns(agent.id).then(
-      (u) => alive && setUsage(u),
-      () => undefined, // best-effort : le panneau usage reste masqué si l'appel échoue
-    );
-    api.listUserSkills(agent.id).then(
-      (us) => alive && setAgentSkills(us),
-      () => undefined,
-    );
-    api.listAgentCredentials(agent.id).then(
-      (c) => alive && setCredentials(c),
-      () => undefined,
-    );
-    return () => {
-      alive = false;
-    };
-  }, [agent]);
-
-  const issueCredential = async () => {
-    if (!agent) return;
-    setBusy(true);
-    try {
-      const r = await api.issueAgentCredential(agent.id, {});
-      setNewCredSecret(r.secret); // montré une seule fois
-      setCredentials(await api.listAgentCredentials(agent.id));
-    } catch (e) {
-      flash((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const revokeCredential = async (credentialId: string) => {
-    if (!agent) return;
-    try {
-      await api.revokeAgentCredential(agent.id, credentialId);
-      setCredentials(await api.listAgentCredentials(agent.id));
-    } catch (e) {
-      flash((e as Error).message);
-    }
-  };
-
-  const reloadSkills = async () => {
-    if (agent) setAgentSkills(await api.listUserSkills(agent.id));
-  };
-
-  const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString(i18n.language) : '—');
-  const toggleCap = (c: string) =>
-    setCaps((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
-
-  // Modèles connus (catalogue embarqué, filtré par provider si renseigné). Sert
-  // de suggestions au champ modèle ET pré-remplit les taux de coût s'ils sont
-  // encore vides (l'admin garde la main : on n'écrase jamais une valeur saisie).
-  const modelOptions = KNOWN_AGENT_MODELS.filter(
-    (m) => !modelProvider.trim() || m.provider === modelProvider.trim(),
-  );
-  const applyModel = (val: string) => {
-    setModel(val);
-    const entry = KNOWN_AGENT_MODELS.find(
-      (m) => m.model === val && (!modelProvider.trim() || m.provider === modelProvider.trim()),
-    );
-    if (!entry) return;
-    if (!modelProvider.trim()) setModelProvider(entry.provider);
-    if (!costInPerK.trim() && entry.suggestedCostInPerKTokens != null)
-      setCostInPerK(String(entry.suggestedCostInPerKTokens));
-    if (!costOutPerK.trim() && entry.suggestedCostOutPerKTokens != null)
-      setCostOutPerK(String(entry.suggestedCostOutPerKTokens));
-  };
-
-  const save = async () => {
-    if (!name.trim() || !ownerId) {
-      flash(t('agents.nameOwnerRequired'));
-      return;
-    }
-    setSaving(true);
-    const dto: CreateAgentDto = {
-      name: name.trim(),
-      ownerId,
-      trustLevel,
-      capabilities: caps,
-      modelProvider: modelProvider.trim() || null,
-      model: model.trim() || null,
-      hostingRegion: hostingRegion.trim() || null,
-      maxConcurrentTasks: maxConcurrent.trim() ? Number(maxConcurrent) : null,
-      dailyRunBudget: dailyRuns.trim() ? Number(dailyRuns) : null,
-      costRateInPerKTokens: costInPerK.trim() ? Number(costInPerK) : null,
-      costRateOutPerKTokens: costOutPerK.trim() ? Number(costOutPerK) : null,
-      defaultBillRatePerKTokens: billPerK.trim() ? Number(billPerK) : null,
-      dailyCostBudget: dailyCost.trim() ? Number(dailyCost) : null,
-      monthlyCostBudget: monthlyCost.trim() ? Number(monthlyCost) : null,
-    };
-    try {
-      if (agent) {
-        await api.updateAgent(agent.id, dto);
-        flash(t('agents.updated'));
-      } else {
-        await api.createAgent(dto);
-        flash(t('agents.created'));
-      }
-      await onChanged();
-      onClose();
-    } catch (e) {
-      flash(t('agents.saveFailed', { message: (e as Error).message }));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const issueToken = async () => {
-    if (!agent) return;
-    setBusy(true);
-    try {
-      const r = await api.mintAgentToken(agent.id, {});
-      onMinted(agent.name, r.token);
-      setTokens((prev) => [
-        { id: r.id, name: `${agent.name} — token`, prefix: r.prefix, expiresAt: null, lastUsedAt: null },
-        ...prev,
-      ]);
-      await onChanged();
-    } catch (e) {
-      flash(t('agents.mintFailed', { message: (e as Error).message }));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const revokeToken = async (tokenId: string) => {
-    if (!agent) return;
-    if (
-      !(await confirm({
-        title: t('agents.revokeToken'),
-        message: t('agents.confirmRevokeToken', { name: agent.name }),
-        confirmLabel: t('agents.revokeToken'),
-        danger: true,
-      }))
-    )
-      return;
-    try {
-      await api.revokeAgentToken(agent.id, tokenId);
-      setTokens((prev) => prev.filter((x) => x.id !== tokenId));
-      flash(t('agents.tokenRevoked'));
-      await onChanged();
-    } catch (e) {
-      flash(t('agents.actionFailed', { message: (e as Error).message }));
-    }
-  };
-
-  const toggleStatus = async () => {
-    if (!agent) return;
-    const next = agent.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
-    setBusy(true);
-    try {
-      await api.updateAgent(agent.id, { status: next });
-      flash(next === 'SUSPENDED' ? t('agents.suspended') : t('agents.reactivated'));
-      await onChanged();
-      onClose();
-    } catch (e) {
-      flash(t('agents.actionFailed', { message: (e as Error).message }));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async () => {
-    if (!agent) return;
-    if (
-      !(await confirm({
-        title: t('common:delete'),
-        message: t('agents.confirmDelete', { name: agent.name }),
-        confirmLabel: t('common:delete'),
-        danger: true,
-      }))
-    )
-      return;
-    setBusy(true);
-    try {
-      await api.deleteAgent(agent.id);
-      flash(t('agents.deleted'));
-      await onChanged();
-      onClose();
-    } catch (e) {
-      flash(t('agents.actionFailed', { message: (e as Error).message }));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const field = (label: string, node: ReactNode, help?: string) => (
-    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <span style={{ fontSize: 12, color: 'var(--text-2)' }}>{label}</span>
-      {node}
-      {help && <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{help}</span>}
-    </label>
-  );
-
-  return (
-    <div
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
-        display: 'grid', placeItems: 'center', zIndex: 1090, padding: 16,
-      }}
-    >
-      <div
-        style={{
-          width: '100%', maxWidth: 620, maxHeight: '88vh', overflowY: 'auto',
-          background: 'var(--surface)', border: '1px solid var(--border)',
-          borderRadius: 'var(--r-lg, 14px)', boxShadow: '0 12px 40px rgba(0,0,0,0.4)',
-          padding: 20, display: 'flex', flexDirection: 'column', gap: 12,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ fontWeight: 700, fontSize: 15 }}>
-            {agent ? t('agents.editTitle', { name: agent.name }) : t('agents.newTitle')}
-          </div>
-          <button className="icon-btn" style={{ marginLeft: 'auto' }} onClick={onClose} aria-label={t('common:close')}>
-            <Icon name="x" size={18} />
-          </button>
-        </div>
-
-        {field(
-          t('agents.nameField'),
-          <input className="td-in" value={name} onChange={(e) => setName(e.target.value)} style={{ width: '100%' }} />,
-        )}
-        {field(
-          t('agents.ownerField'),
-          <select className="td-in" value={ownerId} onChange={(e) => setOwnerId(e.target.value)} style={{ width: '100%' }}>
-            <option value="">{t('agents.ownerPlaceholder')}</option>
-            {users
-              .filter((u) => u.status !== 'SUSPENDED')
-              .map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.name} — {u.email}
-                </option>
-              ))}
-          </select>,
-          t('agents.ownerHelp'),
-        )}
-        {field(
-          t('agents.trustField'),
-          <select
-            className="td-in"
-            value={trustLevel}
-            onChange={(e) => setTrustLevel(e.target.value as AgentTrustLevel)}
-            style={{ width: '100%' }}
-          >
-            {AGENT_TRUST_LEVELS.map((l) => (
-              <option key={l} value={l}>{t(`agents.trust.${l}`)}</option>
-            ))}
-          </select>,
-          t('agents.trustHelp'),
-        )}
-        {field(
-          t('agents.capabilitiesField'),
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {capabilities.map((c) => {
-              const on = caps.includes(c);
-              return (
-                <button
-                  key={c}
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => toggleCap(c)}
-                  style={{
-                    fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)',
-                    background: on ? 'color-mix(in oklch, var(--accent) 18%, var(--surface))' : 'var(--surface)',
-                    color: on ? 'var(--accent)' : 'var(--text-2)',
-                  }}
-                >
-                  {c}
-                </button>
-              );
-            })}
-          </div>,
-          t('agents.capabilitiesHelp'),
-        )}
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
-          {field(t('agents.modelProviderField'), <input className="td-in" value={modelProvider} placeholder="anthropic" onChange={(e) => setModelProvider(e.target.value)} />)}
-          {field(t('agents.modelField'), <><input className="td-in" list="vaks-agent-model-catalog" value={model} placeholder="claude-sonnet-5" onChange={(e) => applyModel(e.target.value)} /><datalist id="vaks-agent-model-catalog">{modelOptions.map((m) => (<option key={`${m.provider}/${m.model}`} value={m.model}>{m.label}</option>))}</datalist></>)}
-          {field(t('agents.regionField'), <input className="td-in" value={hostingRegion} placeholder="eu" onChange={(e) => setHostingRegion(e.target.value)} />)}
-          {field(t('agents.maxConcurrentField'), <input className="td-in" type="number" min={1} value={maxConcurrent} onChange={(e) => setMaxConcurrent(e.target.value)} />)}
-          {field(t('agents.dailyRunsField'), <input className="td-in" type="number" min={1} value={dailyRuns} onChange={(e) => setDailyRuns(e.target.value)} />)}
-          {field(t('agents.costInPerKTokensField'), <input className="td-in" type="number" min={0} step="0.001" placeholder="€" value={costInPerK} onChange={(e) => setCostInPerK(e.target.value)} />)}
-          {field(t('agents.costOutPerKTokensField'), <input className="td-in" type="number" min={0} step="0.001" placeholder="€" value={costOutPerK} onChange={(e) => setCostOutPerK(e.target.value)} />)}
-          {field(t('agents.billPerKTokensField'), <input className="td-in" type="number" min={0} step="0.001" placeholder="€" value={billPerK} onChange={(e) => setBillPerK(e.target.value)} />)}
-          {field(t('agents.dailyCostField'), <input className="td-in" type="number" min={0} step="0.01" placeholder="€" value={dailyCost} onChange={(e) => setDailyCost(e.target.value)} />)}
-          {field(t('agents.monthlyCostField'), <input className="td-in" type="number" min={0} step="0.01" placeholder="€" value={monthlyCost} onChange={(e) => setMonthlyCost(e.target.value)} />)}
-        </div>
-
-        {/* Jetons (édition seulement — un agent doit exister pour en émettre) */}
-        {agent ? (
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontWeight: 600, fontSize: 13 }}>{t('agents.tokensSection')}</span>
-              <button className="btn btn-line btn-sm" style={{ marginLeft: 'auto' }} disabled={busy} onClick={issueToken}>
-                <Icon name="plus" size={13} /> {t('agents.mintToken')}
-              </button>
-            </div>
-            {/* Le lien capacités → droits du jeton n'était écrit nulle part :
-                on cherchait un sélecteur de scopes qui n'existe pas, et on
-                minte un jeton trop pauvre sans comprendre pourquoi. */}
-            <div style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.5 }}>
-              {t('agents.mintScopesHint', {
-                defaultValue:
-                  'A token carries exactly the rights of the capabilities ticked above, frozen at issue time. Change the capabilities and the existing tokens do NOT follow: tick first, save, then issue a new token.',
-              })}
-              {caps.length > 0 && (
-                <>
-                  {' '}
-                  <span style={{ color: 'var(--text-2)' }}>
-                    {t('agents.mintScopesPreview', { defaultValue: 'This agent would get:' })}{' '}
-                    <code style={{ fontFamily: 'var(--mono, monospace)' }}>
-                      {permissionsForCapabilities(caps).join(', ') || '—'}
-                    </code>
-                  </span>
-                </>
-              )}
-            </div>
-            {tokens.length === 0 ? (
-              <div style={{ fontSize: 12, color: 'var(--text-3)' }}>{t('agents.noTokens')}</div>
-            ) : (
-              tokens.map((tok) => (
-                <div key={tok.id} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--text-2)' }}>
-                  <code style={{ fontFamily: 'var(--mono, monospace)' }}>{tok.prefix}</code>
-                  <span style={{ color: 'var(--text-3)' }}>
-                    {t('agents.tokenExpires', { date: fmtDate(tok.expiresAt) })}
-                    {tok.lastUsedAt ? ` · ${t('agents.tokenLastUsed', { date: fmtDate(tok.lastUsedAt) })}` : ''}
-                  </span>
-                  <button
-                    className="btn btn-ghost"
-                    onClick={() => revokeToken(tok.id)}
-                    style={{ fontSize: 11, marginLeft: 'auto', color: 'var(--danger, #f85149)' }}
-                  >
-                    {t('agents.revokeToken')}
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        ) : (
-          <div style={{ fontSize: 12, color: 'var(--text-3)', borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-            {t('agents.saveFirstForTokens')}
-          </div>
-        )}
-
-        {/* Identifiants machine — refresh rotatif pour agents headless. L'agent
-            l'échange contre un jeton court sur /agents/token et se renouvelle seul. */}
-        {agent && (
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontWeight: 600, fontSize: 13 }}>{t('agents.machineCredsSection')}</span>
-              <button className="btn btn-line btn-sm" style={{ marginLeft: 'auto' }} disabled={busy} onClick={issueCredential}>
-                <Icon name="plus" size={13} /> {t('agents.issueCredential')}
-              </button>
-            </div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.5 }}>{t('agents.machineCredsHint')}</div>
-            {newCredSecret && (
-              <div style={{ background: 'var(--bg-warning, #3a2f12)', border: '1px solid var(--border-warning, #7a5c12)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <span style={{ fontSize: 11.5, color: 'var(--text-warning, #e3b341)' }}>{t('agents.credShownOnce')}</span>
-                <code style={{ fontFamily: 'var(--mono, monospace)', fontSize: 12, wordBreak: 'break-all' }}>{newCredSecret}</code>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button className="btn btn-ghost btn-sm" onClick={() => { void navigator.clipboard?.writeText(newCredSecret); flash(t('agents.copied')); }}>
-                    <Icon name="copy" size={12} /> {t('agents.copy')}
-                  </button>
-                  <button className="btn btn-ghost btn-sm" onClick={() => setNewCredSecret(null)}>{t('common:close')}</button>
-                </div>
-              </div>
-            )}
-            {credentials.length === 0 ? (
-              <div style={{ fontSize: 12, color: 'var(--text-3)' }}>{t('agents.noCredentials')}</div>
-            ) : (
-              credentials.map((c) => (
-                <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--text-2)' }}>
-                  <code style={{ fontFamily: 'var(--mono, monospace)' }}>{c.chainId.slice(0, 8)}…</code>
-                  <span style={{ color: c.revoked ? 'var(--danger, #f85149)' : 'var(--text-3)' }}>
-                    {c.revoked
-                      ? (c.reuseDetected ? t('agents.credReuseRevoked') : t('agents.credRevoked'))
-                      : t('agents.credRotations', { count: c.rotationCount })}
-                    {c.lastUsedAt ? ` · ${t('agents.tokenLastUsed', { date: fmtDate(c.lastUsedAt) })}` : ''}
-                  </span>
-                  {!c.revoked && (
-                    <button className="btn btn-ghost" onClick={() => revokeCredential(c.id)} style={{ fontSize: 11, marginLeft: 'auto', color: 'var(--danger, #f85149)' }}>
-                      {t('agents.revokeToken')}
-                    </button>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        )}
-
-        {/* Usage & coût déclaratif (chantier finance agents) */}
-        {agent && usage && (
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <span style={{ fontWeight: 600, fontSize: 13 }}>{t('agents.usageSection')}</span>
-            {usage.runCount === 0 ? (
-              <div style={{ fontSize: 12, color: 'var(--text-3)' }}>{t('agents.usageEmpty')}</div>
-            ) : (
-              <>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8 }}>
-                  {[
-                    { l: t('agents.usageRuns'), v: String(usage.runCount) },
-                    { l: t('agents.usageTotalCost'), v: `€${usage.totalCost.toFixed(2)}` },
-                    { l: t('agents.usageAvgPerTask'), v: usage.avgCostPerTask != null ? `€${usage.avgCostPerTask.toFixed(2)}` : '—' },
-                    { l: t('agents.usageTokens'), v: (usage.totalTokensIn + usage.totalTokensOut).toLocaleString(i18n.language) },
-                  ].map((s) => (
-                    <div key={s.l}>
-                      <div style={{ fontSize: 11, color: 'var(--text-3)' }}>{s.l}</div>
-                      <div style={{ fontWeight: 600, fontSize: 15 }}>{s.v}</div>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 160, overflowY: 'auto' }}>
-                  {usage.runs.map((r) => (
-                    <div key={r.id} style={{ display: 'flex', gap: 8, fontSize: 11, color: 'var(--text-2)', alignItems: 'baseline' }}>
-                      <span style={{ color: 'var(--text-3)' }}>{fmtDate(r.createdAt)}</span>
-                      {r.model && <span>{r.model}</span>}
-                      {(r.tokensIn != null || r.tokensOut != null) && (
-                        <span className="mono" style={{ color: 'var(--text-3)' }}>
-                          {(r.tokensIn ?? 0)}/{(r.tokensOut ?? 0)} tok
-                        </span>
-                      )}
-                      <span className="grow truncate">{r.note ?? ''}</span>
-                      {r.cost != null && <span style={{ fontWeight: 600 }}>€{r.cost.toFixed(2)}</span>}
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Compétences de l'agent (ce qu'il sait faire — sert au next_task).
-            Même UX que les users : résumé en chips + édition via UserSkillsDialog. */}
-        {agent && (
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontWeight: 600, fontSize: 13 }}>{t('agents.skillsSection', { defaultValue: 'Skills' })}</span>
-              <button className="btn btn-line btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setSkillsOpen(true)}>
-                <Icon name="edit" size={13} /> {t('agents.skillsEdit', { defaultValue: 'Edit skills' })}
-              </button>
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-3)' }}>
-              {t('agents.skillsHint', {
-                defaultValue:
-                  'What this agent can do. The level encodes its reliability on that kind of task, and gates which tasks it can pull (next_task).',
-              })}
-            </div>
-            {agentSkills.length === 0 ? (
-              <div style={{ fontSize: 12, color: 'var(--text-faint)' }}>{t('agents.skillsEmpty', { defaultValue: 'No skill assigned yet.' })}</div>
-            ) : (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {agentSkills.map((us) => (
-                  <span
-                    key={us.skillId}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 5,
-                      padding: '2px 8px',
-                      background: 'var(--surface-2)',
-                      border: '1px solid var(--border)',
-                      borderRadius: 999,
-                      fontSize: 12,
-                    }}
-                  >
-                    {us.skill?.color && (
-                      <i style={{ width: 7, height: 7, borderRadius: '50%', background: us.skill.color, display: 'inline-block' }} />
-                    )}
-                    {us.skill?.name ?? us.skillId}
-                    <strong style={{ color: 'var(--text-2)' }}>{us.level}</strong>
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Actions */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
-          {agent && (
-            <>
-              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={toggleStatus}>
-                {agent.status === 'ACTIVE' ? t('agents.suspend') : t('agents.reactivate')}
-              </button>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={busy}
-                onClick={remove}
-                style={{ color: 'var(--danger, #f85149)' }}
-              >
-                {t('common:delete')}
-              </button>
-            </>
-          )}
-          <span style={{ flex: 1 }} />
-          <button className="btn btn-ghost" onClick={onClose} disabled={saving}>
-            {t('common:cancel')}
-          </button>
-          <button className="btn btn-primary" onClick={save} disabled={saving}>
-            {saving ? t('common:saving') : t('common:save')}
-          </button>
-        </div>
-      </div>
-      {/* Édition des skills : même dialogue que les users (recherche par
-          catégorie, niveau par palier ou numérique selon les réglages org). */}
-      {skillsOpen && agent && (
-        <UserSkillsDialog
-          user={{ id: agent.id, name: agent.name, email: '' }}
-          adminOrLeadEdit
-          isSelf={false}
-          onClose={() => {
-            setSkillsOpen(false);
-            void reloadSkills();
-          }}
-          flash={flash}
-        />
-      )}
     </div>
   );
 }

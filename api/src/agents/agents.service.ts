@@ -20,6 +20,7 @@ import {
   WorkspaceAgentProjectDto,
   KNOWN_AGENT_MODELS,
   permissionsForCapabilities,
+  billingUnitForProvider,
 } from '@vaks-pm/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { RolesService } from '../admin/roles.service';
@@ -28,6 +29,7 @@ import { AuditLogService } from '../audit-logs/audit-log.service';
 import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
 import { LicenseService } from '../licensing/license.service';
 import { RemoteAgent } from './agent-directory.types';
+import { ModelPricingService } from './model-pricing/model-pricing.service';
 
 /** Acteur d'une mutation (audit). */
 export interface AgentMutationActor {
@@ -52,6 +54,7 @@ const AGENT_SELECT = {
   ownerId: true, capabilities: true, maxConcurrentTasks: true, dailyRunBudget: true,
   modelProvider: true, model: true, hostingRegion: true,
   costRateInPerKTokens: true, costRateOutPerKTokens: true, defaultBillRatePerKTokens: true,
+  followCatalogPricing: true,
   dailyCostBudget: true, monthlyCostBudget: true,
   idpSource: true, externalId: true, createdAt: true,
   owner: { select: { name: true, email: true } },
@@ -63,6 +66,7 @@ type AgentRow = {
   maxConcurrentTasks: number | null; dailyRunBudget: number | null;
   modelProvider: string | null; model: string | null; hostingRegion: string | null;
   costRateInPerKTokens: unknown; costRateOutPerKTokens: unknown; defaultBillRatePerKTokens: unknown;
+  followCatalogPricing: boolean;
   dailyCostBudget: unknown; monthlyCostBudget: unknown;
   idpSource: string | null; externalId: string | null; createdAt: Date;
   owner: { name: string; email: string } | null;
@@ -78,6 +82,7 @@ export class AgentsService {
     private readonly apiTokens: ApiTokensService,
     private readonly audit: AuditLogService,
     private readonly licenses: LicenseService,
+    private readonly modelPricing: ModelPricingService,
   ) {}
 
   // ---------- Helpers ----------
@@ -99,9 +104,11 @@ export class AgentsService {
       modelProvider: r.modelProvider,
       model: r.model,
       hostingRegion: r.hostingRegion,
+      billingUnit: billingUnitForProvider(r.modelProvider),
       costRateInPerKTokens: dec(r.costRateInPerKTokens),
       costRateOutPerKTokens: dec(r.costRateOutPerKTokens),
       defaultBillRatePerKTokens: dec(r.defaultBillRatePerKTokens),
+      followCatalogPricing: r.followCatalogPricing ?? false,
       dailyCostBudget: dec(r.dailyCostBudget),
       monthlyCostBudget: dec(r.monthlyCostBudget),
       source: r.idpSource ?? 'manual',
@@ -166,9 +173,23 @@ export class AgentsService {
       costRateInPerKTokens: num(dto.costRateInPerKTokens),
       costRateOutPerKTokens: num(dto.costRateOutPerKTokens),
       defaultBillRatePerKTokens: num(dto.defaultBillRatePerKTokens),
+      followCatalogPricing:
+        dto.followCatalogPricing === undefined ? undefined : dto.followCatalogPricing === true,
       dailyCostBudget: num(dto.dailyCostBudget),
       monthlyCostBudget: num(dto.monthlyCostBudget),
     };
+  }
+
+  /**
+   * En unité crédits (Copilot), il n'y a pas de sortie facturée séparément :
+   * on force `costRateOutPerKTokens = null` pour qu'un taux résiduel ne fausse
+   * pas `derivedCost` (formule `tokensIn×in + tokensOut×out`, out toujours 0).
+   * Mute `data` en place. `effectiveProvider` = provider après application du dto.
+   */
+  private normalizeCreditRates(data: Record<string, unknown>, effectiveProvider?: string | null) {
+    if (billingUnitForProvider(effectiveProvider) === 'credits') {
+      data.costRateOutPerKTokens = null;
+    }
   }
 
   private async findAgentOrThrow(orgId: string, id: string) {
@@ -230,7 +251,22 @@ export class AgentsService {
       });
       byAgent.set(t.userId, list);
     }
-    return dtos.map((d) => ({ ...d, tokens: byAgent.get(d.id) ?? [] }));
+    // Lot 2 — joint le prix catalogue résolu + le flag de drift (une lecture).
+    const enriched = await this.modelPricing.enrichAgentsWithCatalog(orgId, dtos);
+    return enriched.map((d) => ({
+      ...d,
+      tokens: byAgent.get(d.id) ?? [],
+      catalogPrice:
+        d.catalogPrice && d.catalogPrice.costInPerKUnits != null
+          ? {
+              unit: d.catalogPrice.unit,
+              costInPerKUnits: d.catalogPrice.costInPerKUnits,
+              costOutPerKUnits: d.catalogPrice.costOutPerKUnits,
+              source: d.catalogPrice.source,
+            }
+          : null,
+      priceDrift: d.priceDrift,
+    }));
   }
 
   /**
@@ -282,7 +318,7 @@ export class AgentsService {
       this.prisma.user.findMany({
         where,
         select: {
-          id: true, name: true, status: true, trustLevel: true, ownerId: true,
+          id: true, name: true, email: true, status: true, trustLevel: true, ownerId: true,
           model: true, modelProvider: true, capabilities: true,
           owner: { select: { name: true } },
         },
@@ -310,12 +346,14 @@ export class AgentsService {
     const items: WorkspaceAgentDto[] = rows.map((r) => ({
       id: r.id,
       name: r.name,
+      email: r.email,
       status: r.status as WorkspaceAgentDto['status'],
       trustLevel: (r.trustLevel ?? 'DRAFT_ONLY') as WorkspaceAgentDto['trustLevel'],
       ownerId: r.ownerId ?? '',
       ownerName: r.owner?.name ?? null,
       model: r.model,
       modelProvider: r.modelProvider,
+      billingUnit: billingUnitForProvider(r.modelProvider),
       capabilities: r.capabilities ?? [],
       skills: skillsByAgent.get(r.id) ?? [],
       linkedAsOwner: r.ownerId === userId,
@@ -333,7 +371,7 @@ export class AgentsService {
     const agent = await this.prisma.user.findFirst({
       where: { id: agentId, organizationId: orgId, kind: 'AGENT', deletedAt: null },
       select: {
-        id: true, name: true, status: true, trustLevel: true, ownerId: true,
+        id: true, name: true, email: true, status: true, trustLevel: true, ownerId: true,
         model: true, modelProvider: true, capabilities: true,
         owner: { select: { name: true } },
       },
@@ -403,12 +441,14 @@ export class AgentsService {
     return {
       id: agent.id,
       name: agent.name,
+      email: agent.email,
       status: agent.status as WorkspaceAgentDetailDto['status'],
       trustLevel: (agent.trustLevel ?? 'DRAFT_ONLY') as WorkspaceAgentDetailDto['trustLevel'],
       ownerId: agent.ownerId ?? '',
       ownerName: agent.owner?.name ?? null,
       model: agent.model,
       modelProvider: agent.modelProvider,
+      billingUnit: billingUnitForProvider(agent.modelProvider),
       capabilities: agent.capabilities ?? [],
       skills: skillRows.map((s) => ({ skillId: s.skillId, name: s.skill?.name ?? s.skillId, level: s.level })),
       linkedAsOwner: isOwner,
@@ -545,6 +585,8 @@ export class AgentsService {
     const email = await this.uniqueAgentEmail(orgId, name);
     const role = await this.roles.findByKey(orgId, 'ORG_MEMBER').catch(() => null);
 
+    const profile = this.profileData(dto);
+    this.normalizeCreditRates(profile, dto.modelProvider);
     const created = await this.prisma.user.create({
       data: {
         organizationId: orgId,
@@ -562,7 +604,7 @@ export class AgentsService {
         idpSource: 'manual',
         createdVia: 'agent',
         status: 'ACTIVE',
-        ...this.profileData(dto),
+        ...profile,
         memberships: role ? { create: { organizationId: orgId, roleId: role.id } } : undefined,
       },
       select: AGENT_SELECT,
@@ -577,6 +619,10 @@ export class AgentsService {
   async update(orgId: string, id: string, dto: UpdateAgentDto, actor: AgentMutationActor): Promise<AgentDto> {
     const existing = await this.findAgentOrThrow(orgId, id);
     const data: Record<string, unknown> = { ...this.profileData(dto) };
+    // Provider effectif après application du dto → normalise l'out en crédits.
+    const effectiveProvider =
+      dto.modelProvider !== undefined ? dto.modelProvider || null : existing.modelProvider;
+    this.normalizeCreditRates(data, effectiveProvider);
     if (dto.name !== undefined) {
       const name = dto.name.trim();
       if (!name) throw new BadRequestException('Nom requis');

@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../realtime/events.gateway';
 import { NotificationsService } from '../notifications/notifications.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
+import { AgentNudgeService } from '../agents/agent-nudge.service';
 import { CreateCommentDto, UpdateCommentDto } from './dto/comment.dto';
 
 const INCLUDE = {
@@ -24,6 +25,7 @@ export class CommentsService {
     private readonly events: EventsGateway,
     private readonly notifications: NotificationsService,
     private readonly webhooks: WebhooksService,
+    private readonly agentNudge: AgentNudgeService,
     private readonly moduleRef: ModuleRef,
   ) {}
 
@@ -51,6 +53,8 @@ export class CommentsService {
     const out = this.toDto(c);
     this.events.emitToProject(task.projectId, 'comment.created', out);
     void this.webhooks.dispatch(orgId, 'comment.created', out, { projectId: task.projectId });
+    // Nudge : réveille un agent assigné/claimant de la tâche (boucle de revue).
+    void this.agentNudge.nudgeCommentCreated(orgId, { taskId: task.id });
     // Notifs @mentions (fire-and-forget). Format reconnu : `@email@domain.tld`
     // ou `@username` matchant la partie locale d'un email org. On extrait, on
     // résout, on déclenche un mail par user mentionné.

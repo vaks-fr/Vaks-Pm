@@ -9,6 +9,7 @@ import { AgentDispatchService } from '../agents/agent-dispatch.service';
 import { AgentDispatchController } from '../agents/agent-dispatch.controller';
 import { AgentExecutionLeaseCronService } from './agent-execution-lease-cron.service';
 import { SubtreeVerificationService } from '../deliverables/subtree-verification.service';
+import { LAZY_AGENT_DISPATCH } from '../agents/agent-nudge.service';
 
 /**
  * Le dispatch « pull » des agents (chantier 4, `AgentDispatch*`) vit ici plutôt
@@ -27,6 +28,11 @@ import { SubtreeVerificationService } from '../deliverables/subtree-verification
     // TasksModule, l'inverse ferait un cycle. Le service est autonome (Prisma +
     // settings + logique pure de vérification).
     SubtreeVerificationService,
+    // Alias par token string consommé par `AgentNudgeService` (reprise des
+    // agents). Il ne peut PAS importer `AgentDispatchService` en valeur : le
+    // cycle agent-dispatch → tasks → agent-nudge ferait capturer `undefined`
+    // pour `TasksService` dans les métadonnées d'injection du dispatch.
+    { provide: LAZY_AGENT_DISPATCH, useExisting: AgentDispatchService },
   ],
   controllers: [TasksController, MeTasksController, AgentDispatchController],
   exports: [TasksService, SubtreeVerificationService],

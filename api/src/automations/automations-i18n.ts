@@ -761,6 +761,54 @@ const M: Record<AutomationKind, Record<Lang, MessageBuilder>> = {
       ctaLabel: 'Aufgabe öffnen',
     }),
   },
+  // `pct` porte ici le PLAFOND de revue (agents.backpressure.maxPendingReviews),
+  // pas un pourcentage — le paramètre est réutilisé faute d'un champ dédié.
+  review_queue_full: {
+    en: (p) => ({
+      subject: `[AI agents] Review queue full on ${p.projectName}`,
+      heading: 'The review queue is holding agents back',
+      bodyHtml:
+        `The review queue on <strong>${esc(p.projectName ?? '')}</strong> has reached its cap of ` +
+        `<strong>${p.pct}</strong> agent tasks awaiting review, so new agent wake-ups are being held back ` +
+        `(<strong>${esc(p.userName ?? 'an agent')}</strong> among them). Review the pending deliverables, ` +
+        'or raise the cap in Admin → Policies.',
+      text: `Review queue full on ${p.projectName} (${p.pct} tasks) — agent wake-ups are on hold.`,
+      ctaLabel: 'Open the project',
+    }),
+    fr: (p) => ({
+      subject: `[Agents IA] File de revue pleine sur ${p.projectName}`,
+      heading: 'La file de revue bloque les agents',
+      bodyHtml:
+        `La file de revue du projet <strong>${esc(p.projectName ?? '')}</strong> a atteint son plafond de ` +
+        `<strong>${p.pct}</strong> tâches d'agents en attente : les nouveaux réveils d'agents sont suspendus ` +
+        `(dont <strong>${esc(p.userName ?? 'un agent')}</strong>). Relisez les livrables en attente, ` +
+        'ou relevez le plafond dans Admin → Policies.',
+      text: `File de revue pleine sur ${p.projectName} (${p.pct} tâches) — réveils d'agents suspendus.`,
+      ctaLabel: 'Ouvrir le projet',
+    }),
+    it: (p) => ({
+      subject: `[Agenti IA] Coda di revisione piena su ${p.projectName}`,
+      heading: 'La coda di revisione blocca gli agenti',
+      bodyHtml:
+        `La coda di revisione del progetto <strong>${esc(p.projectName ?? '')}</strong> ha raggiunto il limite di ` +
+        `<strong>${p.pct}</strong> attività di agenti in attesa: i nuovi risvegli sono sospesi ` +
+        `(tra cui <strong>${esc(p.userName ?? 'un agente')}</strong>). Rivedi i deliverable in attesa, ` +
+        'oppure alza il limite in Admin → Policies.',
+      text: `Coda di revisione piena su ${p.projectName} (${p.pct} attività) — risvegli sospesi.`,
+      ctaLabel: 'Apri il progetto',
+    }),
+    de: (p) => ({
+      subject: `[KI-Agenten] Review-Warteschlange voll bei ${p.projectName}`,
+      heading: 'Die Review-Warteschlange bremst die Agenten aus',
+      bodyHtml:
+        `Die Review-Warteschlange im Projekt <strong>${esc(p.projectName ?? '')}</strong> hat ihr Limit von ` +
+        `<strong>${p.pct}</strong> wartenden Agentenaufgaben erreicht: Neue Agenten-Weckrufe werden zurückgehalten ` +
+        `(darunter <strong>${esc(p.userName ?? 'ein Agent')}</strong>). Prüfen Sie die offenen Deliverables ` +
+        'oder erhöhen Sie das Limit unter Admin → Policies.',
+      text: `Review-Warteschlange voll bei ${p.projectName} (${p.pct} Aufgaben) — Weckrufe pausiert.`,
+      ctaLabel: 'Projekt öffnen',
+    }),
+  },
   agent_run_anomaly: {
     en: (p) => {
       const why =

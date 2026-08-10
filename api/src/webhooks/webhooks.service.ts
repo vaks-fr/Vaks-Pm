@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
-import { isIP } from 'node:net';
+import { isIP, BlockList } from 'node:net';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { TenantContext } from '../tenancy/tenant-context.service';
@@ -518,6 +518,50 @@ export class WebhooksService {
   // ============================================================
 
   /**
+   * Version PUBLIQUE de {@link validateUrl}, réutilisée par d'autres modules qui
+   * enregistrent une URL sortante (ex. souscriptions de nudge agent) et doivent
+   * appliquer la **même** gouvernance (anti-SSRF, port allowlist, domain
+   * allowlist, pin tenant Entra). Jette `BadRequestException` si non conforme.
+   *
+   * `allowInternalCidrs` (mode on-prem, opt-in, gaté côté appelant) : autorise
+   * les IP privées matchant un de ces CIDR — jamais loopback/metadata. Vide =
+   * anti-SSRF strict inchangé.
+   */
+  async validateExternalUrl(
+    orgId: string,
+    url: string,
+    allowInternalCidrs: string[] = [],
+  ): Promise<void> {
+    const [domainAllow, entraAllow] = await Promise.all([
+      this.settings.getWebhookDomainAllowlist(orgId),
+      this.settings.getWebhookEntraTenantAllowlist(orgId),
+    ]);
+    this.checkUrl(url, domainAllow, entraAllow, this.buildInternalAllow(allowInternalCidrs));
+  }
+
+  /** BlockList à partir de CIDR "X.X.X.X/XX" (v4/v6). null si vide / aucun valide. */
+  private buildInternalAllow(cidrs: string[]): BlockList | null {
+    if (!cidrs || cidrs.length === 0) return null;
+    const bl = new BlockList();
+    let added = 0;
+    for (const raw of cidrs) {
+      const m = String(raw).trim().match(/^(.+)\/(\d+)$/);
+      if (!m) continue;
+      const addr = m[1];
+      const prefix = Number(m[2]);
+      const fam = isIP(addr);
+      if (fam === 4 && prefix >= 0 && prefix <= 32) {
+        bl.addSubnet(addr, prefix, 'ipv4');
+        added++;
+      } else if (fam === 6 && prefix >= 0 && prefix <= 128) {
+        bl.addSubnet(addr, prefix, 'ipv6');
+        added++;
+      }
+    }
+    return added > 0 ? bl : null;
+  }
+
+  /**
    * Valide l'URL cible : protocole http(s), anti-SSRF (refuse loopback / IP
    * privées / link-local / hôtes internes), et allowlist de domaines org si
    * configurée. Async car l'allowlist est lue en base.
@@ -536,7 +580,12 @@ export class WebhooksService {
    * cible n'est pas autorisée. Réutilisée à la création/édition ET à chaque envoi
    * (dispatch/test/retry) pour que l'allowlist soit autoritaire en continu.
    */
-  private checkUrl(url: string, domainAllow: string[], entraAllow: string[]): void {
+  private checkUrl(
+    url: string,
+    domainAllow: string[],
+    entraAllow: string[],
+    allowInternal: BlockList | null = null,
+  ): void {
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -554,7 +603,7 @@ export class WebhooksService {
       throw new BadRequestException('Port non autorisé (seuls 80, 443, 8080, 8443 sont permis).');
     }
     const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-    if (this.isBlockedHost(host)) {
+    if (this.isBlockedHost(host, allowInternal)) {
       throw new BadRequestException(
         'URL refusée : cible interne/privée interdite (anti-SSRF).',
       );
@@ -621,16 +670,40 @@ export class WebhooksService {
     return [...out];
   }
 
-  /** Vrai si l'hôte est loopback / privé / link-local / interne (SSRF). */
-  private isBlockedHost(host: string): boolean {
+  /**
+   * Vrai si l'hôte est loopback / privé / link-local / interne (SSRF).
+   * `allowInternal` (mode on-prem) peut ré-autoriser une IP **privée** matchant
+   * un CIDR approuvé — jamais loopback (`127/8`, `::1`) ni metadata (`169.254/16`).
+   */
+  private isBlockedHost(host: string, allowInternal: BlockList | null = null): boolean {
     if (!host) return true;
     if (host === 'localhost' || host.endsWith('.localhost')) return true;
     if (host.endsWith('.local') || host.endsWith('.internal')) return true;
     const v = isIP(host);
-    if (v === 4) return this.isPrivateV4(host);
-    if (v === 6) return this.isPrivateV6(host);
+    if (v === 4 || v === 6) return this.ipBlocked(host, v, allowInternal);
     // hostname non-IP : on laisse passer (résolution DNS non effectuée ici ;
     // la frontière réseau Swarm + l'allowlist couvrent le reste).
+    return false;
+  }
+
+  /** Toujours bloqué même dans un CIDR approuvé : loopback 127/8 + metadata 169.254/16. */
+  private alwaysBlockedV4(ip: string): boolean {
+    const [a, b] = ip.split('.').map((n) => parseInt(n, 10));
+    return a === 127 || (a === 169 && b === 254);
+  }
+
+  /** Une IP littérale est-elle interdite ? `allowInternal` ré-autorise les privées matchantes. */
+  private ipBlocked(ip: string, v: number, allowInternal: BlockList | null): boolean {
+    if (v === 4) {
+      if (this.alwaysBlockedV4(ip)) return true;
+      if (this.isPrivateV4(ip)) return allowInternal && allowInternal.check(ip, 'ipv4') ? false : true;
+      return false;
+    }
+    const x = ip.toLowerCase();
+    if (x === '::1') return true;
+    const m = x.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (m && this.alwaysBlockedV4(m[1])) return true;
+    if (this.isPrivateV6(ip)) return allowInternal && allowInternal.check(ip, 'ipv6') ? false : true;
     return false;
   }
 

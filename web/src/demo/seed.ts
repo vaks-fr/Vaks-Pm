@@ -166,21 +166,21 @@ function seedTeams(): TeamDto[] {
 function seedAgents(): WorkspaceAgentDto[] {
   return [
     {
-      id: 'agent_1', name: 'Docs Copilot', status: 'ACTIVE', trustLevel: 'SUPERVISED',
+      id: 'agent_1', name: 'Docs Copilot', email: 'agent-docs-copilot@agents.invalid', status: 'ACTIVE', trustLevel: 'SUPERVISED',
       ownerId: ME_ID, ownerName: 'Camille Laurent', model: 'claude-sonnet-4-5', modelProvider: 'anthropic',
       capabilities: ['task:view', 'comment:create', 'attachment:manage'],
       skills: [{ skillId: 'skill_2', name: 'TypeScript', level: 4 }, { skillId: 'skill_1', name: 'React', level: 3 }],
       linkedAsOwner: true, linkedTeams: ['Delivery'],
     },
     {
-      id: 'agent_2', name: 'QA Reviewer', status: 'ACTIVE', trustLevel: 'AUTONOMOUS',
+      id: 'agent_2', name: 'QA Reviewer', email: 'agent-qa-reviewer@agents.invalid', status: 'ACTIVE', trustLevel: 'AUTONOMOUS',
       ownerId: ME_ID, ownerName: 'Camille Laurent', model: 'claude-opus-4', modelProvider: 'anthropic',
       capabilities: ['task:view', 'deliverables:validate'],
       skills: [{ skillId: 'skill_3', name: 'NestJS', level: 3 }],
       linkedAsOwner: true, linkedTeams: [],
     },
     {
-      id: 'agent_3', name: 'Data Analyst Bot', status: 'SUSPENDED', trustLevel: 'DRAFT_ONLY',
+      id: 'agent_3', name: 'Data Analyst Bot', email: 'agent-data-analyst-bot@agents.invalid', status: 'SUSPENDED', trustLevel: 'DRAFT_ONLY',
       ownerId: 'user_2', ownerName: 'Julien Meyer', model: 'claude-sonnet-4-5', modelProvider: 'anthropic',
       capabilities: ['task:view'],
       skills: [{ skillId: 'skill_4', name: 'PostgreSQL', level: 4 }],

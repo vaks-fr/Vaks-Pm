@@ -1,6 +1,7 @@
 import { Controller, ForbiddenException, Get, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Permission } from '@vaks-pm/shared';
+import { billingUnitForProvider } from '@vaks-pm/shared';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PublicApi } from '../rbac/require-permissions.decorator';
 import { AuthUser, CurrentUser } from '../auth/current-user.decorator';
@@ -97,23 +98,46 @@ export class McpContextController {
     // l'utilisateur suit le défaut de l'org (le serveur MCP retombera sur EN).
     // Best-effort : une langue manquante ne doit pas faire échouer le handshake.
     let preferredLanguage: string | null = null;
+    // Unité de facturation de l'agent : le serveur MCP masque `vaks_report_run`
+    // aux agents CRÉDITS (Copilot), dont le coût est MESURÉ serveur (meter
+    // d'appels MCP) — les laisser déclarer serait un appel gaspillé (5 crédits)
+    // et une source de double comptage. `tokens` par défaut (humains, agents API).
+    let billingUnit: 'tokens' | 'credits' = 'tokens';
     try {
       const row = await this.prisma.user.findUnique({
         where: { id: user.userId },
-        select: { preferredLanguage: true },
+        select: { preferredLanguage: true, modelProvider: true },
       });
       preferredLanguage = row?.preferredLanguage ?? null;
+      billingUnit = billingUnitForProvider(row?.modelProvider);
     } catch {
       preferredLanguage = null;
+    }
+    // Toggle « finance exposée à l'IA » : même lecture que `FinanceApiGateGuard`
+    // (fail-closed). Permet au serveur MCP de ne pas ENREGISTRER les tools
+    // finance quand l'org ne l'expose pas — plutôt que de les lister et qu'ils
+    // échouent en 403 (même philosophie que le flag `write`). L'enforcement
+    // reste le guard côté routes : ce champ n'est que de l'exposition.
+    let allowFinance = false;
+    try {
+      const all = await this.cache.wrap([user.orgId, 'mcp.allowFinance'], 30, async () => {
+        const settings = await this.settings.getAll(user.orgId);
+        return settings['mcp.allowFinance'] === true;
+      });
+      allowFinance = all === true;
+    } catch {
+      allowFinance = false;
     }
     return {
       scopes,
       write: MCP_WRITE_SCOPES.some((s) => scopes.includes(s)),
+      finance: allowFinance,
       // Nature du principal (chantier agents 1) : 'AGENT' quand le jeton est
       // porté par un compte agent (kind=AGENT) — permet au serveur MCP et aux
       // clients d'adapter leur comportement (ex. exiger une justification).
       actorKind: user.actorKind ?? 'HUMAN',
       preferredLanguage,
+      billingUnit,
     };
   }
 }

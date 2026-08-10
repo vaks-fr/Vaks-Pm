@@ -151,6 +151,7 @@
     "usageCost": "Coût total",
     "usageAvg": "Moy. / tâche",
     "usageTokens": "Tokens",
+    "usageCredits": "Crédits",
     "usageEmpty": "Aucun run déclaré.",
     "projects": "Projets actifs",
     "projectsEmpty": "Affecté à aucun projet actif.",

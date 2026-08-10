@@ -105,6 +105,14 @@
     "dueBeforeStart": "Das Fälligkeitsdatum liegt vor dem Startdatum.",
     "span": "{{from}} → {{to}} · <0>{{days}}</0> Tage · {{weeks}} Wochen",
     "description": "Beschreibung",
+    "clientStatus": "Kunden-Statusbericht",
+    "clientStatusHint": "Status und Zusammenfassung erscheinen im kundenorientierten Export „Projektstatus (PowerPoint)“.",
+    "statusSummaryPlaceholder": "Statuszusammenfassung für den Kunden: Fortschritt, Kernpunkte, nächste Schritte…",
+    "health": {
+      "onTrack": "Im Plan",
+      "atRisk": "Gefährdet",
+      "offTrack": "Nicht im Plan"
+    },
     "client": "Kunde",
     "noClient": "— Kein Kunde —",
     "saved": "{{key}} aktualisiert",

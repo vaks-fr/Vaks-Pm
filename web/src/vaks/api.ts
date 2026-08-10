@@ -36,6 +36,7 @@ import type {
   UserDto,
 } from '@vaks-pm/shared';
 import { TaskStatus } from '@vaks-pm/shared';
+import { statusColKey } from './taskStatus';
 import { api } from '../api/client';
 
 // Re-export shared DTOs used by vaks views.
@@ -158,19 +159,6 @@ const PRIO_MAP_REV: Record<Priority, string> = {
   urgent: 'URGENT',
 };
 
-const STATUS_LABEL: Record<TaskStatus, string> = {
-  [TaskStatus.TODO]: 'todo',
-  // Statuts agents (chantier 2) mappés sur les colonnes Kanban existantes :
-  // CLAIMED→to-do, CHANGES_REQUESTED→in-progress, APPROVED→in-review.
-  [TaskStatus.CLAIMED]: 'todo',
-  [TaskStatus.IN_PROGRESS]: 'progress',
-  [TaskStatus.CHANGES_REQUESTED]: 'progress',
-  [TaskStatus.IN_REVIEW]: 'review',
-  [TaskStatus.APPROVED]: 'review',
-  [TaskStatus.ON_HOLD]: 'hold',
-  [TaskStatus.DONE]: 'done',
-};
-
 /** Lundi 00:00 UTC de la semaine en cours. */
 export function thisMondayUTC(now = new Date()): Date {
   const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -229,7 +217,7 @@ export function toVaksColumn(c: BoardColumnDto): Column {
     // Fallback 'todo' si un statut inconnu apparaît (nouveau statut backend non
     // encore mappé) → la tâche reste visible sur le board au lieu de disparaître
     // silencieusement (audit frontend 2026-08-02 ; cf. piège status maps).
-    status: STATUS_LABEL[c.status] ?? 'todo',
+    status: statusColKey(c.status),
     wip: c.wipLimit,
   };
 }
@@ -251,6 +239,7 @@ export function toVaksTask(t: TaskDto, monday: Date, projectKey?: string): VTask
     number: num,
     projectId: t.projectId,
     col: t.boardColumnId ?? '',
+    status: t.status,
     title: t.title,
     key: readableKey,
     assignees: t.assignees.map((a) => a.userId),
@@ -638,7 +627,7 @@ export async function apiLoadSubStatuses(projectId: string): Promise<BoardSubSta
     id: s.id,
     name: s.name,
     color: s.color,
-    status: STATUS_LABEL[s.parentStatus as TaskStatus] ?? 'todo',
+    status: statusColKey(s.parentStatus as TaskStatus),
   }));
 }
 

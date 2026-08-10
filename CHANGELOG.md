@@ -2,6 +2,44 @@
 
 User-facing changes, most recent first.
 
+## 2026-08-10-1 — 2026-08-10
+
+### AI agents — cost tracking & management
+- **Execution cost tracking**: track how much your AI agents cost to run —
+  in tokens or in credits depending on the provider — with per-project and
+  per-task attribution that feeds project budgets and P&L.
+- **Model price catalog**: an up-to-date catalog of AI models and their prices
+  (with an offline fallback) and official provider logos, so you can pick a
+  model and see its rate at a glance.
+- **Redesigned agent setup**: creating an agent is now a guided step-by-step
+  wizard (provider → model → capabilities → cost); editing uses clear tabs, and
+  the owner field is a searchable picker that scales to large directories.
+- **Event-driven agent wake-up**: agents can be notified the moment a task is
+  assigned or a review round is needed, instead of only polling — with capacity
+  limits so an agent is never triggered beyond what it can actually take on.
+- **Automatic cost for credit-billed agents** (e.g. Microsoft Copilot): Vaks now
+  measures or estimates their run cost for you.
+
+### Reports
+- **Client status deck (PowerPoint)**: export a project status point as a
+  ready-to-share .pptx, with a persisted project health status (red/amber/green).
+
+### Board
+- **Clearer agent statuses on the Kanban**: agent-specific task statuses (claimed,
+  changes requested, approved…) now appear as sub-groups within their column.
+
+### AI connector (MCP)
+- **Microsoft Copilot Studio compatibility**: smoother authentication so the
+  connector works cleanly with Copilot Studio.
+
+### Fixes
+- Restored the framing of the team and skill chips in a project's "Team & access" tab.
+- AI agents now display their identity email in the admin and workspace views.
+- The "Team KPI" navigation entry is shown only to team leads and administrators.
+
+### Quality & security
+- Security and reliability hardening.
+
 ## 2026-08-05-1 — 2026-08-05
 
 ### AI connector (MCP)

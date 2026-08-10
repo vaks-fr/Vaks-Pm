@@ -57,7 +57,9 @@
     "panelTitle": "Exports",
     "fullDataset": "Full dataset (not just the view). Period {{from}} → {{to}}.",
     "pdfReports": "PDF reports",
+    "clientDeck": "Client status report",
     "items": {
+      "clientStatusDeck": "Project status (PowerPoint)",
       "projectStats": "Project stats",
       "burndown": "Burndown",
       "dueAdherence": "Due adherence",

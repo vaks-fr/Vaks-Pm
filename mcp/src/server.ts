@@ -10,14 +10,22 @@ import type { Lang } from './i18n.js';
  * sont liés à un `ApiClient` qui porte le jeton et le tenant de CETTE requête —
  * donc aucune fuite d'identité d'un utilisateur à l'autre. `allowWrite` (dérivé
  * du contexte `/me/mcp-context` : scopes d'écriture présents) pilote l'exposition
- * des tools d'écriture.
+ * des tools d'écriture ; `allowFinance` (toggle org `mcp.allowFinance`, même
+ * source) celle des tools finance.
  */
-export function buildServer(api: ApiClient, allowWrite: boolean, lang: Lang = 'en'): McpServer {
+export function buildServer(
+  api: ApiClient,
+  allowWrite: boolean,
+  lang: Lang = 'en',
+  actorKind?: string,
+  allowFinance = false,
+  billingUnit?: string,
+): McpServer {
   const server = new McpServer({
     name: 'vaks-pm',
     version: '0.1.0',
   });
-  registerTools(server, api, allowWrite);
+  registerTools(server, api, allowWrite, actorKind, allowFinance, billingUnit);
   registerPrompts(server, api, allowWrite, lang);
   // Resources = données passives attachées au contexte par l'utilisateur. En
   // lecture seule par nature : aucun gating `allowWrite`.

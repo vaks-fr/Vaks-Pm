@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, TaskStatus } from '@db';
+import { billingUnitForProvider } from '@vaks-pm/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { WorkloadService } from '../workload/workload.service';
@@ -475,7 +476,7 @@ export class FinanceService {
 
     const agents = await this.prisma.user.findMany({
       where: { id: { in: [...ids] }, organizationId: orgId, kind: 'AGENT' },
-      select: { id: true, name: true, model: true, defaultBillRatePerKTokens: true },
+      select: { id: true, name: true, model: true, modelProvider: true, defaultBillRatePerKTokens: true },
     });
     const runBy = new Map(runAgg.map((r) => [r.agentId, r]));
     const rateBy = new Map(rateRows.map((r) => [r.agentId, r]));
@@ -493,6 +494,7 @@ export class FinanceService {
           agentId: a.id,
           name: a.name,
           model: a.model,
+          billingUnit: billingUnitForProvider(a.modelProvider),
           billRatePerKTokens: rate,
           source: (explicit != null ? 'project' : fallback != null ? 'agent_default' : null) as
             | 'project'

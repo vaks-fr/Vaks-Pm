@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState, ReactNode } from 'react';
 import { api, getRefreshToken, setTokens } from '../api/client';
 import type { AuthTokens, UserDto, LicenseStatusDto, LicenseFeature } from '@vaks-pm/shared';
 import { DEMO } from '../demo/config';
@@ -135,16 +135,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [orgSettings, setOrgSettings] = useState<PublicOrgSettings>(DEFAULT_PUBLIC_SETTINGS);
   const [license, setLicense] = useState<LicenseStatusDto | null>(null);
 
-  const fetchLicense = async () => {
+  // Mémoïsées (deps vides : ne dépendent que de `setState` + `api`, stables).
+  // Sans ça, `refreshLicense`/`refreshOrgSettings` changent d'identité à chaque
+  // render : un consommateur qui les met dans les deps d'un `useCallback`/`useEffect`
+  // ET les appelle (→ setState → re-render) boucle à l'infini (cf. AgentsSection).
+  const fetchLicense = useCallback(async () => {
     try {
       setLicense(await api.getLicense());
     } catch {
       // Pas bloquant : on retombe sur « pas de licence » (core only).
       setLicense(NO_LICENSE);
     }
-  };
+  }, []);
 
-  const fetchOrgSettings = async () => {
+  const fetchOrgSettings = useCallback(async () => {
     try {
       const s = await api.getPublicSettings();
       setOrgSettings({
@@ -190,7 +194,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // garder les defaults — l'UI doit rester utilisable.
     }
-  };
+  }, []);
 
   useEffect(() => {
     // Démo statique : auto-session au boot (jamais d'écran de login). Les tokens

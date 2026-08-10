@@ -8,6 +8,8 @@ import { AgentsAdminController, AgentConnectorsAdminController } from './agents-
 import { AgentsPublicController, AgentsMeController } from './agents-public.controller';
 import { PolicyEngineService } from './policy-engine.service';
 import { AgentBudgetService } from './agent-budget.service';
+import { ModelPricingService } from './model-pricing/model-pricing.service';
+import { ModelPricingCronService } from './model-pricing/model-pricing-cron.service';
 
 /**
  * Agents IA — chantiers 1 & 3 (AGENTS_ARCHITECTURE.md) : identités
@@ -26,8 +28,15 @@ import { AgentBudgetService } from './agent-budget.service';
     EntraAgentProvider,
     PolicyEngineService,
     AgentBudgetService,
+    ModelPricingService,
+    ModelPricingCronService,
   ],
-  controllers: [AgentsAdminController, AgentConnectorsAdminController, AgentsPublicController, AgentsMeController],
-  exports: [AgentsService, PolicyEngineService, AgentBudgetService],
+  controllers: [
+    AgentsAdminController,
+    AgentConnectorsAdminController,
+    AgentsPublicController,
+    AgentsMeController,
+  ],
+  exports: [AgentsService, PolicyEngineService, AgentBudgetService, ModelPricingService],
 })
 export class AgentsModule {}

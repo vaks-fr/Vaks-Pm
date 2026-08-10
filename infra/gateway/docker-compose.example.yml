@@ -1,0 +1,89 @@
+# ============================================================================
+# Passerelle LLM Vaks-PM — exemple de déploiement standalone (côté client)
+# ============================================================================
+#
+# Composant OPT-IN à déployer PRÈS DE VOS AGENTS API (pas dans le cluster Vaks),
+# sur un SEGMENT INTERNE VERROUILLÉ (egress-only, jamais exposé à Internet). Il
+# relaie les appels LLM vers les fournisseurs et déclare l'usage EXACT par appel
+# à votre API Vaks — la source de vérité des tokens des agents.
+#
+# Providers supportés (hôtes hardcodés, anti-SSRF) : anthropic, openai, mistral,
+# groq, deepseek. Tous sauf Anthropic sont OpenAI-compatibles.
+#
+# Configuration côté agent (runtime) — pointer la base-URL sur la passerelle :
+#   - Anthropic : ANTHROPIC_BASE_URL=https://<gateway-host>:8443/anthropic
+#   - OpenAI    : OPENAI_BASE_URL=https://<gateway-host>:8443/openai
+#   - Mistral   : …/mistral    Groq : …/groq    DeepSeek : …/deepseek
+#   La clé fournisseur reste dans le header d'origine (x-api-key / Authorization),
+#   la passerelle la relaie sans jamais la stocker.
+#
+# En-têtes d'attribution ajoutés par le runtime de l'agent (obligatoire : le PAT) :
+#   - X-Vaks-Agent-Token    : <PAT de l'agent>      (obligatoire — sinon pas de report)
+#   - X-Vaks-Task-Id        : <uuid de la tâche>     (optionnel — attribution par tâche)
+#   - X-Vaks-Deliverable-Id : <uuid du livrable>     (optionnel)
+#   - X-Vaks-Gateway-Ingress: <token>                (si GATEWAY_INGRESS_TOKEN posé)
+#
+# ⚠️ Providers OpenAI-compatibles en streaming : pour que l'usage soit disponible,
+#    l'appelant doit passer `stream_options: { include_usage: true }`. Sinon aucun
+#    report (fail-open). Anthropic émet toujours l'usage en streaming.
+#
+# TLS : la passerelle transporte des clés fournisseur + PATs → NE JAMAIS l'exposer
+#    en HTTP nu. Deux options :
+#    (A) front TLS Caddy (ci-dessous, recommandé) — la passerelle reste interne ;
+#    (B) TLS natif : monter cert+clé et poser TLS_CERT_PATH / TLS_KEY_PATH.
+# ============================================================================
+
+services:
+  llm-gateway:
+    build:
+      # Contexte = racine du monorepo Vaks (le Dockerfile référence tsconfig.base.json).
+      context: ../..
+      dockerfile: llm-gateway/Dockerfile
+    # Ou, image publiée : image: ghcr.io/<org>/vaks-pm-llm-gateway:latest
+    restart: unless-stopped
+    # Pas de `ports:` → la passerelle n'est joignable QUE via le front Caddy (option A).
+    expose:
+      - "8787"
+    environment:
+      PORT: "8787"
+      # URL publique de VOTRE API Vaks (le tenant), où l'usage est déclaré.
+      VAKS_API_URL: "https://acme.vaks-pm.com"
+      # Préfixe API (défaut /api/v1).
+      # VAKS_API_PREFIX: "/api/v1"
+      # Providers activés (CSV ; défaut = tous). Ex. limiter à ce dont vous avez besoin :
+      # GATEWAY_ENABLED_PROVIDERS: "anthropic,openai"
+      # Timeout socket sur l'appel fournisseur (ms, défaut 120000).
+      # UPSTREAM_TIMEOUT_MS: "120000"
+      # Secret partagé passerelle↔API (OPTIONNEL mais recommandé) : prouve à l'API
+      # que le run vient bien de la passerelle → AgentRun.source='gateway' (les
+      # anomalies "déclaré sans tokens" / "sous la référence" sont alors ignorées
+      # car l'usage est MESURÉ, pas déclaré). Doit correspondre au setting
+      # Admin > Agents `agents.gateway.sharedSecret` de l'org.
+      # VAKS_GATEWAY_SECRET: "change-me-shared-secret"
+      # Auth d'ingress OPTIONNELLE (défense en profondeur) : si posé, chaque appel
+      # doit porter X-Vaks-Gateway-Ingress == cette valeur, sinon 401.
+      # GATEWAY_INGRESS_TOKEN: "change-me-ingress-token"
+      # Option (B) — TLS natif (au lieu du front Caddy) : monter cert+clé + décommenter.
+      # TLS_CERT_PATH: "/tls/cert.pem"
+      # TLS_KEY_PATH: "/tls/key.pem"
+    # volumes:
+    #   - ./tls:/tls:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8787/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # --- Option (A) : front TLS Caddy (recommandé) --------------------------------
+  # Termine le TLS et relaie vers la passerelle interne. Remplacez la config par la
+  # vôtre (cert interne d'entreprise, ou `tls internal` pour un cert auto-signé de
+  # dev). La passerelle n'est JAMAIS exposée en clair hors de ce réseau Docker.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - llm-gateway
+    ports:
+      - "8443:8443"
+    command: >
+      caddy reverse-proxy --from :8443 --to llm-gateway:8787 --internal-certs

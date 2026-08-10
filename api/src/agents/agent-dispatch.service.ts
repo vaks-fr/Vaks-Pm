@@ -212,6 +212,18 @@ export class AgentDispatchService {
     return { ranked, reason, evaluated: tasks.length };
   }
 
+  /**
+   * Classement complet des tâches revendiquables — exposé pour le **nudge à
+   * capacité maîtrisée** (`AgentNudgeService.resumeAgent`), qui doit réveiller
+   * un agent sur *plusieurs* tâches quand plusieurs slots se libèrent, là où
+   * `preview` n'expose que la tête du classement.
+   *
+   * Lecture pure, aucun effet de bord — le claim reste la seule autorité.
+   */
+  async rankClaimable(orgId: string, userId: string, actorKind: 'HUMAN' | 'AGENT') {
+    return this.rankCandidates(orgId, userId, actorKind);
+  }
+
   /** GET /me/next-task — meilleure candidate (sans effet de bord). */
   async preview(orgId: string, userId: string, actorKind: 'HUMAN' | 'AGENT') {
     const { ranked, reason, evaluated } = await this.rankCandidates(orgId, userId, actorKind);

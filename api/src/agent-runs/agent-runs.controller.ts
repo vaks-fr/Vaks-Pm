@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { toCsv, sendCsv } from '../common/csv.util';
@@ -26,11 +26,22 @@ export class AgentRunsController {
   @PublicApi()
   @RequirePermissions('task:view')
   @Audited('agent.run.reported', { resource: 'agent_run' })
-  report(@CurrentUser() user: AuthUser, @Body() dto: CreateAgentRunDto) {
+  report(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateAgentRunDto,
+    // La passerelle LLM (ou une passerelle externe / le collecteur de logs) porte
+    // ce header ; l'API l'honore pour marquer une source MESURÉE (jamais via le
+    // body). Absent pour un report direct (`self`).
+    @Headers('x-vaks-gateway-secret') gatewaySecret?: string,
+    // Raffine la source mesurée : `gateway` (défaut) vs `runtime_log` (collecteur).
+    @Headers('x-vaks-run-source') runSource?: string,
+  ) {
     return this.runs.report(
       user.orgId,
       { userId: user.userId, actorKind: user.actorKind ?? 'HUMAN' },
       dto,
+      gatewaySecret,
+      runSource,
     );
   }
 
@@ -81,6 +92,7 @@ export class AgentRunsController {
       i.tokensOut ?? '',
       i.cost ?? '',
       i.derivedCost ?? '',
+      i.source ?? 'self',
       i.anomaly ?? '',
       i.note ?? '',
     ]);
@@ -88,7 +100,7 @@ export class AgentRunsController {
       res,
       'agent-runs.csv',
       toCsv(
-        ['date', 'agent', 'model', 'project', 'task', 'tokensIn', 'tokensOut', 'cost', 'derivedCost', 'anomaly', 'note'],
+        ['date', 'agent', 'model', 'project', 'task', 'tokensIn', 'tokensOut', 'cost', 'derivedCost', 'source', 'anomaly', 'note'],
         rows,
       ),
     );

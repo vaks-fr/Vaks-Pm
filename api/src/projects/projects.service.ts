@@ -198,7 +198,7 @@ export class ProjectsService {
     orgId: string,
     userId: string,
     isAdmin: boolean,
-    opts: { scope?: 'mine' | 'all' } = {},
+    opts: { scope?: 'mine' | 'all'; q?: string } = {},
   ) {
     // `kind: STANDARD` partout : les projets EXTERNAL (conteneurs de tickets
     // d'outils externes, timesheet only) n'apparaissent JAMAIS dans les
@@ -214,25 +214,45 @@ export class ProjectsService {
     // privileged users see every project in the org.
     const canSeeAll =
       opts.scope !== 'mine' && (isAdmin || (await this.hasViewAll(userId, orgId)));
-    const projects = await this.prisma.project.findMany({
-      where: {
-        organizationId: orgId,
-        deletedAt: null,
-        kind: 'STANDARD',
-        ...(canSeeAll
-          ? {}
-          : {
-              OR: [
-                { members: { some: { userId } } },
-                {
-                  AND: [
-                    { status: { notIn: [ProjectStatus.DRAFT, ProjectStatus.CHARTER_REVIEW] } },
-                    { teams: { some: { team: { members: { some: { userId } } } } } },
-                  ],
-                },
+    const accessClause: Prisma.ProjectWhereInput = canSeeAll
+      ? {}
+      : {
+          OR: [
+            { members: { some: { userId } } },
+            {
+              AND: [
+                { status: { notIn: [ProjectStatus.DRAFT, ProjectStatus.CHARTER_REVIEW] } },
+                { teams: { some: { team: { members: { some: { userId } } } } } },
               ],
-            }),
-      },
+            },
+          ],
+        };
+    // Filtre texte optionnel (nom OU clé, contains insensible casse) — pour
+    // résoudre un projet nommé (tool MCP `vaks_project_status`) sans lister
+    // tout le portefeuille. Combiné via AND avec l'accès (jamais un second OR
+    // au même niveau, qui écraserait silencieusement le OR d'accès ci-dessus
+    // — fuite ou sur-restriction selon lequel des deux gagne).
+    const q = opts.q?.trim();
+    const where: Prisma.ProjectWhereInput = {
+      organizationId: orgId,
+      deletedAt: null,
+      kind: 'STANDARD',
+      ...(q
+        ? {
+            AND: [
+              accessClause,
+              {
+                OR: [
+                  { key: { contains: q, mode: 'insensitive' } },
+                  { name: { contains: q, mode: 'insensitive' } },
+                ],
+              },
+            ],
+          }
+        : accessClause),
+    };
+    const projects = await this.prisma.project.findMany({
+      where,
       orderBy: { createdAt: 'desc' },
       omit: PROJECT_FINANCE_OMIT,
       include: { client: { select: { id: true, name: true, company: true } } },
@@ -1143,6 +1163,9 @@ export class ProjectsService {
       }
       data.status = dto.status;
     }
+    // Santé / résumé du point de statut client (éditorial, distinct du statut).
+    if (dto.statusHealth !== undefined) data.statusHealth = dto.statusHealth || null;
+    if (dto.statusSummary !== undefined) data.statusSummary = dto.statusSummary?.trim() || null;
     if (dto.startDate !== undefined)
       data.startDate = dto.startDate ? new Date(dto.startDate) : null;
     if (dto.dueDate !== undefined)

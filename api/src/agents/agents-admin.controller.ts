@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { CreateAgentDto, UpdateAgentDto, UpsertAgentConnectorDto } from '@vaks-pm/shared';
+import { CreateAgentDto, UpdateAgentDto, UpsertAgentConnectorDto, COPILOT_STUDIO_RATE_CARD } from '@vaks-pm/shared';
 import { resolveLeaseMinutes } from './agent-budget';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../rbac/permissions.guard';
@@ -22,6 +22,8 @@ import { AuthUser, CurrentUser } from '../auth/current-user.decorator';
 import { SkipAudit } from '../audit-logs/audited.decorator';
 import { AgentsService } from './agents.service';
 import { PolicyEngineService } from './policy-engine.service';
+import { ModelPricingService } from './model-pricing/model-pricing.service';
+import { ModelPricingCronService } from './model-pricing/model-pricing-cron.service';
 import { AgentConnectorsService } from './agent-connectors.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
@@ -63,6 +65,27 @@ const AGENT_POLICY_KEYS = [
   // les conventions maison (langue, format des livrables) se règlent une fois
   // ici au lieu d'être retapées dans chaque projet.
   'agents.briefDefault',
+  // Lot 2 (AGENT_COST_UNITS) — feed de prix des modèles. `lastSync*` sont écrites
+  // par le cron (hors whitelist PUT) et lues seulement.
+  'agents.pricing.feedEnabled',
+  'agents.pricing.applyMode',
+  'agents.pricing.usdToEurRate',
+  // Lot 3 (AGENT_COST_UNITS) — secret partagé passerelle↔API. Prouve qu'un run
+  // vient bien de la passerelle LLM (→ AgentRun.source='gateway').
+  'agents.gateway.sharedSecret',
+  // Estimation coût Copilot (agents crédits non mesurables) : à la complétion
+  // d'une tâche, coût estimé via la grille tarifaire × l'activité observée.
+  'agents.copilotEstimate.enabled',
+  'agents.copilotEstimate.baselineCreditsPerTask',
+  'agents.copilotEstimate.creditPriceEur',
+  // Grille tarifaire Copilot (crédits/activité) — surcharge à la main de la
+  // constante publique par défaut (air-gap ; MS ne publie pas de feed machine).
+  'agents.copilotEstimate.rateCard',
+  // Nudge à capacité maîtrisée (AGENT_NUDGE_CAPACITY.md) : interrupteur de
+  // sûreté du gate (ON par défaut) + plafond de réveils simultanés par agent
+  // (0 = défaut serveur ; 1 = repli si le provider sérialise ses runs).
+  'agents.nudge.capacityGating',
+  'agents.nudge.maxParallel',
 ] as const;
 
 function pickAgentPolicies(all: Record<string, unknown>) {
@@ -78,6 +101,51 @@ function pickAgentPolicies(all: Record<string, unknown>) {
     'agents.executionLeaseMinutes': resolveLeaseMinutes(all['agents.executionLeaseMinutes']),
     'agents.budgetBreaker': all['agents.budgetBreaker'] === true,
     'agents.briefDefault': normalizeAgentBrief(all['agents.briefDefault']),
+    // Lot 2 — feed de prix des modèles. Opt-in air-gap : feed désactivé et
+    // application `off` par défaut ; taux USD→EUR à 0.92. `lastSync*` = lecture
+    // seule (écrites par le cron), remontées pour l'affichage du panneau.
+    'agents.pricing.feedEnabled': all['agents.pricing.feedEnabled'] === true,
+    'agents.pricing.applyMode': ['off', 'all', 'per_agent'].includes(
+      String(all['agents.pricing.applyMode']),
+    )
+      ? (all['agents.pricing.applyMode'] as string)
+      : 'off',
+    'agents.pricing.usdToEurRate':
+      typeof all['agents.pricing.usdToEurRate'] === 'number'
+        ? (all['agents.pricing.usdToEurRate'] as number)
+        : 0.92,
+    'agents.pricing.lastSyncAt': all['agents.pricing.lastSyncAt'] ?? null,
+    'agents.pricing.lastSyncOk': all['agents.pricing.lastSyncOk'] ?? null,
+    'agents.pricing.lastSyncError': all['agents.pricing.lastSyncError'] ?? null,
+    // Lot 3 — secret partagé passerelle (booléen d'existence seulement, jamais
+    // la valeur : on ne réexpose pas un secret en lecture).
+    'agents.gateway.secretSet':
+      typeof all['agents.gateway.sharedSecret'] === 'string' &&
+      (all['agents.gateway.sharedSecret'] as string).length > 0,
+    // Estimation coût Copilot — opt-in (défaut OFF), baseline crédits/tâche et
+    // prix crédit (€/1000 crédits) réglables.
+    'agents.copilotEstimate.enabled': all['agents.copilotEstimate.enabled'] === true,
+    'agents.copilotEstimate.baselineCreditsPerTask':
+      typeof all['agents.copilotEstimate.baselineCreditsPerTask'] === 'number'
+        ? (all['agents.copilotEstimate.baselineCreditsPerTask'] as number)
+        : 7,
+    'agents.copilotEstimate.creditPriceEur':
+      typeof all['agents.copilotEstimate.creditPriceEur'] === 'number'
+        ? (all['agents.copilotEstimate.creditPriceEur'] as number)
+        : 0,
+    // Nudge à capacité maîtrisée — gate ON par défaut (clé absente = activé :
+    // l'UI relit ce bloc puis le réécrit tel quel, un `false` par omission
+    // désarmerait le gate à la première sauvegarde).
+    'agents.nudge.capacityGating': all['agents.nudge.capacityGating'] !== false,
+    'agents.nudge.maxParallel':
+      typeof all['agents.nudge.maxParallel'] === 'number'
+        ? (all['agents.nudge.maxParallel'] as number)
+        : 0,
+    // Grille EFFECTIVE = constante publique par défaut, surchargée par l'override org.
+    'agents.copilotEstimate.rateCard':
+      all['agents.copilotEstimate.rateCard'] && typeof all['agents.copilotEstimate.rateCard'] === 'object'
+        ? { ...COPILOT_STUDIO_RATE_CARD, ...(all['agents.copilotEstimate.rateCard'] as Record<string, unknown>) }
+        : COPILOT_STUDIO_RATE_CARD,
   };
 }
 
@@ -97,6 +165,8 @@ export class AgentsAdminController {
     private readonly settings: AdminSettingsService,
     private readonly tokens: ApiTokensService,
     private readonly policies: PolicyEngineService,
+    private readonly modelPricing: ModelPricingService,
+    private readonly pricingCron: ModelPricingCronService,
   ) {}
 
   @Get()
@@ -182,6 +252,55 @@ export class AgentsAdminController {
   @RequirePermissions('agent:manage')
   capabilities() {
     return this.agents.listCapabilities();
+  }
+
+  // ---------- Prix des modèles (Lot 2 AGENT_COST_UNITS) ----------
+  // Déclarés AVANT les routes `:id` pour ne pas être capté comme un id d'agent.
+
+  /** Catalogue de prix fusionné (DB > builtin) + état de synchro du feed. */
+  @Get('model-catalog')
+  @RequirePermissions('agent:manage')
+  async modelCatalog(@CurrentUser() user: AuthUser) {
+    const [entries, all] = await Promise.all([
+      // Liste PROPOSÉE : rétention 4 ans (les modèles trop vieux sortent du picker).
+      this.modelPricing.mergedCatalog(user.orgId, true),
+      this.settings.getAll(user.orgId),
+    ]);
+    return {
+      entries,
+      feedEnabled: all['agents.pricing.feedEnabled'] === true,
+      applyMode: ['off', 'all', 'per_agent'].includes(String(all['agents.pricing.applyMode']))
+        ? (all['agents.pricing.applyMode'] as 'off' | 'all' | 'per_agent')
+        : 'off',
+      usdToEurRate:
+        typeof all['agents.pricing.usdToEurRate'] === 'number'
+          ? (all['agents.pricing.usdToEurRate'] as number)
+          : 0.92,
+      lastSyncAt: all['agents.pricing.lastSyncAt'] ?? null,
+      lastSyncOk: all['agents.pricing.lastSyncOk'] ?? null,
+      lastSyncError: all['agents.pricing.lastSyncError'] ?? null,
+    };
+  }
+
+  /** Force une synchro du feed pour l'org (« Synchroniser »). Opt-in requis. */
+  @Post('pricing/sync')
+  @RequirePermissions('agent:manage')
+  @SkipAudit() // syncOrg émet `agents.pricing_synced`.
+  @HttpCode(200)
+  async syncPricing(@CurrentUser() user: AuthUser) {
+    return this.pricingCron.runNowForOrg(user.orgId);
+  }
+
+  /** Applique le prix catalogue au profil de coût d'un agent. */
+  @Post(':id/apply-catalog-price')
+  @RequirePermissions('agent:manage')
+  @SkipAudit() // applyCatalogPrice émet `agents.pricing_applied`.
+  @HttpCode(200)
+  async applyCatalogPrice(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.modelPricing.applyCatalogPrice(user.orgId, id, {
+      id: user.userId,
+      email: user.email,
+    });
   }
 
   @Post()

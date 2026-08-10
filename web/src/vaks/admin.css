@@ -342,14 +342,10 @@ mark { background: color-mix(in oklch, var(--accent) 24%, transparent); color: i
 .skl-cat { margin-top: 16px; }
 .skl-cat:first-child { margin-top: 4px; }
 .skl-catname { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 7px; }
-.skl-chips { display: flex; flex-wrap: wrap; gap: 7px; }
-.skl-chip { display: inline-flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: var(--r-pill); padding: 5px 5px 5px 12px; font-size: 13px; font-weight: 600; white-space: nowrap; }
-.skl-chip .skl-count { font-size: 11px; font-weight: 600; color: var(--text-faint); font-family: var(--font-mono); }
-.skl-chip.new { animation: chipnew .5s var(--ease); border-color: var(--accent-line); }
-@keyframes chipnew { from { background: var(--accent-soft); transform: scale(.94); } to { transform: scale(1); } }
-.skl-del { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; color: var(--text-faint); transition: all var(--dur-1) var(--ease); }
-.skl-del:hover { background: var(--c-over-bg); color: var(--c-over); }
+/* Chips partagés (`.skl-chips/.skl-chip/.skl-count/.skl-del`) déplacés dans
+   views.css (global) — le modal projet (chunk lazy `ProjectsPanel`) les utilise
+   sans jamais charger admin.css, ce qui faisait disparaître le cadre des pastilles
+   équipes/skills tant qu'on n'avait pas visité Admin/Teams. */
 .skm-cat-tag { font-size: 10px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; color: var(--text-faint);
   background: var(--surface-3); padding: 2px 7px; border-radius: var(--r-pill); }
 

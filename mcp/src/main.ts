@@ -110,10 +110,32 @@ function resourceMetadataUrl(req: Request): string {
   return `${resourceOrigin(req.headers.host)}/.well-known/oauth-protected-resource`;
 }
 
-app.post('/mcp', async (req: Request, res: Response) => {
-  // 1. Jeton bearer obligatoire.
+/**
+ * Extrait le jeton porteur. Chemin nominal : `Authorization: Bearer vaks_…`.
+ *
+ * Repli sur l'en-tête NON RÉSERVÉ `X-Api-Key` : certains clients — notamment les
+ * **custom connectors Power Platform / Copilot Studio** — RÉSERVENT l'en-tête
+ * `Authorization` et le strippent silencieusement, si bien qu'un jeton d'agent
+ * (PAT) n'arrivait jamais. `X-Api-Key` contourne ce mur. On accepte la valeur
+ * telle quelle (PAT brut) OU préfixée `Bearer ` — le champ de connexion côté
+ * Copilot laisse souvent l'un ou l'autre. Le repli ne concerne QUE le transport
+ * du jeton : la validation (API) et le RBAC sont inchangés.
+ */
+function extractBearer(req: Request): string | null {
   const auth = req.headers['authorization'];
-  const bearer = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
+  if (typeof auth === 'string' && auth.startsWith('Bearer ')) return auth.slice(7).trim() || null;
+  const raw = req.headers['x-api-key'];
+  const alt = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof alt === 'string' && alt.trim()) {
+    const v = alt.trim();
+    return (v.startsWith('Bearer ') ? v.slice(7).trim() : v) || null;
+  }
+  return null;
+}
+
+app.post('/mcp', async (req: Request, res: Response) => {
+  // 1. Jeton bearer obligatoire (Authorization: Bearer …, repli X-Api-Key).
+  const bearer = extractBearer(req);
   if (!bearer) {
     // RFC 9728 §5.1 : on pointe le client vers les métadonnées de la ressource
     // → il découvre l'AS et lance le flux OAuth (login navigateur).
@@ -142,13 +164,24 @@ app.post('/mcp', async (req: Request, res: Response) => {
   // `PERMISSIONS` côté shared). Toute autre erreur (API injoignable) → on
   // dégrade en lecture seule plutôt que de bloquer la session.
   let allowWrite = false;
+  let allowFinance = false;
+  let actorKind: string | undefined;
+  let billingUnit: string | undefined;
   let lang = pickLang(null);
   try {
     const ctx = (await api.get('me/mcp-context')) as {
       write?: boolean;
+      finance?: boolean;
       preferredLanguage?: string | null;
+      actorKind?: string;
+      billingUnit?: string;
     };
     allowWrite = ctx?.write === true;
+    // Toggle org « finance exposée à l'IA » : pilote l'EXPOSITION des tools
+    // finance (l'enforcement reste `FinanceApiGateGuard` côté API, fail-closed).
+    allowFinance = ctx?.finance === true;
+    actorKind = ctx?.actorKind;
+    billingUnit = ctx?.billingUnit;
     // Langue de l'utilisateur : pilote les libellés de prompts ET la langue de
     // réponse demandée au modèle. Posée sur le client pour que les appels
     // suivants portent `Accept-Language` (erreurs et exports traduits).
@@ -187,7 +220,7 @@ app.post('/mcp', async (req: Request, res: Response) => {
   }
 
   // 3. Serveur + transport jetables (stateless).
-  const server = buildServer(api, allowWrite, lang);
+  const server = buildServer(api, allowWrite, lang, actorKind, allowFinance, billingUnit);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 
   res.on('close', () => {

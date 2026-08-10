@@ -18,6 +18,7 @@ import type {
   UpsertCollabSpaceDto,
   ConnectorTestResultDto,
   AgentDto,
+  ModelCatalogDto,
   AgentRunSummaryDto,
   AgentRunsPageDto,
   TaskAgentActivityDto,
@@ -683,6 +684,17 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  /** Catalogue de prix des modèles (Lot 2) — fusion DB > builtin + état feed. */
+  getModelCatalog: () => request<ModelCatalogDto>('/admin/agents/model-catalog'),
+  /** Force une synchro du feed de prix (« Synchroniser »). */
+  syncModelPricing: () =>
+    request<{ enabled: boolean; upserted: number; applied: number; error?: string }>(
+      '/admin/agents/pricing/sync',
+      { method: 'POST' },
+    ),
+  /** Applique le prix catalogue au profil de coût d'un agent. */
+  applyAgentCatalogPrice: (id: string) =>
+    request<{ ok: boolean }>(`/admin/agents/${id}/apply-catalog-price`, { method: 'POST' }),
   createAgent: (dto: CreateAgentDto) =>
     request<AgentDto>('/admin/agents', { method: 'POST', body: JSON.stringify(dto) }),
   updateAgent: (id: string, dto: UpdateAgentDto) =>

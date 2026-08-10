@@ -105,6 +105,14 @@
     "dueBeforeStart": "La data di scadenza è precedente alla data di inizio.",
     "span": "{{from}} → {{to}} · <0>{{days}}</0> giorni · {{weeks}} settimane",
     "description": "Descrizione",
+    "clientStatus": "Stato del progetto per il cliente",
+    "clientStatusHint": "Stato e sintesi sono ripresi nell'export « Stato progetto (PowerPoint) » per il cliente.",
+    "statusSummaryPlaceholder": "Sintesi dello stato per il cliente: cosa è avanzato, punti chiave, prossimi passi…",
+    "health": {
+      "onTrack": "In linea",
+      "atRisk": "A rischio",
+      "offTrack": "Fuori rotta"
+    },
     "client": "Cliente",
     "noClient": "— Nessun cliente —",
     "saved": "{{key}} aggiornato",
