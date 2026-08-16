@@ -3,9 +3,9 @@ import { useNavigate } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import type { SsoProviderPublicDto } from '@vaks-pm/shared';
 import { useAuth } from '../auth/AuthContext';
-import { BrandMark, Icon } from '../vaks/primitives';
+import { BrandMark, Icon, OrgBrandMark } from '../vaks/primitives';
 import { api } from '../api/client';
-import { useOrgName } from '../api/orgName';
+import { useOrgBrand } from '../api/orgName';
 
 /**
  * Destination post-login. Un flow qui exige un login (ex. consentement OAuth
@@ -22,7 +22,7 @@ function popPostLoginRedirect(): string {
 
 export default function Login() {
   const { login, completeMfaLogin, completeForcedEnrollment, loginWithTokens } = useAuth();
-  const orgName = useOrgName();
+  const { name: orgName, logoUrl: orgLogoUrl } = useOrgBrand();
   const { t } = useTranslation('auth');
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
@@ -223,9 +223,7 @@ export default function Login() {
         }}
       >
         <div className="brand" style={{ padding: '0 0 14px', alignItems: 'center', gap: 10 }}>
-          <div className="brand-mark">
-            <BrandMark />
-          </div>
+          <OrgBrandMark logoUrl={orgLogoUrl} alt={orgName} />
           <div className="brand-name">{orgName}</div>
         </div>
 
@@ -437,8 +435,28 @@ export default function Login() {
           </button>
         )}
 
-        <div style={{ marginTop: 16, fontSize: 11.5, color: 'var(--text-faint, var(--text-3))', textAlign: 'center' }}>
-          {t('footer')}
+        <div
+          style={{
+            marginTop: 16,
+            fontSize: 11.5,
+            color: 'var(--text-faint, var(--text-3))',
+            textAlign: 'center',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+          }}
+        >
+          {/* Attribution Vaks-PM discrète : seulement si un logo client a
+              remplacé le BrandMark en tête (sinon le haut affiche déjà Vaks). */}
+          {orgLogoUrl && (
+            <>
+              <BrandMark size={12} />
+              <span>Vaks-PM</span>
+              <span aria-hidden="true">·</span>
+            </>
+          )}
+          <span>{t('footer')}</span>
         </div>
       </form>
     </div>

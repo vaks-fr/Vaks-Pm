@@ -140,6 +140,7 @@ export class AutomationActionsService {
       if (prefs.enabled) {
         const audience = [...alert.recipients, ...(await this.watcherRecipients(orgId, alert))];
         const seen = new Set<string>();
+        const persistedIds = new Set<string>();
         for (const r of audience) {
           const email = r.email.toLowerCase();
           if (seen.has(email)) continue;
@@ -147,6 +148,20 @@ export class AutomationActionsService {
           try {
             const lang = await this.notifications.resolveRecipientLanguage(orgId, r.preferredLanguage);
             const msg = automationMessage(alert.kind, lang, alert.params);
+            // Cloche durable : une ligne par destinataire (dédup par userId, la
+            // dédup email plus haut n'empêchant pas un doublon d'id théorique).
+            if (r.id && !persistedIds.has(r.id)) {
+              persistedIds.add(r.id);
+              await this.notifications.persistAndPush(orgId, r.id, {
+                kind: 'automation',
+                title: msg.heading,
+                body: msg.text,
+                taskId: alert.taskId ?? undefined,
+                projectId: alert.projectId ?? undefined,
+                url: alert.url ?? undefined,
+                meta: { automationKind: alert.kind },
+              });
+            }
             const ctx: TemplateContext = {
               recipientName: r.name,
               orgName,

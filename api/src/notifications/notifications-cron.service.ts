@@ -106,6 +106,7 @@ export class NotificationsCronService implements OnModuleInit, OnModuleDestroy {
         await this.runApiTokenExpiryReminders(org.id);
         await this.runConnectorSecretExpiryReminders(org.id);
         await this.purgeOldDeliveries(org.id);
+        await this.purgeOldInbox(org.id);
       } catch (err) {
         this.log.warn(`tick org=${org.id} failed: ${(err as Error).message}`);
       }
@@ -162,6 +163,20 @@ export class NotificationsCronService implements OnModuleInit, OnModuleDestroy {
       this.log.log(
         `email delivery purge org=${orgId}: ${total} row(s) older than ${EMAIL_DELIVERY_RETENTION_DAYS}d deleted`,
       );
+    }
+  }
+
+  /**
+   * Purge de la boîte de réception in-app (notifs lues anciennes / non lues
+   * très anciennes). Délègue à `NotificationsService.purgeInbox` qui porte les
+   * seuils de rétention. Best-effort.
+   */
+  private async purgeOldInbox(orgId: string): Promise<void> {
+    try {
+      const n = await this.notifications.purgeInbox();
+      if (n > 0) this.log.log(`inbox purge org=${orgId}: ${n} notification(s) deleted`);
+    } catch (err) {
+      this.log.warn(`inbox purge org=${orgId} failed: ${(err as Error).message}`);
     }
   }
 

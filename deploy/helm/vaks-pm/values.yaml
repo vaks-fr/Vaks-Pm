@@ -23,6 +23,8 @@ image:
     repository: vaks-pm/web
   worker:
     repository: vaks-pm/worker
+  mcp:
+    repository: vaks-pm/mcp
 # Names of imagePullSecrets already created in the namespace (for private registries).
 imagePullSecrets: []
 #  - name: regcred
@@ -82,6 +84,25 @@ worker:
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+# MCP server (AI connector). Stateless Streamable-HTTP, mounts no secret (relays
+# the caller's bearer, the api validates it). Runtime access is gated by license +
+# the `mcp.enabled` org toggle, so — like on Swarm — the infra can stay always-on;
+# set enabled=false only to drop the service (and its ingress routes) entirely.
+mcp:
+  enabled: true
+  replicaCount: 2
+  port: 8080
+  resources:
+    requests: { cpu: 50m,  memory: 96Mi }
+    limits:   { cpu: 500m, memory: 160Mi }
+  # Extra env vars for the mcp container. Do NOT set VAKS_TENANT_HOST or
+  # VAKS_AUTH_SERVER_MODE here (see templates/mcp.yaml for why).
+  extraEnv: []
   nodeSelector: {}
   tolerations: []
   affinity: {}

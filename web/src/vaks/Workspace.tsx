@@ -21,7 +21,7 @@ import {
   type TimeEntry,
   type User,
 } from './data';
-import { Avatar, BrandMark, GROUP_COLORS, Icon } from './primitives';
+import { Avatar, BrandMark, GROUP_COLORS, Icon, OrgBrandMark } from './primitives';
 import { LanguageSwitcher } from '../i18n/LanguageSwitcher';
 import { DEMO } from '../demo/config';
 // Vues d'atterrissage + overlays instantanés : chargées eager (bundle initial).
@@ -99,7 +99,8 @@ import {
   useRealtime,
 } from '../realtime/store';
 import { NotificationsPanel } from '../realtime/NotificationsPanel';
-import type { TaskDto, CommentDto, TimeEntryDto } from '@vaks-pm/shared';
+import { renderInboxItem } from '../realtime/renderNotification';
+import type { TaskDto, CommentDto, TimeEntryDto, InboxNotificationDto } from '@vaks-pm/shared';
 
 interface Settings {
   theme: 'dark' | 'light';
@@ -535,6 +536,13 @@ export default function Workspace() {
   }, [searchParams]);
   const [tasks, setTasks] = useState<Task[]>(DATA_TASKS);
   const [openId, setOpenId] = useState<string | null>(null);
+  // Signal « ouvrir le composer de nouvelle tâche » : le bouton « New task » de
+  // la sidebar bascule sur le board ET arme ce flag ; KanbanView l'observe pour
+  // ouvrir la saisie inline dans la 1re colonne, puis le désarme via le callback.
+  const [pendingNewTask, setPendingNewTask] = useState(false);
+  // Ref stable pour désarmer le flag (évite que l'effet de KanbanView se relance
+  // à chaque render à cause d'une nouvelle closure de callback).
+  const consumeNewTask = useCallback(() => setPendingNewTask(false), []);
   // Tâche ouverte appartenant à un AUTRE projet que celui courant (ex. depuis
   // la vue Workload en scope global/équipe). Chargée à la demande par id, et
   // rendue dans TaskDetail avec un bandeau « tâche d'un autre projet ».
@@ -1301,13 +1309,9 @@ export default function Workspace() {
         if (list.some((c) => c.id === v.id)) return cs;
         return { ...cs, [dto.taskId]: [...list, v] };
       });
-      pushNotification({
-        kind: 'comment',
-        title: tr('realtime.newComment'),
-        body: dto.body.slice(0, 120),
-        taskId: dto.taskId,
-        projectId: currentProjectId ?? undefined,
-      });
+      // La cloche n'est plus alimentée ici (notif projet-large, éphémère, non
+      // ciblée) : les commentaires pertinents (watchers / @mention) arrivent
+      // désormais par le canal durable `user:<id>` (voir useUserNotifications).
     },
     'comment.deleted': (payload) => {
       const p = payload as { id: string };
@@ -1340,36 +1344,13 @@ export default function Workspace() {
     },
   });
 
-  // Notifications personnelles (assignation, mention, changement de statut) —
-  // canal `user:<id>`, reçu quel que soit le projet affiché. Alimente la cloche
-  // en haut à droite. Le libellé est construit ici pour rester dans la langue de
-  // l'UI (le serveur envoie des données structurées, pas du texte rendu).
+  // Notifications personnelles durables — canal `user:<id>`, reçu quel que soit
+  // le projet affiché. Le serveur pousse un `InboxNotificationDto` complet
+  // (avec `id`/`createdAt`) déjà persisté ; `renderInboxItem` construit le
+  // libellé (i18n UI pour les kinds « perso », texte serveur pour les autres).
   useUserNotifications((p) => {
-    const title =
-      p.kind === 'assignment'
-        ? tr('realtime.assignedToYou')
-        : p.kind === 'mention'
-        ? tr('realtime.mentionedYou', { name: p.actorName ?? tr('realtime.someone') })
-        : p.kind === 'status'
-        ? tr('realtime.statusChangedTitle')
-        : tr('realtime.newNotification');
-    const body =
-      p.kind === 'status'
-        ? tr('realtime.statusChangedBody', {
-            task: p.taskTitle ?? '',
-            from: p.fromStatus ?? '',
-            to: p.toStatus ?? '',
-          })
-        : p.kind === 'mention'
-        ? p.excerpt ?? p.taskTitle
-        : p.taskTitle;
-    pushNotification({
-      kind: p.kind === 'comment' ? 'comment' : p.kind,
-      title,
-      body,
-      taskId: p.taskId,
-      projectId: p.projectId,
-    });
+    if (!p.id) return; // payload legacy sans id serveur : ignoré (rare)
+    pushNotification(renderInboxItem(p as InboxNotificationDto, tr));
   });
 
   const localOpenTask = tasks.find((tk) => tk.id === openId) || null;
@@ -1394,8 +1375,9 @@ export default function Workspace() {
   const projName = proj?.name ?? tr('shell.noProjectYet');
   const projColor = proj?.color ?? 250;
 
-  const { user: authUser, logout } = useAuth();
+  const { user: authUser, logout, orgSettings } = useAuth();
   const orgName = useOrgName();
+  const orgLogoUrl = orgSettings.logoUrl;
   const me: User | null = authUser
     ? {
         id: authUser.id,
@@ -1735,9 +1717,7 @@ export default function Workspace() {
       {sidebar && (
         <aside className={'sidebar' + (drawer ? ' sidebar-open' : '')}>
           <div className="brand">
-            <div className="brand-mark">
-              <BrandMark />
-            </div>
+            <OrgBrandMark logoUrl={orgLogoUrl} alt={orgName} />
             <div className="brand-name">{orgName}</div>
             <button className="drawer-x" onClick={() => setDrawer(false)} aria-label={tr('closeMenu')}>
               <Icon name="x" size={18} />
@@ -1827,7 +1807,13 @@ export default function Workspace() {
             })()}
           </div>
 
-          <button className="btn btn-accent btn-block" onClick={() => setView('board')}>
+          <button
+            className="btn btn-accent btn-block"
+            onClick={() => {
+              setView('board');
+              setPendingNewTask(true);
+            }}
+          >
             <Icon name="plus" size={17} /> {tr('shell.newTask')}
           </button>
 
@@ -1868,6 +1854,15 @@ export default function Workspace() {
               <Icon name="logout" size={18} />
             </button>
           </div>
+
+          {/* Attribution discrète : uniquement quand un logo client remplace le
+              BrandMark en tête (sinon Vaks serait affiché deux fois). */}
+          {orgLogoUrl && (
+            <div className="powered-by" title="Vaks-PM">
+              <BrandMark size={12} />
+              <span>{tr('shell.poweredBy')}</span>
+            </div>
+          )}
         </aside>
       )}
       {drawer && sidebar && <div className="scrim" onClick={() => setDrawer(false)} />}
@@ -1881,9 +1876,7 @@ export default function Workspace() {
 
           {!sidebar && (
             <div className="brand brand-top">
-              <div className="brand-mark">
-                <BrandMark />
-              </div>
+              <OrgBrandMark logoUrl={orgLogoUrl} alt={orgName} />
               <div className="brand-name">{orgName}</div>
             </div>
           )}
@@ -2094,6 +2087,8 @@ export default function Workspace() {
               onDeleteGroup={deleteGroup}
               boardVersion={boardVersion}
               subStatuses={subStatuses}
+              autoOpenComposer={pendingNewTask}
+              onComposerConsumed={consumeNewTask}
             />
           )}
           {hasProject && view === 'list' && <ListView tasks={filtered} monday={mondayRef.current} density={t.density} onOpen={setOpenId} />}

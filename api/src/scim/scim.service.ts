@@ -6,9 +6,10 @@ import { AuditLogService } from '../audit-logs/audit-log.service';
 import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
 import { LicenseService } from '../licensing/license.service';
 import { SeatService } from '../licensing/seat.service';
+import { ScimInvalidFilterException } from './scim-exception.filter';
 import {
   applyPatch,
-  parseEqFilter,
+  parseScimFilter,
   parseGroupPatch,
   readWrite,
   ScimGroupWrite,
@@ -29,6 +30,34 @@ interface ScimActor {
   orgId: string;
   userId: string; // l'admin créateur de la clé org
 }
+
+/**
+ * Attributs interrogeables via `?filter=`, par ressource : nom canonique SCIM
+ * (minuscules, sans préfixe URN) → colonne Prisma + normalisation de la valeur.
+ *
+ * Le jeu couvre ce que les IdP émettent réellement : Okta code `userName` en dur
+ * pour les users et `displayName` pour les groupes ; Entra interroge par défaut
+ * sur `userName`/`externalId`/`displayName` MAIS laisse l'admin choisir
+ * l'attribut de rapprochement — dont `emails[type eq "work"].value`, que
+ * Microsoft documente comme devant être filtrable dès que l'email sert de clé
+ * d'unicité. Tout ce qui sort de cette table → 400 `invalidFilter`.
+ */
+type FilterAttrMap = Record<string, { column: string; normalize?: (v: string) => string }>;
+
+const lower = (v: string) => v.toLowerCase();
+
+const USER_FILTER_ATTRS: FilterAttrMap = {
+  username: { column: 'email', normalize: lower },
+  'emails.value': { column: 'email', normalize: lower },
+  externalid: { column: 'externalId' },
+  id: { column: 'id' },
+};
+
+const GROUP_FILTER_ATTRS: FilterAttrMap = {
+  displayname: { column: 'name' },
+  externalid: { column: 'externalId' },
+  id: { column: 'id' },
+};
 
 @Injectable()
 export class ScimService {
@@ -91,6 +120,29 @@ export class ScimService {
     }
   }
 
+  /**
+   * Traduit un `?filter=` en clause Prisma additionnelle. Pas de filtre → `{}`
+   * (listing complet, c'est l'import initial d'Okta). Filtre non évaluable →
+   * 400 `invalidFilter`, JAMAIS un listing non filtré ni une liste vide : les
+   * deux font conclure n'importe quoi à l'IdP (mauvais compte rapproché, ou
+   * compte réputé absent → boucle de create en 409).
+   */
+  private filterWhere(filter: string | undefined, allowed: FilterAttrMap): Record<string, unknown> {
+    const parsed = parseScimFilter(filter);
+    if (parsed.kind === 'none') return {};
+    if (parsed.kind === 'unsupported') throw new ScimInvalidFilterException(parsed.detail);
+    const mapped = allowed[parsed.attr];
+    if (!mapped) {
+      // Attribut inconnu = syntaxe valide mais inévaluable. On refuse au lieu de
+      // renvoyer vide : c'est presque toujours un attribut de rapprochement mal
+      // configuré côté IdP, et le 400 nommé est ce qui permet de le corriger.
+      throw new ScimInvalidFilterException(
+        `Filtering on '${parsed.attr}' is not supported. Filterable attributes: ${Object.keys(allowed).join(', ')}.`,
+      );
+    }
+    return { [mapped.column]: mapped.normalize ? mapped.normalize(parsed.value) : parsed.value };
+  }
+
   /** Révoque toutes les sessions actives d'un user (déprovisioning). */
   private async revokeSessions(userId: string): Promise<void> {
     await this.prisma.refreshToken.updateMany({
@@ -103,12 +155,7 @@ export class ScimService {
     // SCIM ne gère QUE les humains — les agents IA ont leur propre provisioning
     // (connecteurs AgentDirectoryProvider / POST /agents), jamais via l'IdP users.
     const where: Record<string, unknown> = { organizationId: orgId, deletedAt: null, kind: 'HUMAN' };
-    const eq = parseEqFilter(filter);
-    if (eq) {
-      if (eq.attr.toLowerCase() === 'username') where.email = eq.value.toLowerCase();
-      else if (eq.attr.toLowerCase() === 'externalid') where.externalId = eq.value;
-      else return { resources: [], total: 0 }; // filtre non supporté → vide
-    }
+    Object.assign(where, this.filterWhere(filter, USER_FILTER_ATTRS));
     const [total, rows] = await Promise.all([
       this.prisma.user.count({ where }),
       this.prisma.user.findMany({
@@ -319,12 +366,7 @@ export class ScimService {
 
   async listGroups(orgId: string, filter: string | undefined, startIndex: number, count: number, baseUrl: string) {
     const where: Record<string, unknown> = { organizationId: orgId, deletedAt: null };
-    const eq = parseEqFilter(filter);
-    if (eq) {
-      if (eq.attr.toLowerCase() === 'displayname') where.name = eq.value;
-      else if (eq.attr.toLowerCase() === 'externalid') where.externalId = eq.value;
-      else return { resources: [], total: 0 };
-    }
+    Object.assign(where, this.filterWhere(filter, GROUP_FILTER_ATTRS));
     const total = await this.prisma.team.count({ where });
     const rows = await this.prisma.team.findMany({
       where,

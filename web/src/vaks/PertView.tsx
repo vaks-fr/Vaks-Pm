@@ -48,12 +48,6 @@ function nodeHeightFor(title: string): number {
   );
   return NODE_H_BASE + Math.max(0, lines - 2) * TITLE_LINE_H;
 }
-function titleLinesFor(title: string): number {
-  return Math.min(
-    TITLE_MAX_LINES,
-    Math.max(2, Math.ceil(title.length / TITLE_CHARS_PER_LINE)),
-  );
-}
 
 function parseDay(iso: string): Date {
   return new Date(iso + 'T00:00:00Z');
@@ -376,12 +370,24 @@ export function PertView({ projectId, onOpen, refreshKey = 0 }: Props) {
   if (!data) {
     return <div style={{ padding: 24, opacity: 0.7, fontSize: 13 }}>{t('timeline:pert.loading')}</div>;
   }
-  if (!cpm || !layout) {
+  if (!cpm) {
     return (
       <div className="placeholder">
         <div className="ph-icon"><Icon name="branch" size={30} /></div>
         <h2 className="ph-title">{t('timeline:pert.noTasksTitle')}</h2>
         <p className="ph-sub">{t('timeline:pert.noTasksSub')}</p>
+      </div>
+    );
+  }
+  // cpm existe (≥ 1 tâche) mais layout vide ⇒ le filtre « Critical only » n'a
+  // rien retenu : le message doit dire « aucune tâche critique », pas « ajoutez
+  // des tâches » (il y en a).
+  if (!layout) {
+    return (
+      <div className="placeholder">
+        <div className="ph-icon"><Icon name="branch" size={30} /></div>
+        <h2 className="ph-title">{t('timeline:pert.noCritTitle')}</h2>
+        <p className="ph-sub">{t('timeline:pert.noCritSub')}</p>
       </div>
     );
   }

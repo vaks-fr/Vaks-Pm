@@ -1,0 +1,122 @@
+{{- if .Values.mcp.enabled }}
+{{- /*
+  MCP server (AI connector). Streamable-HTTP, STATELESS: every POST /mcp builds a
+  throwaway server, nothing is shared between requests or replicas — which is what
+  makes multi-replica safe by construction, and why this service mounts NO secret.
+  It holds nothing: it relays the caller's bearer and lets the api validate the
+  token and apply RBAC (cf. mcp/src/main.ts). Mirrors the Swarm `mcp` service in
+  docker-stack.yml.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vakspm.fullname" . }}-mcp
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  replicas: {{ .Values.mcp.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vakspm.selectorLabels" (dict "root" . "component" "mcp") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vakspm.selectorLabels" (dict "root" . "component" "mcp") | nindent 8 }}
+      {{- with .Values.mcp.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "vakspm.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # > DRAIN_MS (25s) > VAKS_API_TIMEOUT_MS (20s): a legit tool call can hold
+      # 20s, a shorter grace would sever exactly the slow calls we want to protect.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: mcp
+          image: {{ include "vakspm.image" (dict "root" . "repo" .Values.image.mcp.repository) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # No envFrom/secretRef on purpose: the MCP holds no state and no secret.
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: {{ .Values.mcp.port | quote }}
+            # In-cluster api Service (the Swarm default `http://api:3000` won't
+            # resolve here).
+            - name: VAKS_API_URL
+              value: {{ printf "http://%s-api:%v" (include "vakspm.fullname" .) .Values.api.port | quote }}
+            - name: VAKS_API_PREFIX
+              value: api/v1
+            # Heap cap under the container limit: the server rebuilds ~95 zod-validated
+            # tools on EVERY request (buildServer), which is not free.
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=112"
+            # ⚠ VAKS_TENANT_HOST and VAKS_AUTH_SERVER_MODE are deliberately UNSET.
+            # Both look like omissions — do not add them:
+            #  - without VAKS_TENANT_HOST, the tenant is derived from the incoming
+            #    Host, letting one deployment serve N tenants (pooled mode). Setting
+            #    it would pin every request to a single tenant.
+            #  - without VAKS_AUTH_SERVER_MODE, the mode is `self`. Co-located (MCP
+            #    behind the same Ingress as the api), `self` and `tenant` resolve the
+            #    same host: changing it is risk for zero benefit.
+            {{- with .Values.mcp.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.mcp.port }}
+          # Without a readiness gate, `order: start-first`-style rollouts route
+          # traffic before Express has called listen() → 502s. /healthz is the only
+          # probe endpoint the MCP exposes.
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.mcp.resources | nindent 12 }}
+      {{- with .Values.mcp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mcp.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mcp.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vakspm.fullname" . }}-mcp
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "vakspm.selectorLabels" (dict "root" . "component" "mcp") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.mcp.port }}
+      targetPort: http
+{{- end }}

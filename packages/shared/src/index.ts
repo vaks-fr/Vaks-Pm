@@ -2198,7 +2198,7 @@ export interface ProjectEvmDto {
   budgetVariance: number | null;
   /** Cost variance = EV − AC. */
   costVariance: number;
-  monthly: Array<{ month: string; pv: number | null; ac: number }>;
+  monthly: Array<{ month: string; pv: number | null; ac: number; ev: number }>;
 }
 
 export interface ProjectCfdDto {
@@ -3258,20 +3258,71 @@ export type EventName = (typeof EVENTS)[keyof typeof EVENTS];
  */
 export const USER_NOTIFICATION_EVENT = 'notification' as const;
 
-export type UserNotificationKind = 'assignment' | 'mention' | 'status' | 'comment' | 'system';
+export type UserNotificationKind =
+  | 'assignment'
+  | 'mention'
+  | 'status'
+  | 'comment'
+  | 'due'
+  | 'over_estimate'
+  | 'skill_request'
+  | 'skill_expiring'
+  | 'automation'
+  | 'announcement'
+  | 'admin_alert'
+  | 'system';
 
-export interface UserNotificationPayload {
+/**
+ * Élément de la boîte de réception in-app durable (cloche). Même forme que le
+ * payload poussé en temps réel sur `USER_NOTIFICATION_EVENT` que la réponse de
+ * `GET /me/notifications` — un seul mapper côté front. Les kinds « perso »
+ * (assignment/mention/status/comment) portent le libellé dans les champs
+ * structurés (rendu i18n front) ; les kinds serveur (automation/admin_alert/
+ * announcement/…) portent `title`/`body` déjà rendus dans la langue du
+ * destinataire.
+ */
+export interface InboxNotificationDto {
+  /** Id de la ligne persistée. */
+  id: string;
   kind: UserNotificationKind;
+  /** Titre rendu serveur (kinds serveur) — absent pour les kinds « perso ». */
+  title?: string;
+  body?: string;
   taskId?: string;
   projectId?: string;
+  /** URL du CTA (lien absolu tenant). */
+  url?: string;
   taskTitle?: string;
   /** Auteur de l'action (assignation, mention, changement de statut). */
   actorName?: string;
-  /** Extrait de commentaire (mention). */
+  /** Extrait de commentaire (mention / commentaire). */
   excerpt?: string;
   fromStatus?: string;
   toStatus?: string;
+  /** ISO 8601. */
+  createdAt: string;
+  /** Vue/traitée (pastille éteinte). */
+  read: boolean;
 }
+
+/** Réponse paginée keyset de `GET /me/notifications`. */
+export interface InboxListDto {
+  items: InboxNotificationDto[];
+  /** Nombre total de notifications non lues (indépendant de la pagination). */
+  unreadCount: number;
+  /** Curseur opaque de la page suivante, `null` si fin. */
+  nextCursor: string | null;
+}
+
+/**
+ * Payload temps réel poussé dans la room `user:<id>`. Depuis la cloche durable
+ * c'est un {@link InboxNotificationDto} complet (avec `id`, `createdAt`,
+ * `read:false`). Les champs restent optionnels pour la rétrocompat des anciens
+ * clients.
+ */
+export type UserNotificationPayload = Partial<InboxNotificationDto> & {
+  kind: UserNotificationKind;
+};
 
 // ============================================================
 // Phase 5 — Workload (capacity vs allocation)

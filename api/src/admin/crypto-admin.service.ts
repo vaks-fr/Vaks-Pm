@@ -4,6 +4,7 @@ import { TenantCryptoService } from '../common/crypto/tenant-crypto.service';
 import { KEY_PROVIDER, KeyProvider } from '../common/crypto/key-provider';
 import { AuditLogService } from '../audit-logs/audit-log.service';
 import { AUDIT_ACTIONS } from '../audit-logs/audit-actions';
+import { ENCRYPTED_SECRET_COLUMNS } from '../common/crypto/encrypted-columns';
 import { SECRET_SETTINGS } from './admin-settings.service';
 
 type Actor = { id?: string; email?: string };
@@ -63,30 +64,44 @@ export class CryptoAdminService {
     return result;
   }
 
-  /** Colonnes chiffrées du tenant (re-chiffrées à la rotation DEK). */
+  /**
+   * Colonnes chiffrées du tenant (re-chiffrées à la rotation DEK).
+   *
+   * Balaie DEUX familles de secrets :
+   *  - **Colonnes dédiées** : pilotées par le registre {@link ENCRYPTED_SECRET_COLUMNS}
+   *    (source unique — ajouter tout nouveau consommateur de `TenantCryptoService`
+   *    là-bas, sinon la rotation purge une DEK encore référencée = perte de données).
+   *  - **OrgSetting** (`…Enc`) : adressé par clé de setting (`SECRET_SETTINGS`), pas
+   *    une colonne → branche séparée hors registre.
+   */
   private async reencryptColumns(orgId: string): Promise<{ processed: number; failed: number }> {
     let processed = 0;
     let failed = 0;
     const reenc = async (blob: string): Promise<string> =>
       this.tenantCrypto.encrypt(orgId, await this.tenantCrypto.decrypt(orgId, blob));
 
-    // 1. User.mfaSecret
-    const users = await this.prisma.user.findMany({
-      where: { organizationId: orgId, mfaSecret: { not: null } },
-      select: { id: true, mfaSecret: true },
-    });
-    for (const u of users) {
-      try {
-        const next = await reenc(u.mfaSecret as string);
-        await this.prisma.user.update({ where: { id: u.id }, data: { mfaSecret: next } });
-        processed += 1;
-      } catch (e) {
-        failed += 1;
-        this.logger.warn(`re-enc mfaSecret user ${u.id} échoué: ${(e as Error).message}`);
+    // 1. Colonnes de secrets dédiées (registre source unique).
+    //    Tous les delegates concernés partagent la forme { id, organizationId, <col> }
+    //    → accès générique typé large (as any) mais borné aux modèles du registre.
+    for (const { model, column } of ENCRYPTED_SECRET_COLUMNS) {
+      const delegate = (this.prisma as unknown as Record<string, any>)[model];
+      const rows: Array<Record<string, unknown>> = await delegate.findMany({
+        where: { organizationId: orgId, [column]: { not: null } },
+        select: { id: true, [column]: true },
+      });
+      for (const row of rows) {
+        try {
+          const next = await reenc(row[column] as string);
+          await delegate.update({ where: { id: row.id as string }, data: { [column]: next } });
+          processed += 1;
+        } catch (e) {
+          failed += 1;
+          this.logger.warn(`re-enc ${model}.${column} ${row.id as string} échoué: ${(e as Error).message}`);
+        }
       }
     }
 
-    // 2. OrgSetting (clés secrètes …Enc)
+    // 2. OrgSetting (clés secrètes …Enc) — hors registre (adressé par clé, pas colonne).
     const encKeys = SECRET_SETTINGS.map((s) => s.encKey);
     const settings = await this.prisma.orgSetting.findMany({
       where: { organizationId: orgId, key: { in: encKeys } },
@@ -101,41 +116,6 @@ export class CryptoAdminService {
       } catch (e) {
         failed += 1;
         this.logger.warn(`re-enc orgSetting ${s.key} échoué: ${(e as Error).message}`);
-      }
-    }
-
-    // 3. TicketingConnector.secretEnc
-    const conns = await this.prisma.ticketingConnector.findMany({
-      where: { organizationId: orgId, secretEnc: { not: null } },
-      select: { id: true, secretEnc: true },
-    });
-    for (const c of conns) {
-      try {
-        const next = await reenc(c.secretEnc as string);
-        await this.prisma.ticketingConnector.update({ where: { id: c.id }, data: { secretEnc: next } });
-        processed += 1;
-      } catch (e) {
-        failed += 1;
-        this.logger.warn(`re-enc connector ${c.id} échoué: ${(e as Error).message}`);
-      }
-    }
-
-    // 4. IdentityProvider.oidcClientSecretEnc
-    const idps = await this.prisma.identityProvider.findMany({
-      where: { organizationId: orgId, oidcClientSecretEnc: { not: null } },
-      select: { id: true, oidcClientSecretEnc: true },
-    });
-    for (const p of idps) {
-      try {
-        const next = await reenc(p.oidcClientSecretEnc as string);
-        await this.prisma.identityProvider.update({
-          where: { id: p.id },
-          data: { oidcClientSecretEnc: next },
-        });
-        processed += 1;
-      } catch (e) {
-        failed += 1;
-        this.logger.warn(`re-enc idp ${p.id} échoué: ${(e as Error).message}`);
       }
     }
 

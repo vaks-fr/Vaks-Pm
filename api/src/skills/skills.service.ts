@@ -1089,11 +1089,10 @@ export class SkillsService {
     for (const r of rows) {
       if (!r.expiresAt) continue;
       const daysLeft = Math.ceil((+r.expiresAt - now) / 86_400_000);
-      // Détermine le prochain seuil à franchir (descend de 30 → 7 → 1).
+      // Prochain seuil à franchir (30 → 7 → expiré). Une seule évaluation : le
+      // premier bloc historique était systématiquement écrasé par celui-ci
+      // (dans tous les cas où il assignait une valeur) → supprimé, code mort.
       let stageToFire: 30 | 7 | 0 | null = null;
-      if (daysLeft <= 0 && r.expiryReminderStage > 1) stageToFire = 0;
-      else if (daysLeft <= 7 && r.expiryReminderStage > 7) stageToFire = 7;
-      else if (daysLeft <= 30 && r.expiryReminderStage === 0) stageToFire = 30;
       // expiryReminderStage interprétation : 0 = aucun, 30/7 = ces seuils
       // franchis, 1 = expiré envoyé (état final).
       // Cron progresse : 0 → 30 → 7 → 1.
@@ -1128,12 +1127,12 @@ export class SkillsService {
           isLead: true,
           user: { deletedAt: null, status: 'ACTIVE' },
         },
-        select: { user: { select: { email: true, name: true, preferredLanguage: true } } },
+        select: { user: { select: { id: true, email: true, name: true, preferredLanguage: true } } },
       });
-      const recipientMap = new Map<string, { email: string; name: string; preferredLanguage: string | null }>();
-      recipientMap.set(r.user.email, { email: r.user.email, name: r.user.name, preferredLanguage: r.user.preferredLanguage });
+      const recipientMap = new Map<string, { userId: string; email: string; name: string; preferredLanguage: string | null }>();
+      recipientMap.set(r.user.email, { userId: r.userId, email: r.user.email, name: r.user.name, preferredLanguage: r.user.preferredLanguage });
       for (const lr of leadRows) {
-        recipientMap.set(lr.user.email, { email: lr.user.email, name: lr.user.name, preferredLanguage: lr.user.preferredLanguage });
+        recipientMap.set(lr.user.email, { userId: lr.user.id, email: lr.user.email, name: lr.user.name, preferredLanguage: lr.user.preferredLanguage });
       }
       try {
         await this.notifications.notifySkillExpiring(
@@ -1527,9 +1526,10 @@ export class SkillsService {
     };
 
     // Index: pour chaque skillId requis, liste des tâches qui le requièrent + niveau requis
+    const taskById = new Map(tasks.map((x) => [x.id, x]));
     const tasksBySkill = new Map<string, Array<{ task: typeof tasks[number]; level: number }>>();
     for (const { taskId, reqs } of skillReqsByTask) {
-      const t = tasks.find((x) => x.id === taskId)!;
+      const t = taskById.get(taskId)!;
       for (const r of reqs) {
         if (!tasksBySkill.has(r.skillId)) tasksBySkill.set(r.skillId, []);
         tasksBySkill.get(r.skillId)!.push({ task: t, level: r.level });

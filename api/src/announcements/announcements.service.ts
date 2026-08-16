@@ -151,6 +151,15 @@ export class AnnouncementsService {
     if (prefs.enabled) {
       for (const r of finalRecipients) {
         try {
+          // Cloche durable — contenu rédigé par l'humain, servi tel quel.
+          await this.notifications.persistAndPush(orgId, r.id, {
+            kind: 'announcement',
+            title: dto.title,
+            body: dto.body.length > 400 ? `${dto.body.slice(0, 400)}…` : dto.body,
+            projectId,
+            url: ctaUrl,
+            meta: { authorName, projectName: project.name },
+          });
           const lang = await this.notifications.resolveRecipientLanguage(orgId, r.preferredLanguage);
           const ctx: TemplateContext = {
             recipientName: r.name,

@@ -127,15 +127,104 @@ export function readWrite(body: ScimUserWrite): {
   };
 }
 
+// ============================================================
+// Filtres (RFC 7644 §3.4.2.2)
+// ============================================================
+
 /**
- * Parse un filtre SCIM simple `attr eq "value"` (le seul utilisé par Entra
- * pour matcher avant create). Renvoie `{ attr, value }` ou null.
+ * Résultat du parsing d'un `?filter=`.
+ * - `none`        : pas de filtre → listing paginé complet (légitime : c'est
+ *                   l'import initial d'Okta, qui ne filtre pas).
+ * - `eq`          : `attr eq "value"` reconnu, `attr` canonicalisé (minuscules,
+ *                   préfixe URN retiré). Reste à savoir si l'attribut est
+ *                   interrogeable pour la ressource visée — c'est au service.
+ * - `unsupported` : syntaxe qu'on ne sait PAS évaluer → l'appelant DOIT répondre
+ *                   400 `invalidFilter`, jamais une liste.
  */
-export function parseEqFilter(filter?: string): { attr: string; value: string } | null {
-  if (!filter) return null;
-  const m = /^\s*(\w+)\s+eq\s+"([^"]*)"\s*$/i.exec(filter);
-  if (!m) return null;
-  return { attr: m[1], value: m[2] };
+export type ParsedScimFilter =
+  | { kind: 'none' }
+  | { kind: 'eq'; attr: string; value: string }
+  | { kind: 'unsupported'; detail: string };
+
+/** Préfixes de schéma admis devant un nom d'attribut (RFC 7644 §3.10). */
+const SCIM_ATTR_URN_PREFIXES = [
+  `${SCIM_SCHEMA_USER}:`.toLowerCase(),
+  `${SCIM_SCHEMA_GROUP}:`.toLowerCase(),
+  `${SCIM_SCHEMA_ENTERPRISE}:`.toLowerCase(),
+];
+
+/** `urn:…:core:2.0:User:userName` → `username`. */
+function canonicalAttr(raw: string): string {
+  const a = raw.trim().toLowerCase();
+  for (const p of SCIM_ATTR_URN_PREFIXES) {
+    if (a.startsWith(p)) return a.slice(p.length);
+  }
+  return a;
+}
+
+/** `attr eq "value"` — l'attribut peut porter un préfixe URN (`:` et `.`). */
+const EQ_RE = /^\s*([\w:.$-]+)\s+eq\s+"([^"]*)"\s*$/i;
+
+/**
+ * `emails[type eq "work"].value eq "x"` — forme explicitement exigée par
+ * Microsoft dès que l'email sert d'attribut d'unicité côté Entra, et première
+ * cause documentée de rupture chez les endpoints qui ne la gèrent pas.
+ * Le `type` est ignoré : on ne stocke qu'un email par compte.
+ */
+const EMAILS_RE = /^\s*emails\[\s*type\s+eq\s+"[^"]*"\s*\]\.value\s+eq\s+"([^"]*)"\s*$/i;
+
+/** Opérateurs RFC 7644 §3.4.2.2 autres que `eq` — nommés dans le 400. */
+const OTHER_OPS_RE = /^\s*[\w:.$-]+\s+(ne|co|sw|ew|gt|ge|lt|le)\s/i;
+const PRESENCE_RE = /^\s*[\w:.$-]+\s+pr\s*$/i;
+const LOGICAL_RE = /\s(and|or)\s/i;
+
+/**
+ * Parse un `?filter=` SCIM. On ne gère QUE l'égalité simple sur un attribut :
+ * c'est tout ce qu'Entra et Okta émettent pour leur test d'existence avant
+ * création (Okta code même `userName` en dur). Tout le reste est refusé
+ * explicitement plutôt que silencieusement ignoré — RFC 7644 §3.4.2.2 :
+ * « Providers MUST decline to filter results if the specified filter operation
+ * is not recognized and return an HTTP 400 error with a 'scimType' error of
+ * 'invalidFilter'. »
+ *
+ * Renvoyer une liste non filtrée (l'ancien comportement) faisait matcher l'IdP
+ * sur un compte arbitraire ; renvoyer une liste vide lui faisait conclure à
+ * l'absence du compte et retenter un create en boucle 409. Les deux sont pires
+ * qu'un 400 lisible dans le journal de provisioning.
+ */
+export function parseScimFilter(filter?: string): ParsedScimFilter {
+  const raw = filter?.trim();
+  if (!raw) return { kind: 'none' };
+
+  const emails = EMAILS_RE.exec(raw);
+  if (emails) return { kind: 'eq', attr: 'emails.value', value: emails[1] };
+
+  const eq = EQ_RE.exec(raw);
+  if (eq) return { kind: 'eq', attr: canonicalAttr(eq[1]), value: eq[2] };
+
+  // Diagnostic nommé : l'admin lit ce texte dans le journal de son IdP et doit
+  // pouvoir corriger son mappage sans nous appeler.
+  const logical = LOGICAL_RE.exec(raw);
+  if (logical) {
+    return {
+      kind: 'unsupported',
+      detail: `The operator '${logical[1].toLowerCase()}' is not supported. Filter on a single attribute using 'eq'.`,
+    };
+  }
+  const other = OTHER_OPS_RE.exec(raw);
+  if (other) {
+    return {
+      kind: 'unsupported',
+      detail: `The operator '${other[1].toLowerCase()}' is not supported. Only 'eq' is supported.`,
+    };
+  }
+  if (PRESENCE_RE.test(raw)) {
+    return { kind: 'unsupported', detail: "The operator 'pr' is not supported. Only 'eq' is supported." };
+  }
+  return {
+    kind: 'unsupported',
+    detail: 'Unsupported filter syntax. Expected: attribute eq "value" (the value must be double-quoted).',
+  };
 }
 
 /**

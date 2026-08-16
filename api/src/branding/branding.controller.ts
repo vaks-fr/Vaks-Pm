@@ -168,20 +168,24 @@ export class BrandingController {
    * éditable `orgName`, fallback `Organization.name`.
    */
   @Get('public/branding/org')
-  async getPublicOrg(): Promise<{ name: string }> {
+  async getPublicOrg(): Promise<{ name: string; logoUrl: string }> {
     const orgId = await this.firstOrgId();
     if (!orgId) throw new NotFoundException();
     const all = await this.settings.getAll(orgId);
+    // Logo custom (chaîne vide si non configuré → l'UI de login retombe sur le
+    // BrandMark Vaks). Public pour être lisible avant authentification.
+    const logoUrl =
+      typeof all['org.logoUrl'] === 'string' ? (all['org.logoUrl'] as string).trim() : '';
     const setting =
       typeof all['orgName'] === 'string' && all['orgName'].trim()
         ? (all['orgName'] as string).trim()
         : null;
-    if (setting) return { name: setting };
+    if (setting) return { name: setting, logoUrl };
     const org = await this.prisma.organization.findFirst({
       where: { id: orgId },
       select: { name: true },
     });
-    return { name: org?.name ?? 'Vaks' };
+    return { name: org?.name ?? 'Vaks', logoUrl };
   }
 
   // ============================================================

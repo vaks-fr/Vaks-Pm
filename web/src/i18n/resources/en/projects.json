@@ -318,7 +318,7 @@
     "duplicateTitle": "Duplicate “{{name}}”",
     "newDraftTitle": "New project draft",
     "introBillable": "A billable project prepares a PMBOK charter, gets signed by the client, then activates.",
-    "introNonBillable": "A non-billable project is for internal / organizational work. It skips the charter signature and goes from draft to active directly.",
+    "introNonBillable": "A non-billable project is for internal / organizational work. It skips the charter signature and is created as a draft you can activate whenever you're ready.",
     "projectType": "Project type",
     "typeBillable": "Billable",
     "typeBillableDesc": "Charter signed by client required",
@@ -347,7 +347,8 @@
     "copying": "Copying…",
     "creating": "Creating…",
     "duplicateCta": "Duplicate project & tasks",
-    "createCta": "Create draft & open charter"
+    "createCta": "Create draft & open charter",
+    "createCtaNonBillable": "Create project"
   },
   "expenses": {
     "category": {

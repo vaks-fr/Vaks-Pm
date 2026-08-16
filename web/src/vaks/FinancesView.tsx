@@ -3,7 +3,7 @@
    Ported from the Claude Design mock (FinancesView.jsx), wired to the
    real budget-summary API. Excludes the "Cost parameters" panel.
    ============================================================ */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon, Avatar } from './primitives';
 import { api } from '../api/client';

@@ -616,10 +616,11 @@ export class WorkloadService {
     }
 
     // Holidays per user (selon countryCode user ou défaut org).
+    // `new Map` dédoublonne déjà par clé userId ; le countryCode d'un même user
+    // est identique sur toutes ses lignes → pas de filtre de dédup (l'ancien
+    // `.filter(...findIndex...)` était un O(n²) sans effet).
     const userById = new Map(
-      rows
-        .map((r) => [r.userId, r.user?.countryCode ?? null] as const)
-        .filter(([, _v], idx, arr) => arr.findIndex(([u]) => u === arr[idx][0]) === idx),
+      rows.map((r) => [r.userId, r.user?.countryCode ?? null] as const),
     );
     const holidaysByUser = new Map<string, Set<string>>();
     const fromIso = dateIso(minStartDate);
@@ -1612,17 +1613,24 @@ export class WorkloadService {
       m.set(dateIso(row.date), (row._sum.durationMinutes ?? 0) / 60);
     }
     /** Couleur effective : couleur propre si présente, sinon celle du
-     * plus proche ancêtre coloré. Retourne `null` si rien à propager. */
+     * plus proche ancêtre coloré. Retourne `null` si rien à propager.
+     * Mémoïsé par `taskId` : `taskColorById` est immuable ici et la grille
+     * interroge le même `taskId` sur chaque jour × user → on évite des milliers
+     * de remontées d'ancêtres identiques (résultat inchangé). */
+    const colorMemo = new Map<string, string | null>();
     const effectiveColor = (taskId: string): string | null => {
+      if (colorMemo.has(taskId)) return colorMemo.get(taskId)!;
       let cur = taskColorById.get(taskId);
       const seen = new Set<string>();
+      let result: string | null = null;
       while (cur && !seen.has(cur.id)) {
         seen.add(cur.id);
-        if (cur.color) return cur.color;
-        if (!cur.parentTaskId) return null;
+        if (cur.color) { result = cur.color; break; }
+        if (!cur.parentTaskId) { result = null; break; }
         cur = taskColorById.get(cur.parentTaskId);
       }
-      return null;
+      colorMemo.set(taskId, result);
+      return result;
     };
 
     // 5. Build cells.

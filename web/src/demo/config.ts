@@ -12,7 +12,7 @@ export const DEMO: boolean = import.meta.env.VITE_DEMO === '1';
 
 /** Version du schéma de state persisté en localStorage. Bumper invalide le
  *  cache visiteur (re-seed propre) quand la forme du store change. */
-export const DEMO_STATE_VERSION = 5;
+export const DEMO_STATE_VERSION = 6;
 
 /** Clé localStorage du state sandbox. */
 export const DEMO_STATE_KEY = 'vaks-demo-state';

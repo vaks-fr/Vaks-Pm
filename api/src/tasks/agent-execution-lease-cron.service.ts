@@ -96,6 +96,14 @@ export class AgentExecutionLeaseCronService implements OnModuleInit, OnModuleDes
         const claimant = t.claimedById as string;
         try {
           const done = await this.prisma.$transaction(async (tx) => {
+            // Colonne TODO du board pour réaligner la carte : au claim elle avait
+            // été poussée vers la colonne foldée CLAIMED/IN_PROGRESS. Sans ça la
+            // carte reste affichée en In progress alors que le statut est TODO.
+            const todoCol = await tx.boardColumn.findFirst({
+              where: { board: { projectId: t.projectId }, status: TaskStatus.TODO },
+              orderBy: { order: 'asc' },
+              select: { id: true },
+            });
             // Reprise CONDITIONNÉE : si un heartbeat a repoussé le bail entre le
             // findMany et ici, count = 0 et on ne touche à rien.
             const res = await tx.task.updateMany({
@@ -108,6 +116,7 @@ export class AgentExecutionLeaseCronService implements OnModuleInit, OnModuleDes
               },
               data: {
                 status: TaskStatus.TODO,
+                ...(todoCol ? { boardColumnId: todoCol.id } : {}),
                 claimedById: null,
                 claimedAt: null,
                 leaseExpiresAt: null,

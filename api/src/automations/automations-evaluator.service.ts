@@ -759,12 +759,6 @@ export class AutomationsEvaluatorService {
   // Agents IA — règles horaires 19 (budget) & 20 (livrable en attente)
   // ============================================================
 
-  /** Somme des coûts de runs agent sur un périmètre (Decimal → number). */
-  private async agentRunCost(where: Record<string, unknown>): Promise<number> {
-    const agg = await this.prisma.agentRun.aggregate({ _sum: { cost: true }, where });
-    return Number(agg._sum.cost ?? 0);
-  }
-
   /**
    * Règle 19 — prévenir AVANT le mur. Les quatre budgets agent sont enforce au
    * claim (`BUDGET_COST_DAILY|MONTHLY|PROJECT|TASK` dans `TasksService.claim`,
@@ -799,6 +793,16 @@ export class AutomationsEvaluatorService {
       },
       select: { id: true, name: true, ownerId: true, dailyCostBudget: true, monthlyCostBudget: true },
     });
+    // Dépense agrégée par agent en 2 requêtes (fenêtre jour + mois) au lieu de
+    // ~2 aggregates PAR agent : `groupBy _sum` == somme par agent (un agent sans
+    // run est absent de la sortie → 0, identique à l'aggregate).
+    const agentIds = agents.map((a) => a.id);
+    const [daySpendRows, monthSpendRows] = await Promise.all([
+      this.prisma.agentRun.groupBy({ by: ['agentId'], _sum: { cost: true }, where: { organizationId: orgId, agentId: { in: agentIds }, createdAt: { gte: dayStart } } }),
+      this.prisma.agentRun.groupBy({ by: ['agentId'], _sum: { cost: true }, where: { organizationId: orgId, agentId: { in: agentIds }, createdAt: { gte: monthStart } } }),
+    ]);
+    const daySpendByAgent = new Map(daySpendRows.map((r) => [r.agentId, Number(r._sum.cost ?? 0)]));
+    const monthSpendByAgent = new Map(monthSpendRows.map((r) => [r.agentId, Number(r._sum.cost ?? 0)]));
     for (const agent of agents) {
       const windows: Array<{ scope: 'daily' | 'monthly'; budget: number; since: Date; qual: string }> = [];
       if (agent.dailyCostBudget != null) {
@@ -809,11 +813,7 @@ export class AutomationsEvaluatorService {
       }
       for (const w of windows) {
         if (w.budget <= 0) continue;
-        const spent = await this.agentRunCost({
-          organizationId: orgId,
-          agentId: agent.id,
-          createdAt: { gte: w.since },
-        });
+        const spent = w.scope === 'daily' ? (daySpendByAgent.get(agent.id) ?? 0) : (monthSpendByAgent.get(agent.id) ?? 0);
         const ratio = pct(spent, w.budget);
         if (ratio < threshold) continue;
         const to = await this.recipients.agentSupervisors(orgId, agent.ownerId);
@@ -846,10 +846,14 @@ export class AutomationsEvaluatorService {
       select: { id: true, name: true, agentCostBudget: true },
       take: MAX_ALERTS_PER_RULE_PER_TICK,
     });
+    const projSpendByProject = new Map(
+      (await this.prisma.agentRun.groupBy({ by: ['projectId'], _sum: { cost: true }, where: { organizationId: orgId, projectId: { in: projects.map((p) => p.id) } } }))
+        .map((r) => [r.projectId, Number(r._sum.cost ?? 0)]),
+    );
     for (const p of projects) {
       const budget = Number(p.agentCostBudget);
       if (budget <= 0) continue;
-      const spent = await this.agentRunCost({ organizationId: orgId, projectId: p.id });
+      const spent = projSpendByProject.get(p.id) ?? 0;
       const ratio = pct(spent, budget);
       if (ratio < threshold) continue;
       const to = await this.recipients.financeRecipients(orgId, p.id);
@@ -882,10 +886,14 @@ export class AutomationsEvaluatorService {
       select: { id: true, title: true, agentCostBudget: true, project: { select: { id: true, name: true } } },
       take: MAX_ALERTS_PER_RULE_PER_TICK,
     });
+    const taskSpendByTask = new Map(
+      (await this.prisma.agentRun.groupBy({ by: ['taskId'], _sum: { cost: true }, where: { organizationId: orgId, taskId: { in: tasks.map((t) => t.id) } } }))
+        .map((r) => [r.taskId, Number(r._sum.cost ?? 0)]),
+    );
     for (const t of tasks) {
       const budget = Number(t.agentCostBudget);
       if (budget <= 0) continue;
-      const spent = await this.agentRunCost({ organizationId: orgId, taskId: t.id });
+      const spent = taskSpendByTask.get(t.id) ?? 0;
       const ratio = pct(spent, budget);
       if (ratio < threshold) continue;
       const to = await this.recipients.financeRecipients(orgId, t.project.id);
@@ -1057,13 +1065,19 @@ export class AutomationsEvaluatorService {
       _sum: { overtimeMinutes: true },
     });
     const thresholdMinutes = s.overtime.hoursPerWeek * 60;
+    // Users chargés en UNE requête (au lieu d'un findFirst par ligne) — le filtre
+    // kind=HUMAN/deletedAt reste porté par la requête, donc `get` renvoie
+    // undefined pour un non-humain → `if (!user) continue` inchangé.
+    const userMap = new Map(
+      (await this.prisma.user.findMany({
+        where: { id: { in: rows.map((r) => r.userId) }, organizationId: orgId, kind: 'HUMAN', deletedAt: null },
+        select: { id: true, name: true, email: true, preferredLanguage: true },
+      })).map((u) => [u.id, u]),
+    );
     for (const r of rows) {
       const minutes = r._sum.overtimeMinutes ?? 0;
       if (minutes <= thresholdMinutes) continue;
-      const user = await this.prisma.user.findFirst({
-        where: { id: r.userId, organizationId: orgId, kind: 'HUMAN', deletedAt: null },
-        select: { id: true, name: true, email: true, preferredLanguage: true },
-      });
+      const user = userMap.get(r.userId);
       if (!user) continue;
       const leads = await this.recipients.teamLeadsOf(orgId, user.id);
       if (!leads.length) continue;
@@ -1098,16 +1112,20 @@ export class AutomationsEvaluatorService {
       this.loggedMinutesByUser(orgId, start, end),
       this.loggedMinutesByUser(orgId, start, end, true),
     ]);
+    // Users chargés en UNE requête (au lieu d'un findFirst par entrée de `total`).
+    const userMap = new Map(
+      (await this.prisma.user.findMany({
+        where: { id: { in: [...total.keys()] }, organizationId: orgId, kind: 'HUMAN', deletedAt: null },
+        select: { id: true, name: true, email: true, preferredLanguage: true },
+      })).map((u) => [u.id, u]),
+    );
     for (const [userId, totalMinutes] of total) {
       // Personne qui n'a rien logué : c'est le sujet de la règle 12, pas ici —
       // sinon un absent non déclaré remonterait comme « 0 % facturable ».
       if (totalMinutes <= 0) continue;
       const ratio = pct(billable.get(userId) ?? 0, totalMinutes);
       if (ratio >= s.utilization.thresholdPct) continue;
-      const user = await this.prisma.user.findFirst({
-        where: { id: userId, organizationId: orgId, kind: 'HUMAN', deletedAt: null },
-        select: { id: true, name: true, email: true, preferredLanguage: true },
-      });
+      const user = userMap.get(userId);
       if (!user) continue;
       const leads = await this.recipients.teamLeadsOf(orgId, user.id);
       if (!leads.length) continue;

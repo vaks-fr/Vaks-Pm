@@ -216,6 +216,11 @@ function seedProjects(): ProjectDto[] {
     mkProject('proj_data', 'DATA', 'Plateforme analytique', ProjectStatus.ACTIVE, {
       description: 'Entrepôt de données + tableaux de bord.',
     }),
+    mkProject('proj_srv', 'SRV', 'Migration serveurs Windows Server 2016 → 2025', ProjectStatus.ACTIVE, {
+      description: 'Migration de la flotte on-prem vers WS2025 : inventaire, lab, pilote, déploiement par vagues (une tâche par serveur, un jalon par application), durcissement sécurité et décommissionnement.',
+      billable: false,
+      startDate: ymd(dayOffset(-14)), dueDate: ymd(dayOffset(48)),
+    }),
     mkProject('proj_crm', 'CRM', 'Migration CRM', ProjectStatus.DRAFT, {
       description: 'Cadrage de la migration CRM (offre en cours).',
       billable: true,
@@ -302,7 +307,7 @@ function label(projectId: string, i: number): { id: string; name: string; color:
 }
 
 function seedTasks(users: UserDto[]): TaskDto[] {
-  const [me, u2, u3, u4, u5, u6, u7] = users;
+  const [me, u2, u3, u4, u5, u6, u7, u8] = users;
   const WEB = 'proj_web';
   const web: TaskDto[] = [
     mkTask(WEB, 'done', TaskStatus.DONE, 'Cadrage & arborescence', {
@@ -381,7 +386,82 @@ function seedTasks(users: UserDto[]): TaskDto[] {
     }),
   ];
 
-  return [...web, ...mob, ...data];
+  const SRV = 'proj_srv';
+  const srv: TaskDto[] = [
+    // Phase 1 — Cadrage & inventaire
+    mkTask(SRV, 'done', TaskStatus.DONE, 'Inventaire des serveurs Windows Server 2016', {
+      id: 'task_srv_1', assignees: [assignee(u6)], labels: [label(SRV, 2)],
+      dueDate: ymd(dayOffset(-14)), estimateHours: 16, commentCount: 2,
+    }),
+    mkTask(SRV, 'prog', TaskStatus.IN_PROGRESS, 'Analyse de compatibilité Windows Server 2025', {
+      id: 'task_srv_2', assignees: [assignee(u2)], labels: [label(SRV, 2)], priority: TaskPriority.HIGH,
+      dueDate: ymd(dayOffset(3)), estimateHours: 24, commentCount: 1,
+    }),
+    mkTask(SRV, 'prog', TaskStatus.IN_PROGRESS, 'Plan de bascule et de rollback', {
+      id: 'task_srv_3', assignees: [assignee(u2)], labels: [label(SRV, 2)],
+      dueDate: ymd(dayOffset(5)), estimateHours: 12,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Cadrage validé', {
+      id: 'task_srv_4', assignees: [assignee(me)], isMilestone: true, dueDate: ymd(dayOffset(6)),
+    }),
+    // Phase 2 — Préparation
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Image de référence Windows Server 2025', {
+      id: 'task_srv_5', assignees: [assignee(u4)], labels: [label(SRV, 2)], dueDate: ymd(dayOffset(10)), estimateHours: 20,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Runbook de migration détaillé', {
+      id: 'task_srv_6', assignees: [assignee(u2)], labels: [label(SRV, 2)], dueDate: ymd(dayOffset(12)), estimateHours: 12,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Lab prêt', {
+      id: 'task_srv_7', assignees: [assignee(me)], isMilestone: true, dueDate: ymd(dayOffset(14)),
+    }),
+    // Phase 3 — Pilote
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Migration du lot pilote (2-3 serveurs non critiques)', {
+      id: 'task_srv_8', assignees: [assignee(u6)], labels: [label(SRV, 2)], dueDate: ymd(dayOffset(20)), estimateHours: 24,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Pilote validé', {
+      id: 'task_srv_9', assignees: [assignee(me)], isMilestone: true, dueDate: ymd(dayOffset(24)),
+    }),
+    // Phase 4 — Déploiement (1 tâche / serveur, 1 jalon / application)
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Migrer SRV-WEB01 — Intranet SharePoint (front web)', {
+      id: 'task_srv_10', assignees: [assignee(u8)], labels: [label(SRV, 2)], dueDate: ymd(dayOffset(28)), estimateHours: 8,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Migrer SRV-APP01 — Intranet SharePoint (couche appli)', {
+      id: 'task_srv_11', assignees: [assignee(u8)], labels: [label(SRV, 2)], dueDate: ymd(dayOffset(29)), estimateHours: 8,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Intranet SharePoint migré', {
+      id: 'task_srv_12', assignees: [assignee(me)], isMilestone: true, dueDate: ymd(dayOffset(30)),
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Migrer SRV-DC01 — Active Directory (contrôleur 1)', {
+      id: 'task_srv_13', assignees: [assignee(u2)], labels: [label(SRV, 4)], priority: TaskPriority.HIGH,
+      dueDate: ymd(dayOffset(33)), estimateHours: 12,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Migrer SRV-DC02 — Active Directory (contrôleur 2)', {
+      id: 'task_srv_14', assignees: [assignee(u2)], labels: [label(SRV, 4)], priority: TaskPriority.HIGH,
+      dueDate: ymd(dayOffset(36)), estimateHours: 12,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Active Directory migré', {
+      id: 'task_srv_15', assignees: [assignee(me)], isMilestone: true, dueDate: ymd(dayOffset(37)),
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Migrer SRV-SQL01 — Base SQL Server', {
+      id: 'task_srv_16', assignees: [assignee(u4)], labels: [label(SRV, 4)], priority: TaskPriority.HIGH,
+      dueDate: ymd(dayOffset(40)), estimateHours: 16,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Base SQL Server migrée', {
+      id: 'task_srv_17', assignees: [assignee(me)], isMilestone: true, dueDate: ymd(dayOffset(41)),
+    }),
+    // Phase 5 — Durcissement & clôture
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Durcissement sécurité des serveurs migrés', {
+      id: 'task_srv_18', assignees: [assignee(u7)], labels: [label(SRV, 2)], dueDate: ymd(dayOffset(44)), estimateHours: 20,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Décommissionnement des serveurs Windows Server 2016', {
+      id: 'task_srv_19', assignees: [assignee(u4)], labels: [label(SRV, 2)], dueDate: ymd(dayOffset(46)), estimateHours: 12,
+    }),
+    mkTask(SRV, 'todo', TaskStatus.TODO, 'Migration terminée', {
+      id: 'task_srv_20', assignees: [assignee(me)], isMilestone: true, priority: TaskPriority.HIGH, dueDate: ymd(dayOffset(48)),
+    }),
+  ];
+
+  return [...web, ...mob, ...data, ...srv];
 }
 
 /* ---------- Dépendances (projet WEB) ----------
@@ -401,7 +481,7 @@ function seedDependencies(): DependencyDto[] {
     [9, 13], [10, 13], [11, 13], [12, 13], // pages + correctif → recette
     [13, 14], // recette → go-live
   ];
-  return links.map(([p, s], i) => ({
+  const webDeps = links.map(([p, s], i) => ({
     id: `dep_${i + 1}`,
     projectId: 'proj_web',
     predecessorId: T(p),
@@ -410,6 +490,29 @@ function seedDependencies(): DependencyDto[] {
     lagDays: 0,
     createdAt: now,
   }));
+
+  // Projet SRV : cadrage → lab → pilote → déploiement (internes puis critiques) → clôture.
+  const S = (n: number) => `task_srv_${n}`;
+  const srvLinks: Array<[number, number]> = [
+    [1, 2], [1, 3], [2, 4], [3, 4], // inventaire → analyse/plan → cadrage validé
+    [4, 5], [5, 6], [6, 7], // → image → runbook → lab prêt
+    [7, 8], [8, 9], // → pilote → pilote validé
+    [9, 10], [10, 11], [11, 12], // → Intranet (WEB01, APP01) → jalon Intranet
+    [12, 13], [13, 14], [14, 15], // → Active Directory (DC01 → DC02) → jalon AD
+    [15, 16], [16, 17], // → SQL Server → jalon SQL
+    [17, 18], [18, 19], [19, 20], // → durcissement → décommissionnement → migration terminée
+  ];
+  const srvDeps = srvLinks.map(([p, s], i) => ({
+    id: `dep_srv_${i + 1}`,
+    projectId: 'proj_srv',
+    predecessorId: S(p),
+    successorId: S(s),
+    type: DependencyType.FS,
+    lagDays: 0,
+    createdAt: now,
+  }));
+
+  return [...webDeps, ...srvDeps];
 }
 
 /* ---------- Time entries (semaine courante) ----------

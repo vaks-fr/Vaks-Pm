@@ -161,9 +161,10 @@ export class SkillRequestsService {
           isLead: true,
           user: { deletedAt: null, status: 'ACTIVE' },
         },
-        select: { user: { select: { email: true, name: true, preferredLanguage: true } } },
+        select: { user: { select: { id: true, email: true, name: true, preferredLanguage: true } } },
       });
       const recipients = leads.map((l) => ({
+        userId: l.user.id,
         email: l.user.email,
         name: l.user.name,
         preferredLanguage: l.user.preferredLanguage,
@@ -365,9 +366,9 @@ export class SkillRequestsService {
         isLead: true,
         user: { deletedAt: null, status: 'ACTIVE' },
       },
-      select: { user: { select: { email: true, name: true, preferredLanguage: true } } },
+      select: { user: { select: { id: true, email: true, name: true, preferredLanguage: true } } },
     });
-    const recipients = leads.map((l) => ({ email: l.user.email, name: l.user.name, preferredLanguage: l.user.preferredLanguage }));
+    const recipients = leads.map((l) => ({ userId: l.user.id, email: l.user.email, name: l.user.name, preferredLanguage: l.user.preferredLanguage }));
     const skillName = r.skill?.name ?? r.proposedName ?? '—';
     await this.notifications.notifySkillRequest(orgId, recipients, {
       requesterName: r.requestedBy?.name ?? '—',

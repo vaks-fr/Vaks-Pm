@@ -12,9 +12,13 @@ import { useTranslation, Trans } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Icon } from '../vaks/primitives';
 import { flushBufferedToHandlers } from '../api/realtime';
+import { api } from '../api/client';
+import { renderInboxItem } from './renderNotification';
 import {
+  appendNotifications,
   clearBuffered,
   dismissNotification,
+  hydrateNotifications,
   markAllNotificationsRead,
   useRealtime,
   type Notification,
@@ -70,12 +74,37 @@ function eventLabel(t: TFunction, name: string): string {
 
 export function NotificationsPanel({ onOpen }: { onOpen?: (n: Notification) => void }) {
   const { t } = useTranslation();
-  const { buffered, notifications, mode } = useRealtime();
+  const { buffered, notifications, mode, unread } = useRealtime();
   const [open, setOpen] = useState(false);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
-  const unreadNotifs = notifications.filter((n) => !n.read).length;
-  const totalDot = unreadNotifs + buffered.length;
+  const totalDot = unread + buffered.length;
+
+  // Hydratation au montage : charge la première page persistée + le compteur
+  // faisant autorité, pour que la pastille soit exacte même avant ouverture et
+  // que la liste survive au refresh.
+  useEffect(() => {
+    let alive = true;
+    api
+      .listNotifications()
+      .then((res) => {
+        if (!alive) return;
+        hydrateNotifications(
+          res.items.map((it) => renderInboxItem(it, t)),
+          res.unreadCount,
+        );
+        setCursor(res.nextCursor);
+      })
+      .catch(() => {
+        /* best-effort : la cloche reste vide sans casser l'app */
+      });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -92,6 +121,21 @@ export function NotificationsPanel({ onOpen }: { onOpen?: (n: Notification) => v
     flushBufferedToHandlers();
   };
 
+  const loadMore = () => {
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    api
+      .listNotifications(cursor)
+      .then((res) => {
+        appendNotifications(res.items.map((it) => renderInboxItem(it, t)));
+        setCursor(res.nextCursor);
+      })
+      .catch(() => {
+        /* ignore */
+      })
+      .finally(() => setLoadingMore(false));
+  };
+
   return (
     <div ref={wrapRef} style={{ position: 'relative' }}>
       <button
@@ -100,7 +144,12 @@ export function NotificationsPanel({ onOpen }: { onOpen?: (n: Notification) => v
         onClick={() => {
           const nextOpen = !open;
           setOpen(nextOpen);
-          if (nextOpen) markAllNotificationsRead();
+          if (nextOpen && totalDot > 0) {
+            markAllNotificationsRead();
+            // Persiste le « vu » côté serveur → la pastille ne réapparaît pas au
+            // refresh. Best-effort : l'état local a déjà été mis à jour.
+            api.markNotificationsRead().catch(() => {});
+          }
         }}
       >
         <Icon name="bell" size={18} />
@@ -259,6 +308,7 @@ export function NotificationsPanel({ onOpen }: { onOpen?: (n: Notification) => v
                   onClick={(e) => {
                     e.stopPropagation();
                     dismissNotification(n.id);
+                    api.dismissNotification(n.id).catch(() => {});
                   }}
                   aria-label={t('dismiss')}
                   style={{ padding: 2 }}
@@ -268,6 +318,24 @@ export function NotificationsPanel({ onOpen }: { onOpen?: (n: Notification) => v
               </div>
               );
             })}
+            {cursor && (
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                style={{
+                  width: '100%',
+                  padding: '9px 12px',
+                  fontSize: 12,
+                  background: 'transparent',
+                  border: 'none',
+                  borderTop: '1px solid var(--border)',
+                  color: 'var(--text-2)',
+                  cursor: loadingMore ? 'default' : 'pointer',
+                }}
+              >
+                {loadingMore ? t('loading') : t('notif.loadMore')}
+              </button>
+            )}
             {/* Mode paused : liste compacte des events buffés pour info */}
             {buffered.length > 0 && (
               <div style={{ padding: '8px 12px' }}>

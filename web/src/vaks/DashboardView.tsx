@@ -10,7 +10,7 @@ import { TaskStatus } from '@vaks-pm/shared';
 import type { DashboardDto, DashboardActivityDto, WatchingEntryDto } from '@vaks-pm/shared';
 import { apiGetDashboard, apiGetTimesheet, apiListMyWatching, hueFromId, initialsOf } from './api';
 import type { TimesheetDto } from './api';
-import { statusColKey } from './taskStatus';
+import { statusColKey, foldedStatusCount } from './taskStatus';
 import { MONTHS, type Priority } from './data';
 import { useAuth } from '../auth/AuthContext';
 import { Icon, PriorityDot } from './primitives';
@@ -164,13 +164,11 @@ export function DashboardView({ onOpen }: { onOpen: (id: string) => void }) {
   const donut = useMemo(() => {
     const sc = data?.statusCounts ?? {};
     const done = data?.completedThisWeek ?? 0;
-    const doing =
-      (sc[TaskStatus.IN_PROGRESS] ?? 0) +
-      (sc[TaskStatus.CLAIMED] ?? 0) +
-      (sc[TaskStatus.IN_REVIEW] ?? 0) +
-      (sc[TaskStatus.CHANGES_REQUESTED] ?? 0) +
-      (sc[TaskStatus.APPROVED] ?? 0);
-    const todo = (sc[TaskStatus.TODO] ?? 0) + (sc[TaskStatus.ON_HOLD] ?? 0);
+    // Replié via foldedStatusCount (taskStatus.ts) plutôt qu'énuméré à la main :
+    // un futur statut agent est automatiquement compté au lieu d'être
+    // silencieusement omis (audit frontend 2026-08-02).
+    const doing = foldedStatusCount(sc, TaskStatus.IN_PROGRESS) + foldedStatusCount(sc, TaskStatus.IN_REVIEW);
+    const todo = foldedStatusCount(sc, TaskStatus.TODO) + foldedStatusCount(sc, TaskStatus.ON_HOLD);
     const total = done + doing + todo;
     const p1 = total ? (done / total) * 100 : 0;
     const p2 = total ? p1 + (doing / total) * 100 : 0;

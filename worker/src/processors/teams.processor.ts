@@ -58,13 +58,28 @@ interface ResultBody {
   attempts?: number;
 }
 
+/**
+ * Erreur de récupération du contexte portant le **status HTTP** de l'API, pour
+ * que `processTeams` distingue un 4xx (config/credential permanent — ne pas
+ * retenter) d'un 5xx / panne réseau (transitoire — retenter via BullMQ).
+ */
+class ContextHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'ContextHttpError';
+  }
+}
+
 async function fetchContext(job: TeamsJob): Promise<ProvisionContext | null> {
   const base = process.env.INTERNAL_API_URL ?? 'http://api:3000';
   const url = `${base}/api/v1/internal/teams-provisioning/projects/${job.projectId}/context?action=${job.action}`;
   const res = await fetch(url, { headers: internalHeaders(job.tenantSlug) });
   if (!res.ok) {
     const txt = await safeText(res);
-    throw new Error(`context HTTP ${res.status}${txt ? ` — ${txt}` : ''}`);
+    throw new ContextHttpError(`context HTTP ${res.status}${txt ? ` — ${txt}` : ''}`, res.status);
   }
   const txt = await res.text();
   if (!txt) return null;
@@ -340,19 +355,26 @@ export async function processTeams(
   try {
     ctx = await fetchContext(job);
   } catch (err) {
-    // fetchContext peut THROW (ex. `context HTTP 500` côté API) et cet appel est
-    // HORS du try principal plus bas — sans ce catch, l'échec de récupération du
-    // contexte (le cas le plus fréquent en boucle de retry) ne déclenchait JAMAIS
-    // l'alerte terminale. On reporte FAILED+terminal à la dernière tentative puis
-    // on relance (BullMQ ne retente plus au-delà de maxAttempts).
+    // fetchContext peut THROW et cet appel est HORS du try principal plus bas —
+    // sans ce catch, l'échec de récupération du contexte (le cas le plus fréquent
+    // en boucle de retry) ne déclenchait JAMAIS l'alerte terminale.
+    //
+    // Un 4xx = erreur de config/credential PERMANENTE (Teams désactivé, secret
+    // Entra rejeté, tenant/clientId manquant…) : inutile de retenter — on reporte
+    // un échec TERMINAL (alerte admin unique) et on RETOURNE sans rethrow, donc
+    // BullMQ ne relance pas. Un 5xx ou une panne réseau reste transitoire → on
+    // rethrow pour laisser BullMQ retenter jusqu'à maxAttempts (terminal au dernier).
+    const status = err instanceof ContextHttpError ? err.status : undefined;
+    const permanent = status !== undefined && status >= 400 && status < 500;
     const msg = err instanceof Error ? err.message : String(err);
     await reportResult(job, {
       action: job.action,
       status: 'FAILED',
       error: msg,
-      terminal: isTerminal,
+      terminal: permanent || isTerminal,
       attempts: attempt,
     });
+    if (permanent) return; // erreur permanente : pas de retry
     throw err instanceof Error ? err : new Error(msg);
   }
   if (!ctx) {

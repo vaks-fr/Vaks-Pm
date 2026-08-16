@@ -61,23 +61,36 @@ export interface AtomicCluster {
 /** Groupe les tâches en grappes atomiques (avant fusion set-cover). Sortie
  *  triée par clé (déterministe, indépendante de l'ordre d'entrée). */
 export function buildAtomicClusters(tasks: ClusterInputTask[]): AtomicCluster[] {
-  const byKey = new Map<string, AtomicCluster>();
+  // Skills agrégés dans une Map<skillId, target> (lookup O(1) au lieu d'un
+  // `.find` linéaire dans la double boucle). L'ordre d'insertion de la Map =
+  // ordre de première apparition = ordre de l'ancien `push`, et `Math.max` est
+  // commutatif → `skillReqs` reste identique (même contenu, même ordre).
+  const byKey = new Map<
+    string,
+    { key: string; projectId: string; taskIds: string[]; skills: Map<string, number> }
+  >();
   for (const t of tasks) {
     const skillIds = t.skillReqs.map((r) => r.skillId);
     const key = clusterKey(t.projectId, skillIds, t.parentTaskId, t.boardKey);
     let c = byKey.get(key);
     if (!c) {
-      c = { key, projectId: t.projectId, skillReqs: [], taskIds: [] };
+      c = { key, projectId: t.projectId, taskIds: [], skills: new Map() };
       byKey.set(key, c);
     }
     c.taskIds.push(t.id);
     for (const r of t.skillReqs) {
-      const existing = c.skillReqs.find((x) => x.skillId === r.skillId);
-      if (existing) existing.target = Math.max(existing.target, r.target);
-      else c.skillReqs.push({ skillId: r.skillId, target: r.target });
+      const cur = c.skills.get(r.skillId);
+      c.skills.set(r.skillId, cur === undefined ? r.target : Math.max(cur, r.target));
     }
   }
-  return Array.from(byKey.values()).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return Array.from(byKey.values())
+    .map((c) => ({
+      key: c.key,
+      projectId: c.projectId,
+      skillReqs: Array.from(c.skills, ([skillId, target]) => ({ skillId, target })),
+      taskIds: c.taskIds,
+    }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
 // ---------------------------------------------------------------

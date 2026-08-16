@@ -318,7 +318,7 @@
     "duplicateTitle": "„{{name}}“ duplizieren",
     "newDraftTitle": "Neuer Projektentwurf",
     "introBillable": "Ein abrechenbares Projekt erstellt einen PMBOK-Projektauftrag, wird vom Kunden unterzeichnet und dann aktiviert.",
-    "introNonBillable": "Ein nicht abrechenbares Projekt ist für interne / organisatorische Arbeit. Es überspringt die Unterschrift des Projektauftrags und geht direkt vom Entwurf in den aktiven Zustand über.",
+    "introNonBillable": "Ein nicht abrechenbares Projekt ist für interne / organisatorische Arbeit. Es überspringt die Unterschrift des Projektauftrags und wird als Entwurf erstellt, den Sie jederzeit aktivieren können.",
     "projectType": "Projekttyp",
     "typeBillable": "Abrechenbar",
     "typeBillableDesc": "Vom Kunden unterzeichneter Projektauftrag erforderlich",
@@ -347,7 +347,8 @@
     "copying": "Wird kopiert…",
     "creating": "Wird erstellt…",
     "duplicateCta": "Projekt & Aufgaben duplizieren",
-    "createCta": "Entwurf erstellen & Projektauftrag öffnen"
+    "createCta": "Entwurf erstellen & Projektauftrag öffnen",
+    "createCtaNonBillable": "Projekt erstellen"
   },
   "expenses": {
     "category": {

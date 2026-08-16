@@ -13,7 +13,6 @@ import {
   Task,
   TaskPriority,
   TaskStatus,
-  TimeOff,
   WorkSchedule,
 } from '@db';
 import { PrismaService } from '../prisma/prisma.service';
@@ -780,10 +779,21 @@ export class AutoplanService {
       const holidaySet = holidaysByCountry.get(cc) ?? new Set<string>();
 
       const capacity = new Float64Array(dayCount);
+      // Pré-marque les jours de time-off en UNE passe sur les `offs` (au lieu
+      // d'un `offs.some(...)` rescanné à chaque jour → O(offs) au lieu de
+      // O(dayCount × offs)). `from` est minuit UTC et `addDays` avance en jours
+      // UTC exacts, donc `d_i = +from + i·MS` : les bornes ceil(start)/floor(end)
+      // reproduisent EXACTEMENT `+o.startDate <= +d_i && +d_i <= +o.endDate`.
+      const offMask = new Uint8Array(dayCount);
+      for (const o of offs) {
+        const s = Math.max(0, Math.ceil((+o.startDate - +from) / MS_PER_DAY));
+        const e = Math.min(dayCount - 1, Math.floor((+o.endDate - +from) / MS_PER_DAY));
+        for (let i = s; i <= e; i++) offMask[i] = 1;
+      }
       for (let i = 0; i < dayCount; i++) {
         const d = addDays(from, i);
         let cap = scheduleHoursFor(sched, d) * ((sched?.occupancyPct ?? 100) / 100);
-        if (offs.some((o) => +o.startDate <= +d && +o.endDate >= +d)) cap = 0;
+        if (offMask[i]) cap = 0;
         // (3) Férié pour ce user → capacité 0.
         if (holidaySet.has(dateIso(d))) cap = 0;
         capacity[i] = cap;
@@ -2198,6 +2208,3 @@ function groupBy<T, K>(items: T[], by: (t: T) => K): Map<K, T[]> {
   }
   return m;
 }
-
-// Inutile mais évite la complainte "TimeOff non utilisé" en cas d'import.
-export type _TimeOff = TimeOff;

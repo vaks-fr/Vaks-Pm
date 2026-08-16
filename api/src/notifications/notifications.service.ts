@@ -13,15 +13,11 @@ import {
   readSmtpSettings,
 } from './notifications-settings';
 import {
-  AssignmentPayload,
-  DuePayload,
   EmailTemplateKey,
-  MentionPayload,
   OverEstimatePayload,
   RenderedEmail,
   SkillRequestPayload,
   SkillExpiringPayload,
-  StatusPayload,
   TemplateContext,
   renderAssignment,
   renderDue,
@@ -45,8 +41,35 @@ import {
   normalizeEmailLang,
 } from './email-templates';
 import { EmailJobData, getEmailQueue } from './email-queue';
-import { USER_NOTIFICATION_EVENT } from '@vaks-pm/shared';
+import {
+  USER_NOTIFICATION_EVENT,
+  type InboxNotificationDto,
+  type InboxListDto,
+  type UserNotificationKind,
+} from '@vaks-pm/shared';
 import { EventsGateway } from '../realtime/events.gateway';
+
+/**
+ * Rétention de la boîte de réception in-app (`Notification`). Une notif lue
+ * n'a plus de valeur passé quelques semaines ; une non lue est gardée bien plus
+ * longtemps (l'utilisateur ne s'est jamais connecté). Purgé par
+ * `NotificationsCronService`.
+ */
+export const INBOX_READ_RETENTION_DAYS = 30;
+export const INBOX_UNREAD_RETENTION_DAYS = 180;
+
+/** Payload d'entrée d'une notification durable (voir `persistAndPush`). */
+export interface InboxInput {
+  kind: UserNotificationKind;
+  /** Rendu serveur (automations/admin/annonces) — sinon le front rend via `meta`. */
+  title?: string;
+  body?: string;
+  taskId?: string | null;
+  projectId?: string | null;
+  url?: string | null;
+  /** actorName, fromStatus, toStatus, taskTitle, excerpt, automationKind… */
+  meta?: Record<string, unknown>;
+}
 
 /**
  * Rétention du journal d'envois. `EmailDelivery` est un outil de debug, pas une
@@ -125,6 +148,200 @@ export class NotificationsService {
     } catch (err) {
       this.log.warn(`pushInApp failed: ${(err as Error).message}`);
     }
+  }
+
+  // ==========================================================================
+  // Boîte de réception in-app durable (cloche).
+  // Un seul chokepoint (`persistAndPush`) : crée la ligne `Notification` PUIS
+  // pousse le DTO en temps réel sur la room `user:<id>`. Tous les `notify*` et
+  // le chokepoint d'automatisation passent par là → la cloche survit au refresh
+  // et à l'utilisateur hors-ligne, avec la même couverture que les emails.
+  // ==========================================================================
+
+  /** Ligne `Notification` → DTO envoyé au front (WS et REST partagent la forme). */
+  private toInboxDto(row: {
+    id: string;
+    kind: string;
+    title: string | null;
+    body: string | null;
+    taskId: string | null;
+    projectId: string | null;
+    url: string | null;
+    meta: unknown;
+    readAt: Date | null;
+    createdAt: Date;
+  }): InboxNotificationDto {
+    const meta = (row.meta && typeof row.meta === 'object' ? row.meta : {}) as Record<string, unknown>;
+    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+    return {
+      id: row.id,
+      kind: row.kind as UserNotificationKind,
+      title: row.title ?? undefined,
+      body: row.body ?? undefined,
+      taskId: row.taskId ?? undefined,
+      projectId: row.projectId ?? undefined,
+      url: row.url ?? undefined,
+      taskTitle: str(meta.taskTitle),
+      actorName: str(meta.actorName),
+      excerpt: str(meta.excerpt),
+      fromStatus: str(meta.fromStatus),
+      toStatus: str(meta.toStatus),
+      createdAt: row.createdAt.toISOString(),
+      read: row.readAt != null,
+    };
+  }
+
+  /**
+   * Persiste une notification durable pour un destinataire puis la pousse en
+   * temps réel. Fire-and-forget : swallow toute erreur (ne doit jamais faire
+   * échouer la mutation métier ni l'envoi email). N'émet vers un agent que si
+   * jamais (les agents sont notifiés via leur owner ; ici on ne persiste que
+   * pour des humains — l'appelant a déjà résolu des destinataires humains).
+   */
+  async persistAndPush(orgId: string, userId: string, input: InboxInput): Promise<void> {
+    try {
+      const row = await this.prisma.notification.create({
+        data: {
+          organizationId: orgId,
+          userId,
+          kind: input.kind,
+          title: input.title ?? null,
+          body: input.body ?? null,
+          taskId: input.taskId ?? null,
+          projectId: input.projectId ?? null,
+          url: input.url ?? null,
+          meta: (input.meta ?? undefined) as never,
+        },
+        select: {
+          id: true,
+          kind: true,
+          title: true,
+          body: true,
+          taskId: true,
+          projectId: true,
+          url: true,
+          meta: true,
+          readAt: true,
+          createdAt: true,
+        },
+      });
+      this.pushInApp(userId, this.toInboxDto(row) as unknown as Record<string, unknown>);
+    } catch (err) {
+      this.log.warn(`persistAndPush(${input.kind}) failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Cursor keyset `<createdAt ms>|<id>` (opaque côté client). */
+  private decodeInboxCursor(cursor?: string): { createdAt: Date; id: string } | null {
+    if (!cursor) return null;
+    const [ms, ...rest] = cursor.split('|');
+    const t = Number(ms);
+    const id = rest.join('|');
+    if (!Number.isFinite(t) || !id) return null;
+    return { createdAt: new Date(t), id };
+  }
+
+  /**
+   * Liste paginée (keyset, plus récentes d'abord) de la boîte de réception de
+   * l'utilisateur, + compteur global de non-lues (indépendant de la page).
+   */
+  async listInbox(
+    orgId: string,
+    userId: string,
+    cursor?: string,
+    limit = 30,
+  ): Promise<InboxListDto> {
+    const take = Math.min(Math.max(1, limit), 100);
+    const cur = this.decodeInboxCursor(cursor);
+    const [rows, unreadCount] = await Promise.all([
+      this.prisma.notification.findMany({
+        where: {
+          organizationId: orgId,
+          userId,
+          ...(cur
+            ? {
+                OR: [
+                  { createdAt: { lt: cur.createdAt } },
+                  { createdAt: cur.createdAt, id: { lt: cur.id } },
+                ],
+              }
+            : {}),
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: take + 1,
+        select: {
+          id: true,
+          kind: true,
+          title: true,
+          body: true,
+          taskId: true,
+          projectId: true,
+          url: true,
+          meta: true,
+          readAt: true,
+          createdAt: true,
+        },
+      }),
+      this.prisma.notification.count({
+        where: { organizationId: orgId, userId, readAt: null },
+      }),
+    ]);
+    const hasMore = rows.length > take;
+    const page = hasMore ? rows.slice(0, take) : rows;
+    const last = page[page.length - 1];
+    return {
+      items: page.map((r) => this.toInboxDto(r)),
+      unreadCount,
+      nextCursor: hasMore && last ? `${last.createdAt.getTime()}|${last.id}` : null,
+    };
+  }
+
+  /** Nombre de non-lues (pastille). */
+  async unreadInboxCount(orgId: string, userId: string): Promise<number> {
+    return this.prisma.notification.count({
+      where: { organizationId: orgId, userId, readAt: null },
+    });
+  }
+
+  /**
+   * Marque des notifications comme lues (pastille éteinte). Sans `ids`, marque
+   * TOUTES les non-lues de l'utilisateur (ouverture de la cloche). Scopé au
+   * user courant : jamais celles d'un autre.
+   */
+  async markInboxRead(orgId: string, userId: string, ids?: string[]): Promise<{ updated: number }> {
+    const res = await this.prisma.notification.updateMany({
+      where: {
+        organizationId: orgId,
+        userId,
+        readAt: null,
+        ...(ids && ids.length ? { id: { in: ids } } : {}),
+      },
+      data: { readAt: new Date() },
+    });
+    return { updated: res.count };
+  }
+
+  /** Supprime (dismiss) une notification de l'utilisateur courant. */
+  async dismissInbox(orgId: string, userId: string, id: string): Promise<{ dismissed: boolean }> {
+    const res = await this.prisma.notification.deleteMany({
+      where: { organizationId: orgId, userId, id },
+    });
+    return { dismissed: res.count > 0 };
+  }
+
+  /** Purge de rétention (appelée par le cron). Renvoie le nombre supprimé. */
+  async purgeInbox(now = Date.now()): Promise<number> {
+    const readCutoff = new Date(now - INBOX_READ_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const unreadCutoff = new Date(now - INBOX_UNREAD_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const res = await this.prisma.notification.deleteMany({
+      where: {
+        OR: [
+          { readAt: { not: null, lt: readCutoff } },
+          { readAt: null, createdAt: { lt: unreadCutoff } },
+        ],
+      },
+    });
+    return res.count;
   }
 
   /**
@@ -210,12 +427,12 @@ export class NotificationsService {
       ]);
       if (!recipient || !task || !org) return;
 
-      this.pushInApp(recipientUserId, {
+      await this.persistAndPush(orgId, recipientUserId, {
         kind: 'assignment',
         taskId: task.id,
         projectId: task.projectId,
-        taskTitle: task.title,
-        actorName: actor?.name ?? undefined,
+        url: this.taskUrl(task.id),
+        meta: { taskTitle: task.title, actorName: actor?.name ?? undefined },
       });
 
       // Email : soumis en plus au digest/quiet hours.
@@ -259,13 +476,16 @@ export class NotificationsService {
       ]);
       if (!recipient || !actor || !task || !org) return;
 
-      this.pushInApp(recipientUserId, {
+      await this.persistAndPush(orgId, recipientUserId, {
         kind: 'mention',
         taskId: task.id,
         projectId: task.projectId,
-        taskTitle: task.title,
-        actorName: actor.name,
-        excerpt: commentBody.slice(0, 140),
+        url: this.taskUrl(task.id),
+        meta: {
+          taskTitle: task.title,
+          actorName: actor.name,
+          excerpt: commentBody.slice(0, 140),
+        },
       });
 
       if (!this.isAllowed(prefs, 'onMention', orgId)) return;
@@ -294,9 +514,29 @@ export class NotificationsService {
    * destinataires (le user lui-même + ses leads d'équipe).
    * Best-effort, respecte le kill switch global.
    */
+  /** Titre/corps localisés de la notif in-app « compétence bientôt expirée ». */
+  private inboxSkillExpiringText(
+    lang: Lang,
+    skillName: string,
+    expiresAt: string,
+    stage: 30 | 7 | 0,
+  ): { title: string; body: string } {
+    const T: Record<Lang, { title: string; expired: string; soon: (d: string) => string }> = {
+      en: { title: 'Skill expiring', expired: 'has expired', soon: (d) => `expires on ${d}` },
+      fr: { title: 'Compétence bientôt expirée', expired: 'a expiré', soon: (d) => `expire le ${d}` },
+      it: { title: 'Competenza in scadenza', expired: 'è scaduta', soon: (d) => `scade il ${d}` },
+      de: { title: 'Fähigkeit läuft ab', expired: 'ist abgelaufen', soon: (d) => `läuft am ${d} ab` },
+    };
+    const m = T[lang] ?? T.en;
+    return {
+      title: m.title,
+      body: `${skillName} ${stage === 0 ? m.expired : m.soon(expiresAt)}`,
+    };
+  }
+
   async notifySkillExpiring(
     orgId: string,
-    recipients: Array<{ email: string; name: string; preferredLanguage?: string | null }>,
+    recipients: Array<{ email: string; name: string; preferredLanguage?: string | null; userId?: string }>,
     data: Omit<SkillExpiringPayload, 'ctaUrl'> & { ctaUrl?: string },
   ): Promise<void> {
     try {
@@ -308,6 +548,16 @@ export class NotificationsService {
       const ctaUrl = data.ctaUrl ?? `${this.tenantUrl.publicBaseUrl()}/`;
       for (const r of recipients) {
         const lang = await this.resolveRecipientLanguage(orgId, r.preferredLanguage);
+        if (r.userId) {
+          const txt = this.inboxSkillExpiringText(lang, data.skillName, data.expiresAt, data.stage);
+          await this.persistAndPush(orgId, r.userId, {
+            kind: 'skill_expiring',
+            title: txt.title,
+            body: txt.body,
+            url: ctaUrl,
+            meta: { skillName: data.skillName },
+          });
+        }
         const ctx = this.buildContext(prefs, r.name, org.name, lang);
         const rendered = renderSkillExpiring(ctx, { ...data, ctaUrl });
         await this.enqueue(orgId, r.email, 'skill_expiring', rendered, prefs);
@@ -317,9 +567,38 @@ export class NotificationsService {
     }
   }
 
+  /** Titre/corps localisés de la notif in-app « demande de compétence ». */
+  private inboxSkillRequestText(
+    lang: Lang,
+    requesterName: string,
+    skillName: string,
+    projectName?: string,
+  ): { title: string; body: string } {
+    const T: Record<Lang, { title: string; body: (r: string, s: string, p?: string) => string }> = {
+      en: {
+        title: 'Skill request',
+        body: (r, s, p) => `${r} is requesting the “${s}” skill${p ? ` for ${p}` : ''}`,
+      },
+      fr: {
+        title: 'Demande de compétence',
+        body: (r, s, p) => `${r} demande la compétence « ${s} »${p ? ` pour ${p}` : ''}`,
+      },
+      it: {
+        title: 'Richiesta di competenza',
+        body: (r, s, p) => `${r} richiede la competenza «${s}»${p ? ` per ${p}` : ''}`,
+      },
+      de: {
+        title: 'Kompetenzanfrage',
+        body: (r, s, p) => `${r} fordert die Kompetenz „${s}“ an${p ? ` für ${p}` : ''}`,
+      },
+    };
+    const m = T[lang] ?? T.en;
+    return { title: m.title, body: m.body(requesterName, skillName, projectName) };
+  }
+
   async notifySkillRequest(
     orgId: string,
-    recipients: Array<{ email: string; name: string; preferredLanguage?: string | null }>,
+    recipients: Array<{ email: string; name: string; preferredLanguage?: string | null; userId?: string }>,
     data: Omit<SkillRequestPayload, 'ctaUrl'> & { ctaUrl?: string },
   ): Promise<void> {
     try {
@@ -331,6 +610,21 @@ export class NotificationsService {
       const ctaUrl = data.ctaUrl ?? `${this.tenantUrl.publicBaseUrl()}/`;
       for (const r of recipients) {
         const lang = await this.resolveRecipientLanguage(orgId, r.preferredLanguage);
+        if (r.userId) {
+          const txt = this.inboxSkillRequestText(
+            lang,
+            data.requesterName,
+            data.skillName,
+            data.projectName,
+          );
+          await this.persistAndPush(orgId, r.userId, {
+            kind: 'skill_request',
+            title: txt.title,
+            body: txt.body,
+            url: ctaUrl,
+            meta: { skillName: data.skillName, teamName: data.teamName },
+          });
+        }
         const ctx = this.buildContext(prefs, r.name, org.name, lang);
         const rendered = renderSkillRequest(ctx, { ...data, ctaUrl });
         await this.enqueue(orgId, r.email, 'skill_request', rendered, prefs);
@@ -368,19 +662,37 @@ export class NotificationsService {
       ]);
       if (!task || !org || recipients.length === 0) return;
 
+      // Opt-outs chargés en UNE requête (au lieu d'un findUnique par
+      // destinataire). Fail-open : en cas d'erreur, personne n'est opté out —
+      // sémantique identique à `userOptedOut` (pas de ligne ⇒ non opté out).
+      const optOut = new Map<string, boolean>();
+      try {
+        const prefRows = await this.prisma.userNotificationPref.findMany({
+          where: { organizationId: orgId, userId: { in: recipients.map((r) => r.id) } },
+        });
+        for (const p of prefRows) optOut.set(p.userId, (p as Record<string, unknown>).statusChange === false);
+      } catch { /* fail-open */ }
+
+      // Défaut de langue org résolu UNE fois (réutilisé pour tout destinataire
+      // sans préférence valide) au lieu d'un getDefaultLanguage par destinataire.
+      const orgLang = emailAllowed ? await this.resolveRecipientLanguage(orgId, null) : ('en' as Lang);
+
       for (const r of recipients) {
-        if (await this.userOptedOut(orgId, r.id, 'statusChange')) continue;
-        this.pushInApp(r.id, {
+        if (optOut.get(r.id)) continue;
+        await this.persistAndPush(orgId, r.id, {
           kind: 'status',
           taskId: task.id,
           projectId: task.projectId,
-          taskTitle: task.title,
-          actorName: actor?.name ?? undefined,
-          fromStatus,
-          toStatus,
+          url: this.taskUrl(task.id),
+          meta: {
+            taskTitle: task.title,
+            actorName: actor?.name ?? undefined,
+            fromStatus,
+            toStatus,
+          },
         });
         if (!emailAllowed) continue;
-        const lang = await this.resolveRecipientLanguage(orgId, r.preferredLanguage);
+        const lang = await this.resolveRecipientLanguage(orgId, r.preferredLanguage, orgLang);
         const ctx = this.buildContext(prefs, r.name, org.name, lang);
         const rendered = renderStatus(ctx, {
           actorName: actor?.name ?? 'A teammate',
@@ -440,6 +752,19 @@ export class NotificationsService {
 
       const overByHours = Math.max(0, loggedHours - task.estimateHours);
       for (const recipient of recipients) {
+        await this.persistAndPush(orgId, recipient.id, {
+          kind: 'over_estimate',
+          taskId: task.id,
+          projectId: task.project.id,
+          url: this.taskUrl(task.id),
+          meta: {
+            taskTitle: task.title,
+            actorName: actor.name,
+            estimateHours: task.estimateHours,
+            loggedHours,
+            overByHours,
+          },
+        });
         const lang = await this.resolveRecipientLanguage(orgId, recipient.preferredLanguage);
         const ctx = this.buildContext(prefs, recipient.name, org.name, lang);
         const payload: OverEstimatePayload = {
@@ -480,6 +805,14 @@ export class NotificationsService {
         this.prisma.organization.findUnique({ where: { id: orgId } }),
       ]);
       if (!recipient || !task || !org) return;
+
+      await this.persistAndPush(orgId, recipientUserId, {
+        kind: 'due',
+        taskId: task.id,
+        projectId: task.projectId,
+        url: this.taskUrl(task.id),
+        meta: { taskTitle: task.title, dueDate },
+      });
 
       const lang = await this.resolveRecipientLanguage(orgId, recipient.preferredLanguage);
       const ctx = this.buildContext(prefs, recipient.name, org.name, lang);
@@ -585,6 +918,47 @@ export class NotificationsService {
     await this.enqueue(orgId, to, 'password_reset', rendered, prefs);
   }
 
+  /** Titre localisé des alertes admin de la cloche (le corps reste technique). */
+  private inboxAdminTitle(lang: Lang, key: 'security' | 'backup'): string {
+    const T: Record<Lang, Record<'security' | 'backup', string>> = {
+      en: { security: 'Security alert', backup: 'Backup failed' },
+      fr: { security: 'Alerte sécurité', backup: 'Échec de sauvegarde' },
+      it: { security: 'Avviso di sicurezza', backup: 'Backup non riuscito' },
+      de: { security: 'Sicherheitswarnung', backup: 'Sicherung fehlgeschlagen' },
+    };
+    return (T[lang] ?? T.en)[key];
+  }
+
+  /**
+   * Persiste une alerte admin dans la cloche du destinataire, résolu depuis son
+   * adresse email au sein de l'org (les `send*Alert` sont appelés par adresse,
+   * bouclés par l'appelant). Best-effort.
+   */
+  private async persistAdminAlert(
+    orgId: string,
+    to: string,
+    lang: Lang,
+    key: 'security' | 'backup',
+    body: string,
+  ): Promise<void> {
+    try {
+      const u = await this.prisma.user.findFirst({
+        where: { organizationId: orgId, email: to, kind: 'HUMAN', deletedAt: null },
+        select: { id: true },
+      });
+      if (!u) return;
+      await this.persistAndPush(orgId, u.id, {
+        kind: 'admin_alert',
+        title: this.inboxAdminTitle(lang, key),
+        body,
+        url: `${this.tenantUrl.publicBaseUrl()}/`,
+        meta: { alert: key },
+      });
+    } catch {
+      /* fail-open */
+    }
+  }
+
   /**
    * Alerte sécurité aux admins (détection brute-force depuis le journal
    * d'audit). Transactionnel critique → respecte le kill switch org
@@ -601,6 +975,13 @@ export class NotificationsService {
     if (!prefs.enabled) return;
     const org = await this.prisma.organization.findUnique({ where: { id: orgId } });
     const lang = await this.resolveRecipientLanguage(orgId, recipientLanguage);
+    await this.persistAdminAlert(
+      orgId,
+      to,
+      lang,
+      'security',
+      `${payload.failures} failed logins on ${payload.targetEmail} in ${payload.windowMinutes} min${payload.ip ? ` (last IP ${payload.ip})` : ''}`,
+    );
     const ctx = this.buildContext(prefs, recipientName, org?.name ?? 'Vaks', lang);
     const rendered = renderSecurityAlert(ctx, payload);
     await this.enqueue(orgId, to, 'security_alert', rendered, prefs);
@@ -622,6 +1003,13 @@ export class NotificationsService {
     if (!prefs.enabled) return;
     const org = await this.prisma.organization.findUnique({ where: { id: orgId } });
     const lang = await this.resolveRecipientLanguage(orgId, recipientLanguage);
+    await this.persistAdminAlert(
+      orgId,
+      to,
+      lang,
+      'backup',
+      `${payload.host}${payload.tier ? ` (${payload.tier})` : ''}: ${payload.message}`,
+    );
     const ctx = this.buildContext(prefs, recipientName, org?.name ?? 'Vaks', lang);
     const rendered = renderBackupAlert(ctx, payload);
     await this.enqueue(orgId, to, 'backup_failed', rendered, prefs);
@@ -925,14 +1313,18 @@ export class NotificationsService {
   async resolveRecipientLanguage(
     orgId: string,
     preferredLanguage: string | null | undefined,
+    orgDefault?: Lang,
   ): Promise<Lang> {
     if (preferredLanguage) {
       const sub = String(preferredLanguage).trim().toLowerCase().split('-')[0];
       if ((EMAIL_LANGUAGES as readonly string[]).includes(sub)) return sub as Lang;
     }
+    // Défaut org pré-résolu par l'appelant → évite un `getDefaultLanguage` par
+    // destinataire dans une boucle de notification.
+    if (orgDefault) return orgDefault;
     try {
-      const orgDefault = await this.settings.getDefaultLanguage(orgId);
-      return normalizeEmailLang(orgDefault);
+      const def = await this.settings.getDefaultLanguage(orgId);
+      return normalizeEmailLang(def);
     } catch {
       return 'en';
     }

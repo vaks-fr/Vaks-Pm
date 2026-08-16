@@ -865,6 +865,18 @@ export class AdminSettingsService {
     return 1;
   }
 
+  /**
+   * URL publique du logo de l'org (setting `org.logoUrl`, alimenté par
+   * l'upload de branding). Chaîne vide si aucun logo custom n'est configuré
+   * — l'UI retombe alors sur le BrandMark Vaks. Exposé dans `/settings/public`
+   * et `/public/branding/org` pour que la sidebar et l'écran de login
+   * affichent le logo client (parité avec les emails).
+   */
+  async getOrgLogoUrl(orgId: string): Promise<string> {
+    const v = await this.getValue(orgId, 'org.logoUrl');
+    return typeof v === 'string' ? v.trim() : '';
+  }
+
   /** Accesseurs typés pour les settings consommés par d'autres modules. */
   async getHoursPerDay(orgId: string): Promise<number> {
     const v = await this.getValue(orgId, 'hoursPerDay');

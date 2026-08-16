@@ -278,7 +278,7 @@ export interface TaskSchedule {
  * CPM complet sur le même modèle de jours que `computeEarliestStart` et que le
  * placement de l'auto-plan (jours calendaires, durée = `ceil(estimate /
  * hoursPerDay)`, FS précis + SS/FF/SF approximés sur le start). Contrairement à
- * `estimateCriticalPath` (heuristique « plus longue chaîne »), ce calcul fait un
+ * l'ancienne heuristique « plus longue chaîne » (dead code retiré), ce calcul fait un
  * **vrai backward-pass** : `lateStart`/`lateFinish` par tâche, d'où un
  * `totalSlack` exact et un flag `critical` fiable (mou nul) — base du
  * resource-leveling (les tâches à fort mou peuvent céder la capacité précoce

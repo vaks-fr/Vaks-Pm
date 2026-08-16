@@ -2425,6 +2425,49 @@ model UserNotificationPref {
   @@index([userId])
 }
 
+/// Boîte de réception in-app durable (cloche haut-droite) : **une ligne par
+/// destinataire et par événement**, persistée jusqu'à ce que l'utilisateur
+/// l'ait vue. Comble le trou de l'ancienne cloche 100 % éphémère (Socket.IO
+/// sans persistance, perdue hors-ligne ou au refresh) : rechargée au démarrage
+/// via `GET /me/notifications`, marquée lue côté serveur, dismissée = supprimée,
+/// purgée par `NotificationsCronService`.
+///
+/// `title`/`body` sont rendus **serveur** (langue du destinataire) pour les
+/// événements dont le texte n'existe que côté serveur (automatisations, alertes
+/// admin, annonces). Pour les événements « perso » (assignation/mention/statut)
+/// ils restent nuls et le front rend le libellé depuis `meta` (i18n UI, comme
+/// l'ancienne cloche). `meta` porte le payload structuré (actorName, statuts…).
+model Notification {
+  id             String    @id @default(uuid())
+  organizationId String
+  /// Destinataire (toujours un humain).
+  userId         String
+  /// Type sémantique : assignment | mention | status | comment | due |
+  /// over_estimate | skill_request | skill_expiring | automation | announcement
+  /// | admin_alert | system.
+  kind           String
+  /// Titre rendu serveur (langue du destinataire) — nul pour les kinds « perso »
+  /// rendus côté front depuis `meta`.
+  title          String?
+  /// Corps rendu serveur (idem `title`).
+  body           String?
+  /// Cible cliquable.
+  taskId         String?
+  projectId      String?
+  /// URL absolue du CTA (lien tenant) le cas échéant.
+  url            String?
+  /// Payload structuré additionnel (actorName, fromStatus, toStatus, taskTitle,
+  /// excerpt, automationKind…) — lu par le front pour rendre/enrichir la carte.
+  meta           Json?
+  /// Horodatage « vue/traitée » (ouverture de la cloche). `null` = non lue,
+  /// alimente la pastille. Dismiss = suppression de la ligne.
+  readAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([organizationId, userId, createdAt])
+  @@index([organizationId, userId, readAt])
+}
+
 /// Widgets du rapport projet affichés/masqués et réordonnés **par
 /// utilisateur, par projet** (chaque personne garde son propre layout sur
 /// chaque projet — même style scalaire que UserNotificationPref, avec un

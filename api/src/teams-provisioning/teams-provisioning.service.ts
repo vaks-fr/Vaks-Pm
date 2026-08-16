@@ -275,6 +275,14 @@ export class TeamsProvisioningService {
    */
   async buildContext(orgId: string, projectId: string, action: Action): Promise<ProvisionContext> {
     const cfg = await this.settings.getTeamsProvisioningConfig(orgId);
+    // Garde de cohérence avec enqueue()/reconcile : un job en file pour une org
+    // désactivée ou incomplètement configurée est un échec de config PERMANENT,
+    // pas une panne serveur → 400 (le worker ne retente pas, cf. graph.service).
+    if (!cfg.enabled || !cfg.tenantId || !cfg.clientId) {
+      throw new BadRequestException(
+        'Provisioning Microsoft Teams désactivé ou incomplet (tenantId/clientId requis).',
+      );
+    }
     const cred = await this.settings.resolveGraphCredential(orgId, cfg.tenantId, cfg.clientId, 'teams.provisioning');
     const token = await this.graph.getAppToken(cred);
 

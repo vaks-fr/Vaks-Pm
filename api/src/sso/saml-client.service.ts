@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { SAML, SamlConfig } from '@node-saml/node-saml';
 import type { IdentityProvider } from '@db';
 import { ClaimMappings, ENTRA_SAML_DEFAULTS, NormalizedClaims } from './sso.types';
@@ -12,12 +13,19 @@ import { ClaimMappings, ENTRA_SAML_DEFAULTS, NormalizedClaims } from './sso.type
  * de la config DB du provider + l'ACS URL résolue par Host (mis en cache court par
  * (provider, callbackUrl) car la construction est purement locale). La vérif de
  * signature d'assertion (cert IdP `samlIdpCert`), des conditions (NotBefore /
- * NotOnOrAfter) et de l'audience est faite par la lib.
+ * NotOnOrAfter, avec la tolérance `SSO_SAML_CLOCK_SKEW_MS`) et de l'audience est
+ * faite par la lib.
  */
 @Injectable()
 export class SamlClientService {
   private readonly logger = new Logger(SamlClientService.name);
   private readonly cache = new Map<string, { saml: SAML; fingerprint: string }>();
+  /** Tolérance d'horloge appliquée aux conditions temporelles (cf. config). */
+  private readonly clockSkewMs: number;
+
+  constructor(config: ConfigService) {
+    this.clockSkewMs = config.get<number>('sso.samlClockSkewMs') ?? 30_000;
+  }
 
   /** Construit (ou réutilise) l'instance SAML pour un provider + ACS URL. */
   private getSaml(provider: IdentityProvider, callbackUrl: string): SAML {
@@ -49,6 +57,13 @@ export class SamlClientService {
       // node-saml exige un CacheProvider partagé pour InResponseTo, on s'appuie
       // donc sur le consume one-shot du RelayState + la condition NotOnOrAfter.
       validateInResponseTo: 'never',
+      // Tolérance d'horloge sur NotBefore / NotOnOrAfter / SessionNotOnOrAfter.
+      // Sans ça node-saml applique 0 : une dérive de quelques secondes entre
+      // l'IdP du client et nos hôtes suffit à faire échouer la connexion de
+      // façon intermittente. Jamais -1 (qui désactiverait la validation
+      // temporelle, donc l'anti-rejeu porté par NotOnOrAfter) — la config
+      // borne déjà la valeur à [0, 300000].
+      acceptedClockSkewMs: this.clockSkewMs,
       // Pas de clé privée SP → AuthnRequest non signée (Entra l'accepte).
       identifierFormat: 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress',
     } as SamlConfig;
@@ -94,7 +109,21 @@ export class SamlClientService {
       // côté logs serveur uniquement — JAMAIS renvoyé au client : un oracle
       // `certMatch` + un préfixe de cert aideraient à aligner une assertion
       // forgée et fuiteraient la config IdP.
-      this.logger.error(`SAML assertion validation failed: ${msg}`);
+      // node-saml signale les conditions temporelles par un message qui ne
+      // contient NI la fenêtre NI l'heure serveur ("SAML assertion expired:
+      // clocks skewed too much", "…not yet valid", "…session expired"). Sans
+      // ce complément, l'opérateur lit un échec de validation générique et
+      // suspecte le certificat. On qualifie donc explicitement le cas horloge.
+      if (/not yet valid|expired|skew/i.test(msg)) {
+        this.logger.error(
+          `SAML assertion validation failed (CLOCK SKEW between IdP and this host, ` +
+            `not a certificate problem): ${msg} — server time ${new Date().toISOString()}, ` +
+            `accepted skew ${this.clockSkewMs}ms (SSO_SAML_CLOCK_SKEW_MS). ` +
+            `Check NTP on this host and the IdP clock before touching the certificate.`,
+        );
+      } else {
+        this.logger.error(`SAML assertion validation failed: ${msg}`);
+      }
       throw new BadRequestException("Échec de validation de l'assertion SAML.");
     }
     if (!profile) throw new BadRequestException('Assertion SAML vide.');

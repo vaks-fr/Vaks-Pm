@@ -38,7 +38,6 @@ export class ReportsService {
         status: true,
         estimateHours: true,
         dueDate: true,
-        progressPct: true,
       },
     });
 
@@ -791,22 +790,24 @@ export class ReportsService {
       ? `${project.client.name}${project.client.company ? ` (${project.client.company})` : ''}`
       : '';
 
-    const preparer = await this.prisma.user.findFirst({
-      where: { id: opts.preparedById, organizationId: orgId },
-      select: { name: true },
-    });
-
     // Données de graphiques (best-effort — un deck sort même si l'un échoue).
-    const due = await this.dueAdherence(orgId, projectId).catch(() => null);
     const bFrom = project.startDate
       ? project.startDate.toISOString().slice(0, 10)
       : new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10);
     const bEndDate = project.dueDate && project.dueDate.getTime() > now.getTime() ? project.dueDate : now;
     const bTo = bEndDate.toISOString().slice(0, 10);
-    const burn =
+    // `preparer`, `due` et `burn` sont mutuellement indépendants → une seule
+    // vague parallèle au lieu de 3 await séquentiels.
+    const [preparer, due, burn] = await Promise.all([
+      this.prisma.user.findFirst({
+        where: { id: opts.preparedById, organizationId: orgId },
+        select: { name: true },
+      }),
+      this.dueAdherence(orgId, projectId).catch(() => null),
       bFrom <= bTo
-        ? await this.burndown(orgId, projectId, { from: bFrom, to: bTo } as BurndownDto).catch(() => null)
-        : null;
+        ? this.burndown(orgId, projectId, { from: bFrom, to: bTo } as BurndownDto).catch(() => null)
+        : Promise.resolve(null),
+    ]);
     // Sous-échantillonne le burndown à ~24 points max (lisibilité du chart).
     const burndown =
       burn && burn.totalScopeHours > 0

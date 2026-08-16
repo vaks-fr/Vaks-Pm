@@ -136,6 +136,149 @@ function assigneeUser(a: TaskAssigneeDto): User {
   };
 }
 
+/**
+ * Barre de Gantt d'une tâche. Extraite au NIVEAU MODULE (auparavant définie dans
+ * le corps de `TimelineView` → identité de type recréée à chaque render, donc
+ * React démontait/remontait TOUTES les barres à chaque render, avec perte
+ * potentielle de l'état de drag). Les valeurs auparavant fermées passent en
+ * props ; l'i18n et le format sont relus via leurs hooks propres.
+ */
+function GanttBar({
+  t,
+  epoch,
+  dayW,
+  trackW,
+  showCritical,
+  linkSource,
+  onOpen,
+  onCreateLink,
+  onShiftTask,
+}: {
+  t: GanttTaskDto;
+  epoch: Date;
+  dayW: number;
+  trackW: number;
+  showCritical: boolean;
+  linkSource: string | null;
+  onOpen: (id: string) => void;
+  onCreateLink: (id: string) => void;
+  onShiftTask: (id: string, delta: number) => void;
+}) {
+  const { t: tr } = useTranslation('timeline');
+  const fmt = useFormat();
+  const fmtShort = (d: Date) => fmt.dayMonth(d);
+  const dragRef = useRef<{ startX: number; delta: number; moved: boolean } | null>(null);
+  const [dragPx, setDragPx] = useState(0);
+
+  const sStart = parseDay(t.scheduledStart);
+  const sEnd = parseDay(t.scheduledEnd);
+  const startIdx = daysBetween(epoch, sStart);
+  const widthDays = Math.max(1, daysBetween(sStart, sEnd));
+  const left = startIdx * dayW;
+  const w = widthDays * dayW;
+  const hue = statusMeta(t.status).hue;
+  const done = t.progressPct >= 100;
+  const assigneeDto = t.assignees[0];
+  const assignee = assigneeDto ? assigneeUser(assigneeDto) : undefined;
+
+  const minInside = assignee ? 70 : 50;
+  const rawLeft = left + 3;
+  const rawWidth = Math.max(8, w - 6);
+  const clipsLeft = rawLeft < 0;
+  const clipsRight = rawLeft + rawWidth > trackW;
+  const labelOutside = w < minInside && !clipsLeft && !clipsRight;
+
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    const el = e.currentTarget;
+    dragRef.current = { startX: e.clientX, delta: 0, moved: false };
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('gbar-dragging');
+
+    const onMove = (ev: PointerEvent) => {
+      if (!dragRef.current) return;
+      const dx = ev.clientX - dragRef.current.startX;
+      if (Math.abs(dx) > 4) dragRef.current.moved = true;
+      const d = Math.round(dx / dayW);
+      dragRef.current.delta = d;
+      setDragPx(d * dayW);
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      el.classList.remove('gbar-dragging');
+      const d = dragRef.current?.delta ?? 0;
+      const moved = dragRef.current?.moved ?? false;
+      dragRef.current = null;
+      setDragPx(0);
+      if (!moved) {
+        if (linkSource) onCreateLink(t.id);
+        else onOpen(t.id);
+        return;
+      }
+      if (d !== 0) onShiftTask(t.id, d);
+      ev.preventDefault();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    e.preventDefault();
+  }
+
+  const cls =
+    'gbar' +
+    (done ? ' gbar-done' : '') +
+    (showCritical && t.critical ? ' is-critical' : '') +
+    (labelOutside ? ' gbar-mini' : '') +
+    (clipsLeft ? ' gbar-clip-l' : '') +
+    (clipsRight ? ' gbar-clip-r' : '');
+
+  const realLeft = rawLeft + dragPx;
+  const realRight = realLeft + rawWidth;
+  const clampedLeft = Math.max(0, realLeft);
+  const clampedRight = Math.min(trackW, realRight);
+  const barLeft = clampedLeft;
+  const barWidth = Math.max(0, clampedRight - clampedLeft);
+  if (barWidth <= 0) return null;
+  return (
+    <>
+      <div
+        className={cls + (t.color ? ' has-tint' : '')}
+        style={{
+          left: barLeft,
+          width: barWidth,
+          height: BAR_H,
+          top: (ROW_H - BAR_H) / 2,
+          ['--bhue' as never]: hue,
+          ...(t.color ? { ['--btint' as never]: t.color } : null),
+        }}
+        onPointerDown={onPointerDown}
+        title={tr('timeline:barTooltip', { title: t.title, start: fmtShort(sStart), end: fmtShort(sEnd), pct: t.progressPct })}
+      >
+        <div className="gbar-fill" style={{ width: t.progressPct + '%' }} />
+        {!labelOutside && (
+          <div className="gbar-in">
+            {assignee && <Avatar user={assignee} size={BAR_H - 8} title={false} />}
+            <span className="gbar-title">{t.title}</span>
+            {w >= 130 && <span className="gbar-pct mono">{t.progressPct}%</span>}
+          </div>
+        )}
+      </div>
+      {labelOutside && (
+        <div
+          className="gbar-out"
+          style={{
+            left: barLeft + barWidth + 8,
+            top: (ROW_H - BAR_H) / 2,
+          }}
+        >
+          {assignee && <Avatar user={assignee} size={BAR_H - 8} title={false} />}
+          <span className="gbar-out-title">{t.title}</span>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
   const { t: tr } = useTranslation('timeline');
   const confirm = useConfirm();
@@ -591,6 +734,11 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
 
   const todayIdx = days.findIndex((d) => d.today);
 
+  // Index id → tâche construit UNE fois par render (au lieu de 2 `.find`
+  // linéaires par dépendance dans `depEndpoints` → O(deps×tâches)). `data` est
+  // garanti non-null ici (early-return en amont), donc const simple, pas de hook.
+  const taskById = new Map(data!.tasks.map((t) => [t.id, t]));
+
   const xAtDay = (idx: number) => idx * dayW;
   const xAtIso = (iso: string) =>
     daysBetween(epoch, parseDay(iso)) * dayW;
@@ -745,8 +893,8 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
   }
 
   function depEndpoints(dep: DependencyDto) {
-    const pred = data!.tasks.find((t) => t.id === dep.predecessorId);
-    const succ = data!.tasks.find((t) => t.id === dep.successorId);
+    const pred = taskById.get(dep.predecessorId);
+    const succ = taskById.get(dep.successorId);
     if (!pred || !succ) return null;
     const yPred = yByTask.get(pred.id);
     const ySucc = yByTask.get(succ.id);
@@ -785,129 +933,6 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
     return { x1, y1, x2, y2, isCritical };
   }
 
-  function Bar({ t }: { t: GanttTaskDto }) {
-    const dragRef = useRef<{
-      startX: number;
-      delta: number;
-      moved: boolean;
-    } | null>(null);
-    const [dragPx, setDragPx] = useState(0);
-
-    const sStart = parseDay(t.scheduledStart);
-    const sEnd = parseDay(t.scheduledEnd);
-    const startIdx = daysBetween(epoch, sStart);
-    const widthDays = Math.max(1, daysBetween(sStart, sEnd));
-    const left = xAtDay(startIdx);
-    const w = widthDays * dayW;
-    const hue = statusMeta(t.status).hue;
-    const done = t.progressPct >= 100;
-    const assigneeDto = t.assignees[0];
-    const assignee = assigneeDto ? assigneeUser(assigneeDto) : undefined;
-
-    // Show title inside when there's room for avatar + a few chars.
-    const minInside = assignee ? 70 : 50;
-    // Bornes "réelles" de la barre (peuvent dépasser à gauche / à droite la
-    // fenêtre courante en mode semaine/mois).
-    const rawLeft = left + 3;
-    const rawWidth = Math.max(8, w - 6);
-    const clipsLeft = rawLeft < 0;
-    const clipsRight = rawLeft + rawWidth > trackW;
-    // On n'affiche le label "outside" que si la barre n'est tronquée d'aucun
-    // côté — sinon le libellé déborde sur la colonne des noms ou hors écran.
-    const labelOutside = w < minInside && !clipsLeft && !clipsRight;
-
-    function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
-      if (e.button !== 0) return;
-      const el = e.currentTarget;
-      dragRef.current = { startX: e.clientX, delta: 0, moved: false };
-      el.setPointerCapture(e.pointerId);
-      el.classList.add('gbar-dragging');
-
-      const onMove = (ev: PointerEvent) => {
-        if (!dragRef.current) return;
-        const dx = ev.clientX - dragRef.current.startX;
-        if (Math.abs(dx) > 4) dragRef.current.moved = true;
-        const d = Math.round(dx / dayW);
-        dragRef.current.delta = d;
-        setDragPx(d * dayW);
-      };
-      const onUp = (ev: PointerEvent) => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        el.classList.remove('gbar-dragging');
-        const d = dragRef.current?.delta ?? 0;
-        const moved = dragRef.current?.moved ?? false;
-        dragRef.current = null;
-        setDragPx(0);
-        if (!moved) {
-          if (linkSource) handleCreateLink(t.id);
-          else onOpen(t.id);
-          return;
-        }
-        if (d !== 0) requestShiftTask(t.id, d);
-        ev.preventDefault();
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-      e.preventDefault();
-    }
-
-    const cls =
-      'gbar' +
-      (done ? ' gbar-done' : '') +
-      (showCritical && t.critical ? ' is-critical' : '') +
-      (labelOutside ? ' gbar-mini' : '') +
-      (clipsLeft ? ' gbar-clip-l' : '') +
-      (clipsRight ? ' gbar-clip-r' : '');
-
-    // Clamp à la fenêtre visible : si la barre déborde, on l'ampute du côté
-    // qui dépasse et on ajoute une classe pour le repère visuel (chevron).
-    const realLeft = rawLeft + dragPx;
-    const realRight = realLeft + rawWidth;
-    const clampedLeft = Math.max(0, realLeft);
-    const clampedRight = Math.min(trackW, realRight);
-    const barLeft = clampedLeft;
-    const barWidth = Math.max(0, clampedRight - clampedLeft);
-    if (barWidth <= 0) return null;
-    return (
-      <>
-        <div
-          className={cls + (t.color ? ' has-tint' : '')}
-          style={{
-            left: barLeft,
-            width: barWidth,
-            height: BAR_H,
-            top: (ROW_H - BAR_H) / 2,
-            ['--bhue' as never]: hue,
-            ...(t.color ? { ['--btint' as never]: t.color } : null),
-          }}
-          onPointerDown={onPointerDown}
-          title={tr('timeline:barTooltip', { title: t.title, start: fmtShort(sStart), end: fmtShort(sEnd), pct: t.progressPct })}
-        >
-          <div className="gbar-fill" style={{ width: t.progressPct + '%' }} />
-          {!labelOutside && (
-            <div className="gbar-in">
-              {assignee && <Avatar user={assignee} size={BAR_H - 8} title={false} />}
-              <span className="gbar-title">{t.title}</span>
-              {w >= 130 && <span className="gbar-pct mono">{t.progressPct}%</span>}
-            </div>
-          )}
-        </div>
-        {labelOutside && (
-          <div
-            className="gbar-out"
-            style={{
-              left: barLeft + barWidth + 8,
-              top: (ROW_H - BAR_H) / 2,
-            }}
-          >
-            {assignee && <Avatar user={assignee} size={BAR_H - 8} title={false} />}
-            <span className="gbar-out-title">{t.title}</span>
-          </div>
-        )}
-      </>
-    );
-  }
 
   return (
     <div className="gantt-wrap">
@@ -1367,23 +1392,38 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
                 <Icon name="flag" size={14} /> {t('timeline:milestones')}
               </div>
               <div className="gantt-rtrack">
-                {milestones.map((m) => {
-                  const idx = daysBetween(epoch, parseDay(m.scheduledStart));
-                  return (
-                    <div
-                      key={m.id}
-                      className={
-                        'gantt-mile' + (showCritical && m.critical ? ' is-critical' : '')
-                      }
-                      style={{ left: xAtDay(idx) + dayW / 2 }}
-                      onClick={() => onOpen(m.id)}
-                      title={t('timeline:milestoneTooltip', { title: m.title, date: fmtShort(parseDay(m.scheduledStart)) })}
-                    >
-                      <span className="gantt-mile-dot" />
-                      <span className="gantt-mile-name">{m.title}</span>
-                    </div>
-                  );
-                })}
+                {(() => {
+                  // Jalons triés par position X. Le nom inline n'est rendu que si
+                  // le jalon suivant est assez loin — sinon les libellés de dates
+                  // proches se chevauchaient en un pâté illisible (le titre reste
+                  // accessible via le tooltip au survol). Le diamant reste toujours
+                  // visible.
+                  const MILE_LABEL_MIN_GAP = 96;
+                  const placed = milestones
+                    .map((m) => ({
+                      m,
+                      x: xAtDay(daysBetween(epoch, parseDay(m.scheduledStart))) + dayW / 2,
+                    }))
+                    .sort((a, b) => a.x - b.x);
+                  return placed.map((cur, i) => {
+                    const next = placed[i + 1];
+                    const showName = !next || next.x - cur.x >= MILE_LABEL_MIN_GAP;
+                    return (
+                      <div
+                        key={cur.m.id}
+                        className={
+                          'gantt-mile' + (showCritical && cur.m.critical ? ' is-critical' : '')
+                        }
+                        style={{ left: cur.x }}
+                        onClick={() => onOpen(cur.m.id)}
+                        title={t('timeline:milestoneTooltip', { title: cur.m.title, date: fmtShort(parseDay(cur.m.scheduledStart)) })}
+                      >
+                        <span className="gantt-mile-dot" />
+                        {showName && <span className="gantt-mile-name">{cur.m.title}</span>}
+                      </div>
+                    );
+                  });
+                })()}
               </div>
             </div>
 
@@ -1539,7 +1579,19 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
                                 );
                               });
                             })()}
-                            {!t.isMilestone && <Bar t={t} />}
+                            {!t.isMilestone && (
+                              <GanttBar
+                                t={t}
+                                epoch={epoch}
+                                dayW={dayW}
+                                trackW={trackW}
+                                showCritical={showCritical}
+                                linkSource={linkSource}
+                                onOpen={onOpen}
+                                onCreateLink={handleCreateLink}
+                                onShiftTask={requestShiftTask}
+                              />
+                            )}
                             {t.isMilestone && (
                               <div
                                 className={

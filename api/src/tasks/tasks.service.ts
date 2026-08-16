@@ -7,7 +7,6 @@ import {
   UnsupportedMediaTypeException,
 } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
-import { createHash } from 'node:crypto';
 import { Prisma, Task, TaskStatus } from '@db';
 import { AutomationsHooksService } from '../automations/automations-hooks.service';
 import { WatchersService } from '../automations/watchers.service';
@@ -40,7 +39,6 @@ import { SubtreeVerificationService } from '../deliverables/subtree-verification
 import { agentSelfGovernanceViolation } from './agent-self-governance';
 import { decideSubStatus } from '../custom-statuses/sub-status-rules';
 import { S3Service } from '../storage/s3.service';
-import { FileSourcesService } from '../filesources/filesources.service';
 import { AgentContextService } from '../agent-context/agent-context.service';
 import { buildContextSnapshot } from '../agents/context/context-hash';
 import { effectiveAiFolderIds } from '../projects/document-context';
@@ -903,15 +901,13 @@ export class TasksService {
     // que le modèle autorise depuis la séparation affichage/découpage. Seule la
     // couleur (significative pour un groupe seulement) est effacée, plus bas.
     if (dto.assigneeIds) {
-      const currentAssignees = await this.prisma.taskAssignee.findMany({
-        where: { taskId },
-        select: { userId: true },
-      });
+      // Réutilise `previousAssigneeIds` (déjà chargé ci-dessus sous la même
+      // condition `dto.assigneeIds`) au lieu de refaire la même requête.
       await this.assertAssigneesAllowedOnProject(
         orgId,
         existing.projectId,
         dto.assigneeIds,
-        currentAssignees.map((a) => a.userId),
+        previousAssigneeIds,
       );
     }
     if (dto.labelIds) await this.assertLabelsInProject(existing.projectId, dto.labelIds);
@@ -1784,10 +1780,21 @@ export class TasksService {
       },
     });
 
+    // Réaligne la carte sur la colonne TODO : au claim elle avait été poussée
+    // vers la colonne foldée CLAIMED → In progress. Sans ça la carte « traîne »
+    // en In progress alors que le statut est repassé TODO. Best-effort.
+    const todoColId = await this.columnForStatus(task.projectId, TaskStatus.TODO);
+
     const released = await this.prisma.$transaction(async (tx) => {
       await tx.task.update({
         where: { id: taskId },
-        data: { status: TaskStatus.TODO, claimedById: null, claimedAt: null, leaseExpiresAt: null },
+        data: {
+          status: TaskStatus.TODO,
+          ...(todoColId ? { boardColumnId: todoColId } : {}),
+          claimedById: null,
+          claimedAt: null,
+          leaseExpiresAt: null,
+        },
       });
       await tx.taskStatusHistory.create({
         data: {

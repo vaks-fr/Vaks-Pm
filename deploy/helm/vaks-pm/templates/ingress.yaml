@@ -46,6 +46,38 @@ spec:
                 port:
                   number: {{ $.Values.api.port }}
           {{- end }}
+          {{- if $.Values.mcp.enabled }}
+          # MCP server (AI connector) + RFC 9728 protected-resource metadata.
+          # Distinct prefixes from /api, so Ingress longest-prefix routes them
+          # cleanly (no explicit priority needed as on the Swarm/Traefik path).
+          - path: /mcp
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-mcp
+                port:
+                  number: {{ $.Values.mcp.port }}
+          - path: /.well-known/oauth-protected-resource
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-mcp
+                port:
+                  number: {{ $.Values.mcp.port }}
+          # RFC 8414 Authorization Server metadata is served by whoever hosts the
+          # OAuth facade: control-plane in pooled, the api itself in dedicated.
+          - path: /.well-known/oauth-authorization-server
+            pathType: Prefix
+            backend:
+              service:
+                {{- if eq $.Values.tenancy.mode "pooled" }}
+                name: {{ $fullName }}-controlplane
+                {{- else }}
+                name: {{ $fullName }}-api
+                {{- end }}
+                port:
+                  number: {{ $.Values.api.port }}
+          {{- end }}
           # WebSocket (Socket.IO, namespace /ws) — must reach the api, not web.
           - path: /socket.io
             pathType: Prefix

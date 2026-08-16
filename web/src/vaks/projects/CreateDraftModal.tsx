@@ -450,7 +450,9 @@ export function CreateDraftModal({
                   : t('create.creating')
                 : isCopy
                   ? t('create.duplicateCta')
-                  : t('create.createCta')}
+                  : billable
+                    ? t('create.createCta')
+                    : t('create.createCtaNonBillable')}
             </button>
           </div>
         </div>

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import {
   applyCredentialToForm,
   entraTokenEndpoint,
@@ -30,7 +30,12 @@ export class GraphService {
         ? !!(cred.privateKeyPem && cred.thumbprint)
         : !!cred.clientSecret;
     if (!tenantId || !clientId || !hasAuth) {
-      throw new Error('Configuration Graph incomplète (tenantId / clientId / secret ou certificat).');
+      // Config incomplète = erreur PERMANENTE (400, pas 500) : le worker la traite
+      // comme terminale et ne la retente pas (sinon il boucle 5× sur un tenant
+      // mal configuré, avec alerte admin à chaque job).
+      throw new BadRequestException(
+        'Configuration Graph incomplète (tenantId / clientId / secret ou certificat).',
+      );
     }
     const key = `${tenantId}|${clientId}`;
     const now = Date.now();
@@ -53,6 +58,12 @@ export class GraphService {
         body: form.toString(),
         signal: ctrl.signal,
       });
+    } catch (err) {
+      // Panne réseau / timeout vers Entra = TRANSITOIRE : 503 → le worker retente
+      // (backoff BullMQ). On ne remonte pas un Error nu (qui deviendrait un 500
+      // indistinct, sans le libellé clair).
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new ServiceUnavailableException(`Endpoint de jeton Entra injoignable: ${msg}`);
     } finally {
       clearTimeout(timer);
     }
@@ -64,8 +75,20 @@ export class GraphService {
       /* laissé null */
     }
     if (!res.ok || !json?.access_token) {
+      const code = typeof json?.error === 'string' ? json.error : '';
       const msg = json?.error_description || json?.error || `HTTP ${res.status}`;
-      throw new Error(`Échec d'obtention du token Graph: ${msg}`);
+      // Distinguer permanent (secret/appli/params invalides → 400, échec terminal
+      // côté worker, pas de retry) de transitoire (Entra indispo, throttling 429,
+      // 5xx → 503, retriable).
+      const transient =
+        res.status === 429 ||
+        res.status >= 500 ||
+        code === 'temporarily_unavailable' ||
+        code === 'server_error';
+      if (transient) {
+        throw new ServiceUnavailableException(`Échec temporaire du token Graph: ${msg}`);
+      }
+      throw new BadRequestException(`Échec d'obtention du token Graph: ${msg}`);
     }
     const expiresIn = Number(json.expires_in) || 3600;
     this.cache.set(key, { token: json.access_token, expMs: now + expiresIn * 1000 });

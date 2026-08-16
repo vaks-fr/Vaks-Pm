@@ -126,6 +126,24 @@ export function BrandMark({ size = 20, style, className }: { size?: number; styl
   );
 }
 
+/* ---------- Org brand mark ----------
+   Boîte de marque de l'org : logo custom (branding admin) si présent, sinon le
+   BrandMark Vaks. Rend la div `.brand-mark` complète pour pouvoir retirer le
+   fond accent quand on affiche un vrai logo (un logo transparent posé sur du
+   corail serait moche) — classe `.brand-mark-img`. Réutilisé sidebar/topbar/login. */
+export function OrgBrandMark({ logoUrl, alt }: { logoUrl?: string | null; alt?: string }) {
+  const src = logoUrl && logoUrl.trim() ? logoUrl.trim() : null;
+  return (
+    <div className={'brand-mark' + (src ? ' brand-mark-img' : '')}>
+      {src ? (
+        <img src={src} alt={alt ?? ''} />
+      ) : (
+        <BrandMark />
+      )}
+    </div>
+  );
+}
+
 /* ---------- Avatar ---------- */
 export function Avatar({
   user,

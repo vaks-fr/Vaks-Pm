@@ -24,7 +24,7 @@ import { Icon } from './primitives';
 import { ProjectSkillGapView } from './SkillGapSection';
 import { useChartTooltip } from './chart-tooltip';
 import { CfdChart } from './report-charts';
-import { statusMeta } from './taskStatus';
+import { statusMeta, foldedStatusCount } from './taskStatus';
 import { PieChart, palette } from './finance-charts';
 import { ReportWidgetsPanel, type ReportWidgetRow } from './ReportWidgetsPanel';
 import {
@@ -888,9 +888,9 @@ export function ReportsView({ projectId, monday, onOpenTask }: Props) {
       // haute (`.row` par défaut aligne en `center`, ce qui laissait dépasser la
       // carte dont le libellé passe sur 2 lignes, ex. « Complétion à temps »).
       <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
-        <Kpi label={t('reports:kpi.tasks')} value={String(stats.totalTasks)} hint={t('reports:kpi.tasksHint', { done: stats.byStatus.DONE, inProgress: stats.byStatus.IN_PROGRESS })} scope="project" />
+        <Kpi label={t('reports:kpi.tasks')} value={String(stats.totalTasks)} hint={t('reports:kpi.tasksHint', { done: stats.byStatus.DONE, inProgress: foldedStatusCount(stats.byStatus, 'IN_PROGRESS') })} scope="project" />
         <Kpi label={t('reports:kpi.progress')} value={`${stats.completionPct}%`} hint={t('reports:kpi.progressHint', { done: stats.doneEstimateHours, total: stats.totalEstimateHours })} accent scope="project" />
-        <Kpi label={t('reports:kpi.remaining')} value={`${stats.remainingEstimateHours}h`} hint={t('reports:kpi.remainingHint', { todo: stats.byStatus.TODO, review: stats.byStatus.IN_REVIEW })} scope="project" />
+        <Kpi label={t('reports:kpi.remaining')} value={`${stats.remainingEstimateHours}h`} hint={t('reports:kpi.remainingHint', { todo: foldedStatusCount(stats.byStatus, 'TODO'), review: foldedStatusCount(stats.byStatus, 'IN_REVIEW') })} scope="project" />
         <Kpi label={t('reports:kpi.overdue')} value={String(stats.overdueTasks)} hint={stats.overdueTasks > 0 ? t('reports:kpi.overdueToHandle') : t('reports:kpi.overdueNothing')} scope="project" />
         <Kpi
           label={t('reports:kpi.onTimeCompletion')}
@@ -1010,21 +1010,68 @@ export function ReportsView({ projectId, monday, onOpenTask }: Props) {
         </div>
       ),
 
-    quality: () =>
-      !quality || quality.totalTasks === 0 ? null : (
+    quality: () => {
+      if (!quality || quality.totalTasks === 0) return null;
+      const q = quality;
+      const healthy = q.reworkRatePct === 0 && q.bugCount === 0 && (!q.hasBaselineDate || q.scopeAddedTasks === 0);
+      const qmCap: React.CSSProperties = { fontSize: 11, fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-3)' };
+      const qmVal: React.CSSProperties = { fontSize: 26, fontWeight: 800, letterSpacing: '-.02em', lineHeight: 1 };
+      const qmSub: React.CSSProperties = { fontSize: 12, color: 'var(--text-3)' };
+      return (
         <div className="card" style={{ padding: 14 }}>
-          <div style={{ fontWeight: 700, marginBottom: 10 }}>{t('reports:quality.title')}</div>
-          <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
-            <Kpi label={t('reports:quality.reworkRate')} value={`${quality.reworkRatePct}%`} hint={t('reports:quality.reworkHint', { reworked: quality.reworkedTasks, total: quality.totalTasks })} />
-            <Kpi label={t('reports:quality.bugs')} value={String(quality.bugCount)} hint={t('reports:quality.bugsHint', { pct: quality.bugRatePct })} accent />
-            <Kpi
-              label={t('reports:quality.scopeCreep')}
-              value={quality.hasBaselineDate ? `+${quality.scopeAddedTasks}` : '—'}
-              hint={quality.hasBaselineDate ? t('reports:quality.scopeCreepHint', { hours: quality.scopeAddedEstimateHours }) : t('reports:quality.scopeCreepNoBaseline')}
-            />
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontWeight: 700 }}>{t('reports:quality.title')}</div>
+            <span className={healthy ? 'chart-pill-done' : 'chart-pill-over'}>{healthy ? t('reports:quality.clean') : t('reports:quality.watch')}</span>
           </div>
+          {healthy ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 10, padding: '16px 12px 8px' }}>
+              <div style={{ width: 52, height: 52, borderRadius: 14, background: 'var(--c-ok-bg)', display: 'grid', placeItems: 'center' }}>
+                <svg width={26} height={26} viewBox="0 0 24 24" fill="none" stroke="var(--c-ok)" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+              </div>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>{t('reports:quality.healthyTitle')}</div>
+              <div style={{ fontSize: 12.5, color: 'var(--text-3)', maxWidth: 320, lineHeight: 1.5 }}>{t('reports:quality.healthySub')}</div>
+              <div style={{ display: 'flex', gap: 24, marginTop: 2 }}>
+                <div className="chart-stat"><b className="mono" style={{ fontSize: 16 }}>0%</b><small>{t('reports:quality.reworkRate')}</small></div>
+                <div className="chart-stat"><b className="mono" style={{ fontSize: 16 }}>0</b><small>{t('reports:quality.bugs')}</small></div>
+                <div className="chart-stat"><b className="mono" style={{ fontSize: 16 }}>{q.hasBaselineDate ? '+0' : '—'}</b><small>{t('reports:quality.scopeCreep')}</small></div>
+              </div>
+            </div>
+          ) : (
+            <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
+              {/* Taux de reprise + jauge */}
+              <div className="card" style={{ flex: '1 1 180px', minWidth: 170, gap: 9, display: 'flex', flexDirection: 'column' }}>
+                <div style={qmCap}>{t('reports:quality.reworkRate')}</div>
+                <div className="mono" style={{ ...qmVal, color: q.reworkRatePct > 0 ? 'var(--c-warn)' : 'var(--text)' }}>{q.reworkRatePct}%</div>
+                <div className="fin-kpi-bar"><div className="fin-kpi-bar-fill" style={{ width: `${Math.min(100, q.reworkRatePct)}%`, background: 'var(--c-warn)' }} /></div>
+                <div style={qmSub}>{t('reports:quality.reworkHint', { reworked: q.reworkedTasks, total: q.totalTasks })}</div>
+              </div>
+              {/* Bugs / défauts + points */}
+              <div className="card" style={{ flex: '1 1 180px', minWidth: 170, gap: 9, display: 'flex', flexDirection: 'column' }}>
+                <div style={qmCap}>{t('reports:quality.bugs')}</div>
+                <div className="mono" style={{ ...qmVal, color: q.bugCount > 0 ? 'var(--c-over)' : 'var(--text)' }}>{q.bugCount}</div>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {Array.from({ length: Math.max(8, Math.min(q.bugCount, 16)) }, (_, i) => (
+                    <i key={i} style={{ width: 10, height: 10, borderRadius: 3, background: i < q.bugCount ? 'var(--c-over)' : 'var(--surface-3)' }} />
+                  ))}
+                </div>
+                <div style={qmSub}>{t('reports:quality.bugsHint', { pct: q.bugRatePct })}</div>
+              </div>
+              {/* Dérive de périmètre + barre */}
+              <div className="card" style={{ flex: '1 1 180px', minWidth: 170, gap: 9, display: 'flex', flexDirection: 'column' }}>
+                <div style={qmCap}>{t('reports:quality.scopeCreep')}</div>
+                <div className="mono" style={qmVal}>{q.hasBaselineDate ? `+${q.scopeAddedTasks}` : '—'}</div>
+                {q.hasBaselineDate ? (
+                  <div className="fin-kpi-bar"><div className="fin-kpi-bar-fill" style={{ width: `${q.totalTasks > 0 ? Math.min(100, (q.scopeAddedTasks / q.totalTasks) * 100) : 0}%`, background: 'var(--accent)' }} /></div>
+                ) : (
+                  <div className="fin-kpi-bar" style={{ opacity: 0.4 }} />
+                )}
+                <div style={qmSub}>{q.hasBaselineDate ? t('reports:quality.scopeCreepHint', { hours: q.scopeAddedEstimateHours }) : t('reports:quality.scopeCreepNoBaseline')}</div>
+              </div>
+            </div>
+          )}
         </div>
-      ),
+      );
+    },
 
     // Agents IA — throughput, activité & détail par agent. Visible seulement
     // si le projet autorise les agents (Project.agentsEnabled).
@@ -1110,7 +1157,7 @@ export function ReportsView({ projectId, monday, onOpenTask }: Props) {
       !cfd || cfd.points.length <= 1 ? null : (
         <div className="card" style={{ padding: 14 }}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>{t('reports:cfd.title')}</div>
-          <CfdChart points={cfd.points} fmt={(n) => String(n)} />
+          <CfdChart points={cfd.points} />
           <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>{t('reports:cfd.note')}</div>
         </div>
       ),

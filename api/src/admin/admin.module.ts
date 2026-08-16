@@ -13,10 +13,16 @@ import { DataManagementService } from './data-management.service';
 import { DataManagementController } from './data-management.controller';
 import { DataPurgeCronService } from './data-purge-cron.service';
 import { AuthModule } from '../auth/auth.module';
+import { AgentsModule } from '../agents/agents.module';
 
 @Global()
 @Module({
-  imports: [forwardRef(() => AuthModule)],
+  // AgentsModule : uniquement pour injecter PolicyEngineService dans
+  // AdminSettingsController (invalidation du cache policies sur le chemin
+  // d'écriture générique `/admin/settings`, cf. audit sécu 2026-08-01 finding
+  // #7 résiduel). Pas de cycle : AgentsModule n'importe jamais AdminModule
+  // (@Global() rend déjà AdminSettingsService injectable là-bas sans import).
+  imports: [forwardRef(() => AuthModule), AgentsModule],
   providers: [
     AdminSettingsService,
     RolesService,

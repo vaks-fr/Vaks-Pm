@@ -7,7 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { columns as COLUMNS, labels as LABELS, users as USERS, type BoardSubStatus, type Column, type Task, type User } from './data';
 
 const GROUPS_COL: Column = { id: 'c_groups', name: 'Groups', status: 'group', wip: null };
-import { Avatar, AvatarStack, effectiveColor, fmt, Icon, PriorityDot, subOf, Tag } from './primitives';
+import { AvatarStack, effectiveColor, fmt, Icon, PriorityDot, subOf, Tag } from './primitives';
 import { localizeColName } from './colLabel';
 import { useConfirm } from './confirm';
 import { startPointerDrag } from './dnd';
@@ -429,6 +429,8 @@ export function KanbanView({
   onDeleteGroup,
   boardVersion = 0,
   subStatuses = [],
+  autoOpenComposer = false,
+  onComposerConsumed,
 }: {
   tasks: Task[];
   setTasks: React.Dispatch<React.SetStateAction<Task[]>>;
@@ -453,6 +455,11 @@ export function KanbanView({
   boardVersion?: number;
   /** Sous-statuts applicables au projet (containers dans les colonnes). */
   subStatuses?: BoardSubStatus[];
+  /** Quand `true`, ouvre automatiquement le composer de saisie de tâche dans la
+   *  1re colonne (armé par le bouton « New task » de la sidebar). */
+  autoOpenComposer?: boolean;
+  /** Appelé une fois le composer ouvert pour désarmer `autoOpenComposer`. */
+  onComposerConsumed?: () => void;
 }) {
   const { t } = useTranslation('tasks');
   const confirm = useConfirm();
@@ -464,6 +471,19 @@ export function KanbanView({
   const [adding, setAdding] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState('');
   const [newIsGroup, setNewIsGroup] = useState(false);
+  // Bouton « New task » de la sidebar : ouvre le composer inline dans la 1re
+  // colonne réelle (jamais le pseudo-conteneur « Groupes »). Le parent désarme
+  // ensuite le flag pour éviter toute réouverture au remontage de la vue.
+  useEffect(() => {
+    if (!autoOpenComposer) return;
+    const target = COLUMNS.find((c) => c.status !== 'group') ?? COLUMNS[0];
+    if (target) {
+      setNewIsGroup(false);
+      setNewTitle('');
+      setAdding(target.id);
+    }
+    onComposerConsumed?.();
+  }, [autoOpenComposer, onComposerConsumed]);
   const [flash, setFlash] = useState<string | null>(null);
   const [groupFilter, setGroupFilter] = useState<Set<string>>(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
@@ -590,12 +610,26 @@ export function KanbanView({
     });
   };
 
-  const colTasks = useCallback(
-    (cid: string) => {
-      if (cid === GROUPS_COL.id) return visibleTasks.filter((t) => t.isGroup);
-      return visibleTasks.filter((t) => !t.isGroup && t.col === cid);
-    },
-    [visibleTasks],
+  // Index tâches → colonne construit UNE fois (au lieu d'un filtre O(N) par
+  // colonne à chaque render, y compris pendant le drag). Ordre préservé
+  // (itération de `visibleTasks`) et sémantique identique à l'ancien colTasks
+  // (groupes → colonne virtuelle GROUPS_COL, non-groupes → leur `col`).
+  const tasksByCol = useMemo(() => {
+    const m = new Map<string, (typeof visibleTasks)[number][]>();
+    for (const t of visibleTasks) {
+      const key = t.isGroup ? GROUPS_COL.id : t.col;
+      const arr = m.get(key);
+      if (arr) arr.push(t);
+      else m.set(key, [t]);
+    }
+    return m;
+  }, [visibleTasks]);
+  const colTasks = useCallback((cid: string) => tasksByCol.get(cid) ?? [], [tasksByCol]);
+  // Couleur effective (remonte la hiérarchie de groupes) mémoïsée par tâche —
+  // évite de la recalculer par carte à chaque render (chaque frame de drag).
+  const tintByTask = useMemo(
+    () => new Map(tasks.map((t) => [t.id, effectiveColor(t, tasks)])),
+    [tasks],
   );
 
   // `boardVersion` force la relecture du binding module `COLUMNS` (data.ts)
@@ -840,9 +874,9 @@ export function KanbanView({
   }, [live]);
 
   return (
-    <div className="board-scroll">
+    <div className="board-wrap">
       <div
-        className="row"
+        className="row board-filters"
         style={{
           justifyContent: 'flex-end',
           padding: '6px 12px 0',
@@ -1057,6 +1091,7 @@ export function KanbanView({
           )}
         </div>
       </div>
+      <div className="board-scroll">
       <div className="board">
         {renderedColumns.map((col) => {
           const isGroupsCol = col.id === GROUPS_COL.id;
@@ -1207,7 +1242,7 @@ export function KanbanView({
                       showLabels={showLabels}
                       dim={!!drag && drag.id === t.id}
                       justMoved={flash === t.id}
-                      tint={effectiveColor(t, tasks)}
+                      tint={tintByTask.get(t.id) ?? null}
                       onPointerDown={(e) => onCardPointerDown(e, t)}
                       onEdit={() => onOpen(t.id)}
                       onDelete={() => onDelete(t.id)}
@@ -1253,7 +1288,7 @@ export function KanbanView({
                             showLabels={showLabels}
                             dim={!!drag && drag.id === t.id}
                             justMoved={flash === t.id}
-                            tint={effectiveColor(t, tasks)}
+                            tint={tintByTask.get(t.id) ?? null}
                             onPointerDown={(e) => onCardPointerDown(e, t)}
                             onEdit={() => onOpen(t.id)}
                             onDelete={() => onDelete(t.id)}
@@ -1282,6 +1317,7 @@ export function KanbanView({
             </section>
           );
         })}
+      </div>
       </div>
     </div>
   );

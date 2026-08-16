@@ -235,6 +235,7 @@ export class FinanceService {
         defaultBillRate: true,
         startDate: true,
         dueDate: true,
+        agentCostBudget: true,
       },
     });
     if (!p) throw new NotFoundException('Projet introuvable');
@@ -643,6 +644,41 @@ export class FinanceService {
       })),
     );
 
+    // Toutes les lectures restantes sont mutuellement indépendantes (reste-à-faire
+    // main-d'œuvre, dépenses hors M.O., coût + CA agents) → une seule vague batchée
+    // au lieu de 4 allers-retours séquentiels. Les calculs qui les consomment
+    // restent plus bas (données déjà en mémoire), l'ordre observable est inchangé.
+    const [openTasks, expenseRows, agentSpendAgg, nonDoneTasks, avgAgentTask, agentBilledReal] =
+      await Promise.all([
+        this.prisma.task.findMany({
+          where: {
+            projectId,
+            organizationId: orgId,
+            deletedAt: null,
+            status: { not: TaskStatus.DONE },
+          },
+          select: {
+            estimateHours: true,
+            progressPct: true,
+            status: true,
+            assignees: { select: { userId: true } },
+          },
+        }),
+        this.prisma.projectExpense.findMany({
+          where: { projectId, organizationId: orgId, deletedAt: null },
+          orderBy: { createdAt: 'desc' },
+        }),
+        this.prisma.agentRun.aggregate({
+          _sum: { cost: true },
+          where: { organizationId: orgId, projectId },
+        }),
+        this.prisma.task.count({
+          where: { organizationId: orgId, projectId, deletedAt: null, status: { not: TaskStatus.DONE } },
+        }),
+        this.avgAgentCostPerTask(orgId),
+        this.agentBilledForProject(orgId, projectId),
+      ]);
+
     interface Row {
       userId: string;
       name: string;
@@ -737,20 +773,6 @@ export class FinanceService {
       const r = members.map((m) => m.costRate).filter((c): c is number => c != null);
       return r.length ? r.reduce((a, b) => a + b, 0) / r.length : (defCost ?? 0);
     })();
-    const openTasks = await this.prisma.task.findMany({
-      where: {
-        projectId,
-        organizationId: orgId,
-        deletedAt: null,
-        status: { not: TaskStatus.DONE },
-      },
-      select: {
-        estimateHours: true,
-        progressPct: true,
-        status: true,
-        assignees: { select: { userId: true } },
-      },
-    });
     let remainingLaborCost = 0;
     for (const t of openTasks) {
       if (!t.estimateHours) continue;
@@ -766,10 +788,6 @@ export class FinanceService {
     remainingLaborCost = r2(remainingLaborCost);
 
     // ---- Coûts hors main-d'œuvre (licences, matériel, cloud, sous-traitance) ----
-    const expenseRows = await this.prisma.projectExpense.findMany({
-      where: { projectId, organizationId: orgId, deletedAt: null },
-      orderBy: { createdAt: 'desc' },
-    });
     let nonLaborActualCost = 0;
     let nonLaborForecastCost = 0;
     let nonLaborRevenue = 0;
@@ -823,23 +841,11 @@ export class FinanceService {
     const budgetAmount = dec(project.budgetAmount);
 
     // ---- Coût agents (finance agents) : réel (runs déclarés) + prévisionnel
-    // (tâches éligibles non terminées × coût moyen/tâche observé) + budget projet. ----
-    const [agentSpendAgg, projAgentRow, nonDoneTasks, avgAgentTask] = await Promise.all([
-      this.prisma.agentRun.aggregate({
-        _sum: { cost: true },
-        where: { organizationId: orgId, projectId },
-      }),
-      this.prisma.project.findUnique({
-        where: { id: projectId },
-        select: { agentCostBudget: true },
-      }),
-      this.prisma.task.count({
-        where: { organizationId: orgId, projectId, deletedAt: null, status: { not: TaskStatus.DONE } },
-      }),
-      this.avgAgentCostPerTask(orgId),
-    ]);
+    // (tâches éligibles non terminées × coût moyen/tâche observé) + budget projet.
+    // Les lectures (agentSpendAgg / nonDoneTasks / avgAgentTask) sont issues du
+    // batch en tête ; le budget agent vient d'`assertProject` (plus de refetch). ----
     const agentCostReal = r2(Number(agentSpendAgg._sum.cost ?? 0));
-    const agentCostBudget = dec(projAgentRow?.agentCostBudget ?? null);
+    const agentCostBudget = dec(project.agentCostBudget ?? null);
     const agentCostForecast = avgAgentTask != null ? r2(nonDoneTasks * avgAgentTask) : null;
 
     // ---- Intégration P&L des agents (validé 2026-07-07) : le coût agents réel
@@ -848,7 +854,6 @@ export class FinanceService {
     // `forecastRevenue` (le réalisé sert de plancher — pas de projection du CA
     // agents futur, pas de base fiable). Les champs `agent*` restent exposés
     // séparément pour la carte dédiée. ----
-    const agentBilledReal = await this.agentBilledForProject(orgId, projectId);
     const agentCostEac = Math.max(agentCostReal, agentCostForecast ?? 0);
     actualCost = r2(actualCost + agentCostReal);
     plannedCost = r2(plannedCost + agentCostEac);
@@ -1364,7 +1369,7 @@ export class FinanceService {
       this.prisma.projectRate.findMany({ where: { projectId }, select: { userId: true, costRate: true } }),
       this.prisma.task.findMany({
         where: { projectId, organizationId: orgId, deletedAt: null },
-        select: { status: true, estimateHours: true, progressPct: true },
+        select: { status: true, estimateHours: true, progressPct: true, updatedAt: true },
       }),
       this.prisma.timeEntry.findMany({
         where: { organizationId: orgId, task: { projectId } },
@@ -1399,7 +1404,7 @@ export class FinanceService {
       }),
       this.prisma.task.findMany({
         where: { projectId: ids, organizationId: orgId, deletedAt: null },
-        select: { projectId: true, status: true, estimateHours: true, progressPct: true },
+        select: { projectId: true, status: true, estimateHours: true, progressPct: true, updatedAt: true },
       }),
       this.prisma.timeEntry.findMany({
         where: { organizationId: orgId, task: { projectId: ids } },
@@ -1474,7 +1479,7 @@ export class FinanceService {
     },
     data: {
       rates: Array<{ userId: string; costRate: Prisma.Decimal | null }>;
-      tasks: Array<{ status: TaskStatus; estimateHours: number | null; progressPct: number | null }>;
+      tasks: Array<{ status: TaskStatus; estimateHours: number | null; progressPct: number | null; updatedAt: Date }>;
       entries: Array<{ userId: string; durationMinutes: number; costRateSnapshot: Prisma.Decimal | null; date: Date }>;
       expenseRows: Array<{
         amount: Prisma.Decimal; billAmount: Prisma.Decimal | null; quantity: Prisma.Decimal;
@@ -1535,14 +1540,36 @@ export class FinanceService {
     const startMs = project.startDate?.getTime() ?? 0;
     const dueMs = project.dueDate?.getTime() ?? 0;
     const pvFrac = (atMs: number) => (hasDates ? Math.min(1, Math.max(0, (atMs - startMs) / (dueMs - startMs))) : null);
+
+    // EV mensuel : la valeur acquise est reconnue à la COMPLÉTION d'une tâche
+    // (proxy `updatedAt`, même approximation que le burndown). Poids = estimé si
+    // disponible, sinon 1 par tâche. Cumul rapporté au poids total → fraction
+    // acquise à chaque fin de mois. Le dernier point est recalé sur l'EV courante
+    // (qui inclut le crédit partiel des tâches en cours) pour coller au KPI.
+    const totalWeight = estSum > 0 ? estSum : total;
+    const earnedByMonth = new Map(months.map((m) => [m, 0]));
+    for (const tk of tasks) {
+      if (tk.status !== TaskStatus.DONE) continue;
+      const w = estSum > 0 ? (tk.estimateHours ?? 0) : 1;
+      if (w <= 0) continue;
+      const k = monthKey(tk.updatedAt);
+      // Complétion antérieure à la fenêtre → rattachée au 1er mois (cumul correct).
+      const bucket = earnedByMonth.has(k) ? k : months[0];
+      if (bucket) earnedByMonth.set(bucket, earnedByMonth.get(bucket)! + w);
+    }
+
     let acCum = 0;
+    let earnedCum = 0;
     const monthly = months.map((m) => {
       acCum += acByMonth.get(m)!;
+      earnedCum += earnedByMonth.get(m)!;
       const [yy, mm] = m.split('-').map(Number);
       const monthEnd = new Date(Date.UTC(yy, mm, 0)).getTime(); // dernier jour du mois
       const frac = pvFrac(monthEnd);
-      return { month: m, ac: r2(acCum), pv: frac == null ? null : r2(budget * frac) };
+      const evFrac = totalWeight > 0 ? earnedCum / totalWeight : 0;
+      return { month: m, ac: r2(acCum), pv: frac == null ? null : r2(budget * frac), ev: r2(budget * evFrac) };
     });
+    if (monthly.length) monthly[monthly.length - 1].ev = ev; // recale le dernier point sur l'EV courante
 
     const ac = r2(acCum);
     const pvNowFrac = pvFrac(now.getTime());
@@ -1713,7 +1740,7 @@ export class FinanceService {
    * Efficace : un `updateMany` par personne (taux résolu une fois chacun).
    */
   async restampRates(orgId: string, projectId: string, dto: RestampRatesDto) {
-    await this.assertProject(orgId, projectId);
+    const project = await this.assertProject(orgId, projectId);
     // TimeEntry n'a pas de projectId scalaire → on passe par les tâches.
     const tasks = await this.prisma.task.findMany({
       where: { projectId, organizationId: orgId },
@@ -1737,13 +1764,44 @@ export class FinanceService {
       by: ['userId'],
       where,
     });
+    if (grouped.length === 0) return { updated: 0 };
 
+    // Résolution des taux EN MÉMOIRE — logique strictement identique à
+    // `resolveRate` (ProjectRate explicite > défaut user > défaut projet) mais
+    // sans refetcher projet + user à CHAQUE itération : 2 requêtes batchées au
+    // lieu de 3×U lectures séquentielles (dont U fetches projet redondants).
+    const userIds = grouped.map((g) => g.userId);
+    const [projRates, users] = await Promise.all([
+      this.prisma.projectRate.findMany({
+        where: { projectId, userId: { in: userIds } },
+        select: { userId: true, costRate: true, billRate: true },
+      }),
+      this.prisma.user.findMany({
+        where: { id: { in: userIds }, organizationId: orgId },
+        select: { id: true, defaultCostRate: true, defaultBillRate: true },
+      }),
+    ]);
+    const rateByUser = new Map(projRates.map((r) => [r.userId, r]));
+    const userById = new Map(users.map((u) => [u.id, u]));
+    const defCost = dec(project.defaultCostRate);
+    const defBill = dec(project.defaultBillRate);
+    const resolveFor = (uid: string): { costRate: number | null; billRate: number | null } => {
+      const r = rateByUser.get(uid);
+      const u = userById.get(uid);
+      return {
+        costRate: (r ? dec(r.costRate) : null) ?? dec(u?.defaultCostRate) ?? defCost,
+        billRate: (r ? dec(r.billRate) : null) ?? dec(u?.defaultBillRate) ?? defBill,
+      };
+    };
+
+    // Écritures conservées EN SÉRIE (comportement inchangé, pas de contention
+    // sur le pool sous un grand nombre d'utilisateurs).
     let updated = 0;
     for (const g of grouped) {
-      const r = await this.resolveRate(orgId, projectId, g.userId);
+      const rate = resolveFor(g.userId);
       const res = await this.prisma.timeEntry.updateMany({
         where: { ...where, userId: g.userId },
-        data: { costRateSnapshot: r.costRate, billRateSnapshot: r.billRate },
+        data: { costRateSnapshot: rate.costRate, billRateSnapshot: rate.billRate },
       });
       updated += res.count;
     }

@@ -4,6 +4,7 @@
    pour la déduplication self, et la queue de notifications.
    ============================================================ */
 import { useSyncExternalStore } from 'react';
+import type { UserNotificationKind } from '@vaks-pm/shared';
 
 export interface BufferedEvent {
   /** Nom de l'event WS (TASK_MOVED, comment.created, ...) */
@@ -14,17 +15,25 @@ export interface BufferedEvent {
   receivedAt: number;
 }
 
+/**
+ * Notification de la cloche, **adossée au serveur** (`Notification` Prisma) :
+ * `id`/`read` viennent du serveur, `title`/`body` sont déjà rendus (par le
+ * mapper `renderInboxItem`, via i18n pour les kinds « perso » ou tel quel pour
+ * les kinds serveur). Persistée → survit au refresh et au hors-ligne.
+ */
 export interface Notification {
+  /** Id serveur (`Notification.id`). */
   id: string;
-  /** Type sémantique (mention, assignment, status, comment, system) */
-  kind: 'mention' | 'assignment' | 'status' | 'comment' | 'system';
+  kind: UserNotificationKind;
   title: string;
   body?: string;
-  /** ms epoch */
+  /** ms epoch (dérivé de `createdAt`). */
   at: number;
   /** Cible cliquable (taskId + projectId pour rouvrir la tâche). */
   taskId?: string;
   projectId?: string;
+  /** CTA (lien absolu) pour les kinds sans tâche cliquable. */
+  url?: string;
   read: boolean;
 }
 
@@ -37,6 +46,11 @@ interface State {
   mode: Mode;
   buffered: BufferedEvent[];
   notifications: Notification[];
+  /** Compteur de non-lues **faisant autorité côté serveur** (pastille) — peut
+   *  dépasser `notifications.length` (liste paginée). */
+  unread: number;
+  /** La liste a-t-elle été hydratée depuis le serveur au moins une fois ? */
+  hydrated: boolean;
 }
 
 const initialMode = (): Mode => {
@@ -51,6 +65,8 @@ let state: State = {
   mode: initialMode(),
   buffered: [],
   notifications: [],
+  unread: 0,
+  hydrated: false,
 };
 
 const listeners = new Set<() => void>();
@@ -157,25 +173,58 @@ export function clearBuffered(): void {
 
 // ---- notifications --------------------------------------------
 
-export function pushNotification(n: Omit<Notification, 'id' | 'at' | 'read'>): void {
-  const id = newMutationId();
+/**
+ * Remplace la liste par la page serveur + fixe le compteur de non-lues faisant
+ * autorité. Appelé au montage de la cloche (`GET /me/notifications`).
+ */
+export function hydrateNotifications(items: Notification[], unread: number): void {
+  state = { ...state, notifications: items, unread, hydrated: true };
+  emit();
+}
+
+/** Ajoute une page suivante (pagination « Charger plus »), en dédup par id. */
+export function appendNotifications(items: Notification[]): void {
+  const seen = new Set(state.notifications.map((n) => n.id));
+  const fresh = items.filter((n) => !seen.has(n.id));
+  if (fresh.length === 0) return;
+  state = { ...state, notifications: [...state.notifications, ...fresh] };
+  emit();
+}
+
+/**
+ * Insère une notification reçue en temps réel (WS `user:<id>`). Dédup par id
+ * (une hydratation concurrente a pu déjà la poser). Incrémente le compteur de
+ * non-lues si elle est neuve et non lue.
+ */
+export function pushNotification(n: Notification): void {
+  if (state.notifications.some((x) => x.id === n.id)) return;
   state = {
     ...state,
-    notifications: [{ ...n, id, at: Date.now(), read: false }, ...state.notifications].slice(0, 50),
+    notifications: [n, ...state.notifications].slice(0, 100),
+    unread: n.read ? state.unread : state.unread + 1,
   };
   emit();
 }
 
+/** Marque tout lu localement (le serveur est notifié en parallèle par le panel). */
 export function markAllNotificationsRead(): void {
-  if (state.notifications.every((n) => n.read)) return;
+  if (state.unread === 0 && state.notifications.every((n) => n.read)) return;
   state = {
     ...state,
     notifications: state.notifications.map((n) => ({ ...n, read: true })),
+    unread: 0,
   };
   emit();
 }
 
+/** Retire une notification (dismiss) et ajuste le compteur si elle était non lue. */
 export function dismissNotification(id: string): void {
-  state = { ...state, notifications: state.notifications.filter((n) => n.id !== id) };
+  const target = state.notifications.find((n) => n.id === id);
+  if (!target) return;
+  state = {
+    ...state,
+    notifications: state.notifications.filter((n) => n.id !== id),
+    unread: target.read ? state.unread : Math.max(0, state.unread - 1),
+  };
   emit();
 }

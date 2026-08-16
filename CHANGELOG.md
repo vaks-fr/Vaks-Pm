@@ -2,6 +2,56 @@
 
 User-facing changes, most recent first.
 
+## 2026-08-16-2 — 2026-08-16
+
+### Reports — redesigned KPI charts
+- The Team KPI and project reports got a visual overhaul. The multi-project
+  workload chart is now a sorted horizontal load view with a 100% marker and
+  threshold colors; tasks-by-status are shown as per-member donuts; and the
+  resource-utilization chart (billable vs operational) is now a clean, sorted
+  horizontal share bar per person with a summary strip.
+- The Earned Value chart now plots Earned Value alongside Planned and Actual
+  cost, with a shaded cost-variance area (green when efficient, red when
+  overspending).
+- The Cumulative Flow chart is more readable: a clear date axis and a
+  consistent height on any screen size.
+- Task status colors now match the board everywhere (To do, In progress,
+  In review, On hold, Done).
+- Calmer empty states and metric cards (a ring gauge for utilization, mini-bars
+  for logged vs allocated), with no more "alarming" red on neutral values.
+
+### Notifications
+- Durable in-app bell: notifications now persist across refreshes and offline
+  periods, and cover the same events as email (assignments, mentions, status
+  changes, due reminders, automations, project announcements, skill requests,
+  admin alerts). Read state and history are synced to the server.
+
+### Branding
+- Your organization's logo now appears in the app itself — sidebar, mobile top
+  bar and login screen — not just in emails, with a discreet "powered by
+  Vaks-PM" footer. Falls back to the default mark when no custom logo is set.
+
+### Fixes
+- SSO (SAML): a configurable clock-skew tolerance fixes intermittent login
+  failures caused by time drift between the identity provider and the host.
+- SCIM provisioning: standards-compliant filter parsing (RFC 7644) prevents
+  duplicate-account loops with identity providers such as Microsoft Entra.
+- AI agents on the board: a task that is released or whose lease expires no
+  longer stays stuck in the "In progress" column.
+- Smaller board fixes: the filter bar no longer drifts when scrolling
+  horizontally, the "New task" button opens the composer, and PERT/Timeline
+  labels are clearer.
+
+### Performance
+- Faster rendering of the Kanban, Timeline, PERT and Workload views, and fewer
+  redundant database queries across reports, finance and workload.
+
+### Security & operations
+- On-premise: encryption can now be enabled after installation on an
+  already-running cluster (disks, database TLS, backups, overlay network),
+  with a guided runbook.
+- General security and reliability hardening.
+
 ## 2026-08-10-1 — 2026-08-10
 
 ### AI agents — cost tracking & management

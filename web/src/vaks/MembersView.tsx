@@ -197,12 +197,12 @@ export function MembersView({ projectId, projectName }: { projectId: string; pro
 
   const managers = members.filter((m) => m.role.key === 'PROJECT_MANAGER');
   const others = members.filter((m) => m.role.key !== 'PROJECT_MANAGER');
-  // Membres "hérités" = membres d'une équipe assignée mais sans rôle direct sur le projet.
-  const directIds = new Set(members.map((m) => m.userId));
-  const inheritedByTeam = teams.map((t) => ({
-    team: t.team,
-    members: t.team.members.filter((tm) => !directIds.has(tm.userId)),
-  }));
+  // Rôle direct éventuel d'un membre (PM / Contributor / …). On l'utilise pour
+  // ANNOTER — et non plus masquer — un membre d'équipe qui a aussi un rôle
+  // propre sur le projet (ex. le PM). Masquer la ligne faisait diverger le
+  // compteur d'équipe (« 5 members ») de la liste affichée (4 lignes).
+  const directRoleByUser = new Map(members.map((m) => [m.userId, m.role.key]));
+  const teamsAll = teams.map((t) => ({ team: t.team, members: t.team.members }));
 
   return (
     <div style={{ padding: '20px 24px', maxWidth: 920, margin: '0 auto' }}>
@@ -263,7 +263,7 @@ export function MembersView({ projectId, projectName }: { projectId: string; pro
             </span>
           </div>
           <div style={{ display: 'grid', gap: 16 }}>
-            {inheritedByTeam.map(({ team, members: teamMembers }) => (
+            {teamsAll.map(({ team, members: teamMembers }) => (
               <div
                 key={team.id}
                 style={{
@@ -290,29 +290,37 @@ export function MembersView({ projectId, projectName }: { projectId: string; pro
                 </div>
                 {teamMembers.length === 0 ? (
                   <div style={{ fontSize: 12, color: 'var(--text-3)' }}>
-                    {t('members.allHaveDirectRole')}
+                    {t('members.emptyTeam')}
                   </div>
                 ) : (
                   <div style={{ display: 'grid', gap: 6 }}>
-                    {teamMembers.map((tm) => (
-                      <PersonRow
-                        key={tm.userId}
-                        userId={tm.user.id}
-                        name={tm.user.name}
-                        email={tm.user.email}
-                        rightSlot={
-                          <span
-                            style={{
-                              fontSize: 11,
-                              color: 'var(--text-3)',
-                              fontStyle: 'italic',
-                            }}
-                          >
-                            {t('members.via', { team: team.name })}
-                          </span>
-                        }
-                      />
-                    ))}
+                    {teamMembers.map((tm) => {
+                      const directRole = directRoleByUser.get(tm.userId);
+                      const directMeta = directRole ? ROLE_META[directRole] : undefined;
+                      const directLabel = directMeta
+                        ? t(directMeta.labelKey)
+                        : directRole ?? null;
+                      return (
+                        <PersonRow
+                          key={tm.userId}
+                          userId={tm.user.id}
+                          name={tm.user.name}
+                          email={tm.user.email}
+                          rightSlot={
+                            <span
+                              style={{
+                                fontSize: 11,
+                                color: 'var(--text-3)',
+                                fontStyle: 'italic',
+                              }}
+                            >
+                              {t('members.via', { team: team.name })}
+                              {directLabel ? ` · ${directLabel}` : ''}
+                            </span>
+                          }
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </div>

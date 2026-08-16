@@ -993,6 +993,22 @@ export function WorkloadView({
     return rows;
   }, [grid, search, sortBy]);
 
+  // Agrégats d'en-tête de jour (férié pour tous / fermé) mémoïsés sur `[grid]` :
+  // O(jours×lignes) calculé UNE fois au lieu d'à chaque render (hover/drag).
+  // Placé avant les early-returns (règle des hooks) ; garde le null.
+  const dayHeadByDate = useMemo(() => {
+    const m = new Map<string, { allHoliday: boolean; holidayName: string | null; closed: boolean }>();
+    if (!grid) return m;
+    grid.days.forEach((d, dayIdx) => {
+      const cellsForDay = grid.rows.map((r) => r.cells[dayIdx]).filter(Boolean);
+      const allHoliday = cellsForDay.length > 0 && cellsForDay.every((c) => c?.isHoliday);
+      const holidayName = cellsForDay.find((c) => c?.holidayName)?.holidayName || null;
+      const closed = grid.rows.length > 0 && cellsForDay.every((c) => c?.capacityHours === 0 && !c?.isHoliday);
+      m.set(d.date, { allHoliday, holidayName, closed });
+    });
+    return m;
+  }, [grid]);
+
   if (error) {
     return (
       <div className="placeholder">
@@ -1429,15 +1445,11 @@ export function WorkloadView({
         >
           {t('view.teamMember')}
         </div>
-        {grid.days.map((d, dayIdx) => {
+        {grid.days.map((d) => {
           const dt = new Date(d.date + 'T00:00:00Z');
-          // Le jour est marqué férié dans l'en-tête uniquement s'il l'est pour
-          // *tout le monde* (sinon ça ne reflète plus la réalité multi-pays).
-          // Un nom existe si au moins un user a un libellé — pratique en tooltip.
-          const cellsForDay = grid.rows.map((r) => r.cells[dayIdx]).filter(Boolean);
-          const allHoliday = cellsForDay.length > 0 && cellsForDay.every((c) => c?.isHoliday);
-          const holidayName = cellsForDay.find((c) => c?.holidayName)?.holidayName || null;
-          const closed = grid.rows.length > 0 && cellsForDay.every((c) => c?.capacityHours === 0 && !c?.isHoliday);
+          // Agrégats jour (férié pour tous / fermé) lus depuis la Map mémoïsée
+          // (cf. `dayHeadByDate`) au lieu d'un recalcul O(lignes) par jour/render.
+          const { allHoliday, holidayName, closed } = dayHeadByDate.get(d.date) ?? { allHoliday: false, holidayName: null, closed: false };
           const bg = allHoliday
             ? 'oklch(from oklch(0.65 0.18 25) l c h / 0.10)'
             : closed

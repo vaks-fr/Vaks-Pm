@@ -28,6 +28,9 @@ export interface PublicOrgSettings {
   /** Curseur de concentration par défaut de l'auto-plan (Lot 2.2) —
    *  surchargeable par run depuis `WorkloadView`. Défaut `balanced`. */
   autoplanConcentration: 'focus' | 'balanced' | 'spread';
+  /** URL du logo custom de l'org (branding). Chaîne vide → l'UI affiche le
+   *  BrandMark Vaks. Sert la sidebar/topbar (parité avec les emails). */
+  logoUrl: string;
 }
 
 const SUPPORTED_LANGUAGES = ['en', 'fr', 'it', 'de'];
@@ -43,6 +46,7 @@ const DEFAULT_PUBLIC_SETTINGS: PublicOrgSettings = {
   skillsLevelInputMode: 'number',
   fiscalYearStartMonth: 1,
   autoplanConcentration: 'balanced',
+  logoUrl: '',
 };
 
 /**
@@ -190,6 +194,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           s.autoplanConcentration === 'focus' || s.autoplanConcentration === 'spread'
             ? s.autoplanConcentration
             : 'balanced',
+        logoUrl: typeof s.logoUrl === 'string' ? s.logoUrl : '',
       });
     } catch {
       // garder les defaults — l'UI doit rester utilisable.

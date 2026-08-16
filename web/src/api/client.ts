@@ -170,6 +170,7 @@ import type {
   ProjectTeamDto,
   LicenseStatusDto,
   LicenseHistoryRowDto,
+  InboxListDto,
 } from '@vaks-pm/shared';
 
 import { newMutationId, trackPendingMutation } from '../realtime/store';
@@ -551,6 +552,25 @@ export const api = {
     request<{ redirect: string }>('/auth/oauth/consent', {
       method: 'POST',
       body: JSON.stringify({ tx, approve }),
+    }),
+
+  // ---- Cloche : boîte de réception in-app durable (self-service) ----
+  listNotifications: (cursor?: string, limit?: number) => {
+    const p = new URLSearchParams();
+    if (cursor) p.set('cursor', cursor);
+    if (limit) p.set('limit', String(limit));
+    const q = p.toString();
+    return request<InboxListDto>(`/me/notifications${q ? `?${q}` : ''}`);
+  },
+  /** Marque des notifications lues (sans `ids` = toutes les non-lues). */
+  markNotificationsRead: (ids?: string[]) =>
+    request<{ updated: number }>('/me/notifications/read', {
+      method: 'POST',
+      body: JSON.stringify(ids && ids.length ? { ids } : {}),
+    }),
+  dismissNotification: (id: string) =>
+    request<{ dismissed: boolean }>(`/me/notifications/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
     }),
 
   // ---- Connexions IA de l'utilisateur courant (self-service) ----
@@ -1543,6 +1563,8 @@ export const api = {
       skillsLevelInputMode: 'number' | 'scale';
       fiscalYearStartMonth: number;
       autoplanConcentration: 'focus' | 'balanced' | 'spread';
+      /** URL du logo custom de l'org (branding). Vide → BrandMark Vaks. */
+      logoUrl: string;
     }>('/admin/settings/public'),
   // ---- licence (open-core, SPEC §16) ----
   /** État de la licence du tenant — lisible par tout user authentifié (FeatureGate + bandeau). */

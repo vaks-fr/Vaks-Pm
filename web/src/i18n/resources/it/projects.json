@@ -318,7 +318,7 @@
     "duplicateTitle": "Duplica «{{name}}»",
     "newDraftTitle": "Nuova bozza di progetto",
     "introBillable": "Un progetto fatturabile prepara un charter PMBOK, viene firmato dal cliente, poi si attiva.",
-    "introNonBillable": "Un progetto non fatturabile riguarda lavoro interno / organizzativo. Salta la firma del charter e passa direttamente da bozza ad attivo.",
+    "introNonBillable": "Un progetto non fatturabile riguarda lavoro interno / organizzativo. Salta la firma del charter e viene creato come bozza, attivabile quando vuoi.",
     "projectType": "Tipo di progetto",
     "typeBillable": "Fatturabile",
     "typeBillableDesc": "Charter firmato dal cliente richiesto",
@@ -347,7 +347,8 @@
     "copying": "Copia…",
     "creating": "Creazione…",
     "duplicateCta": "Duplica progetto & attività",
-    "createCta": "Crea bozza & apri il charter"
+    "createCta": "Crea bozza & apri il charter",
+    "createCtaNonBillable": "Crea progetto"
   },
   "expenses": {
     "category": {

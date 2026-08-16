@@ -103,9 +103,18 @@ const img = (svc) => (imageSource === 'build' ? `vaks-pm/${svc}:latest` : `${ima
 //                              (+ cellules) et pose PG_TLS_CA/PG_TLS_MODE.
 //   pgCaFile  (défaut infra/certs/pg-ca.crt) : PEM de la CA, relatif au repo.
 //   pgTlsMode (verify-ca|verify-full)        : mode de vérification (défaut verify-ca).
+//   overlay   (défaut true)  : chiffrement IPsec du réseau overlay Swarm (in-transit).
+//                              false ⇒ réseau en clair, activable day-2 via
+//                              infra/crypto/enable-overlay-ipsec.sh (stack rm + deploy).
+//   internalTls (défaut true) : TLS interne etcd (peer+client) + PostgreSQL (ssl=on)
+//                              + app→PG. false ⇒ cluster né en CLAIR interne,
+//                              activable day-2 via infra/crypto/enable-pg-tls.sh
+//                              et rebuild-etcd-tls.sh. pgVerify implique internalTls.
 const enc = m.encryption || {};
 const encDiskLuks = enc.diskLuks !== false;
-const encPgVerify = enc.pgVerify === true;
+const encOverlay = enc.overlay !== false;
+const encInternalTls = enc.internalTls !== false;
+const encPgVerify = enc.pgVerify === true && encInternalTls;
 const encPgMode = enc.pgTlsMode === 'verify-full' ? 'verify-full' : 'verify-ca';
 
 // ---------- ACME / Let's Encrypt (TLS public trusted) ----------
@@ -313,9 +322,10 @@ function appEnv(extra = {}) {
     // Domaine(s) public(s) d'un serveur MCP (DMZ) — une valeur, tous les tenants.
     ...(mcpPublicDomains ? { TENANCY_MCP_DOMAINS: `"${mcpPublicDomains}"` } : {}),
     // TLS interne (DORA) : app↔PostgreSQL chiffré. Activé en HA (Patroni écoute en
-    // SSL via le bootstrap). En single, PostgreSQL tourne en conteneur SANS SSL →
+    // SSL via le bootstrap) SAUF si encryption.internalTls=false (cluster né en clair,
+    // TLS activable day-2). En single, PostgreSQL tourne en conteneur SANS SSL →
     // PG_TLS="1" ferait crash-looper l'api ('server does not support SSL') → "0".
-    PG_TLS: ha ? '"1"' : '"0"',
+    PG_TLS: (ha && encInternalTls) ? '"1"' : '"0"',
     // Vérification stricte du cert serveur Postgres si encryption.pgVerify (sinon
     // chiffré-sans-vérification, défaut). La CA est montée en config (cf. pg_ca_v1).
     ...(encPgVerify ? { PG_TLS_CA: PG_CA_TARGET, PG_TLS_MODE: encPgMode } : {}),
@@ -663,9 +673,9 @@ networks:
     attachable: true
     # DORA — chiffrement en transit du trafic inter-conteneurs (IPsec overlay) :
     # redis, garage (S3), HTTP/WS interne. Le réseau doit être recréé pour changer
-    # ce flag (stack rm + deploy), cf. DORA_COMPLIANCE.md §D.
-    driver_opts:
-      encrypted: "true"
+    # ce flag (stack rm + deploy), cf. DORA_COMPLIANCE.md §D + infra/crypto/enable-overlay-ipsec.sh.
+${encOverlay ? `    driver_opts:
+      encrypted: "true"` : `    # overlay IPsec DÉSACTIVÉ (encryption.overlay=false) — activable day-2 via infra/crypto/enable-overlay-ipsec.sh`}
 
 volumes:
 ${volumes.map((v) => `  ${v}`).join('\n')}
@@ -934,7 +944,7 @@ Nœuds garage : ${garageHosts.join(', ')}  ·  replication_factor = ${garageRepl
 
 \`\`\`bash
 # Sur un nœud garage (récupérer le container id)
-CID=$(docker ps -q -f name=vaks-pm_garage | head -1)
+CID=$(docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | head -1)
 alias g="docker exec $CID /garage"
 
 # 1. Lister les nœuds vus + leurs IDs (chaque task s'annonce sur l'overlay)
@@ -964,7 +974,8 @@ Perte d'un nœud : avec replication_factor = ${garageReplication}, les objets re
 const etcdMembers = hostsWith('etcd');
 const dbHosts = hostsWith('db');
 // TLS interne par défaut → etcd https d'emblée (cf. bootstrap 10-etcd.sh / 12-certs.sh).
-const etcdInitial = etcdMembers.map((h) => `${h.name}=https://${h.ip}:2380`).join(',');
+const etcdScheme = encInternalTls ? 'https' : 'http';
+const etcdInitial = etcdMembers.map((h) => `${h.name}=${etcdScheme}://${h.ip}:2380`).join(',');
 
 function hostScript(h) {
   const L = ['#!/usr/bin/env bash', `# GÉNÉRÉ — bootstrap du host ${h.name} (rôles: ${(h.roles || []).join(',')}).`, '# À lancer EN LOCAL sur cette machine (sudo). Pré-requis: bootstrap/ présent.', 'set -euo pipefail', 'HERE="$(cd "$(dirname "$0")" && pwd)"', 'cd "$HERE/bootstrap"', ''];
@@ -985,7 +996,7 @@ function hostScript(h) {
     // TLS interne (DORA) : pose le cert maître partagé AVANT etcd (qui démarre
     // https). L'orchestrateur a distribué bootstrap/certs/server.{crt,key}.
     L.push('bash 12-certs.sh');
-    if (role(h, 'etcd')) L.push(`NODE_NAME=${h.name} NODE_IP=${h.ip} ETCD_INITIAL_CLUSTER="${etcdInitial}" bash 10-etcd.sh`);
+    if (role(h, 'etcd')) L.push(`NODE_NAME=${h.name} NODE_IP=${h.ip} ETCD_INITIAL_CLUSTER="${etcdInitial}" ETCD_INTERNAL_TLS=${encInternalTls ? '1' : '0'} bash 10-etcd.sh`);
     // Chiffrement at-rest des DONNÉES (DORA) : Tang (clé réseau) + conteneurs
     // LUKS Clevis-bound aux PAIRS, montés AVANT patroni (pgdata) / docker (garage).
     // N'encrypte pas le disque hôte ni les autres charges. cf. 15/18-*.sh.
@@ -998,7 +1009,7 @@ function hostScript(h) {
       L.push('# Les volumes pgdata/garage ne sont PAS chiffrés au repos par cet installeur.');
     }
     L.push(
-      `NODE_NAME=${h.name} NODE_IP=${h.ip} ETCD_ENDPOINTS="${etcdMembers.map((e) => `${e.ip}:2379`).join(',')}" ${standbyEnv}\\`,
+      `NODE_NAME=${h.name} NODE_IP=${h.ip} ETCD_ENDPOINTS="${etcdMembers.map((e) => `${e.ip}:2379`).join(',')}" PG_INTERNAL_TLS=${encInternalTls ? '1' : '0'} ${standbyEnv}\\`,
       '  REPL_USER="${REPL_USER:?}" REPL_PASSWORD="${REPL_PASSWORD:?}" SUPERUSER_PASSWORD="${SUPERUSER_PASSWORD:?}" bash 20-patroni.sh',
     );
     L.push(`DB_SERVERS="${dbHosts.map((d) => `${d.name}:${d.ip}`).join(',')}" bash 30-haproxy.sh`);
@@ -1133,9 +1144,9 @@ SUDO "\$NODE_IP" "mkdir -p /srv/vaks/garage"
 ${acme ? 'SUDO "\\$NODE_IP" "mkdir -p /srv/vaks/acme"\n' : ''}SUDO "\$NODE_IP" "cd \$REMOTE && docker stack deploy -c docker-stack.gen.yml vaks-pm"
 
 echo "=== 6) Init Garage (single node) ==="
-SUDO "\$NODE_IP" "for i in \\\$(seq 1 40); do docker ps -q -f name=vaks-pm_garage | grep -q . && break; sleep 5; done"
-GG="C=\\\$(docker ps -q -f name=vaks-pm_garage | head -1); docker exec \\\$C /garage"
-GID="\$(SUDO "\$NODE_IP" "C=\\\$(docker ps -q -f name=vaks-pm_garage | head -1); docker exec \\\$C /garage node id 2>/dev/null | grep -m1 -oE '^[0-9a-f]{64}'")"
+SUDO "\$NODE_IP" "for i in \\\$(seq 1 40); do docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | grep -q . && break; sleep 5; done"
+GG="C=\\\$(docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | head -1); docker exec \\\$C /garage"
+GID="\$(SUDO "\$NODE_IP" "C=\\\$(docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | head -1); docker exec \\\$C /garage node id 2>/dev/null | grep -m1 -oE '^[0-9a-f]{64}'")"
 [ -n "\$GID" ] || { echo "ERREUR: node id Garage introuvable (service pas prêt ? relancer ce script)"; exit 1; }
 SUDO "\$NODE_IP" "\$GG layout assign -z dc1 -c 100G \$GID" || true
 SUDO "\$NODE_IP" "\$GG layout apply --version 1" || true
@@ -1328,14 +1339,14 @@ ${acme ? `SUDO "${traefikNode.ip}" "mkdir -p /srv/vaks/acme"  # stockage ACME pe
 
 echo "=== 6) Init Garage (S3 cluster) ==="
 GARAGE_IPS="${garageHosts.map((n) => { const h = m.hosts.find((x) => x.name === n); return h ? h.ip : ''; }).filter(Boolean).join(' ')}"
-for gip in \$GARAGE_IPS; do SUDO "\$gip" "for i in \\\$(seq 1 40); do docker ps -q -f name=vaks-pm_garage | grep -q . && break; sleep 5; done"; done
+for gip in \$GARAGE_IPS; do SUDO "\$gip" "for i in \\\$(seq 1 40); do docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | grep -q . && break; sleep 5; done"; done
 GNODES=""
 for gip in \$GARAGE_IPS; do
-  L="\$(SUDO "\$gip" "C=\\\$(docker ps -q -f name=vaks-pm_garage | head -1); I=\\\$(docker exec \\\$C /garage node id 2>/dev/null | grep -m1 -oE '^[0-9a-f]{64}'); A=\\\$(docker exec \\\$C /garage status 2>/dev/null | grep -oE '[0-9]+\\.[0-9.]+:3901' | head -1); echo \\\$I@\\\$A")"
+  L="\$(SUDO "\$gip" "C=\\\$(docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | head -1); I=\\\$(docker exec \\\$C /garage node id 2>/dev/null | grep -m1 -oE '^[0-9a-f]{64}'); A=\\\$(docker exec \\\$C /garage status 2>/dev/null | grep -oE '[0-9]+\\.[0-9.]+:3901' | head -1); echo \\\$I@\\\$A")"
   GNODES="\$GNODES \$L"
 done
 echo "  noeuds garage : \$GNODES"
-GG="C=\\\$(docker ps -q -f name=vaks-pm_garage | head -1); docker exec \\\$C /garage"
+GG="C=\\\$(docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | head -1); docker exec \\\$C /garage"
 for n in \$GNODES; do SUDO "\$MANAGER_IP" "\$GG node connect \$n" || true; done
 sleep 3
 zi=1; for n in \$GNODES; do SUDO "\$MANAGER_IP" "\$GG layout assign -z dc\$zi -c 100G \${n%@*}" || true; zi=\$((zi+1)); done
@@ -1365,6 +1376,312 @@ echo ""
 echo "=== Done. Check: docker stack ps vaks-pm ==="
 echo "# full log of this deployment → $VAKS_DEPLOY_LOG"
 `;
+
+// ============================================================================
+// deploy.ps1 — jumeau PowerShell NATIF de deploy-ssh.sh (aucune dependance bash).
+// Emis EN PLUS de deploy-ssh.sh (additif : le flux .sh reste intact). Cible un
+// poste de pilotage Windows avec seulement le client OpenSSH + PowerShell 5.1+.
+// Les boucles hosts/tenants sont DEROULEES ici (le generateur connait la cible),
+// la crypto locale passe par .NET (pas d'openssl local), le cert wildcard absent
+// est genere sur un hote Debian. ASCII pur (PS 5.1 mal-decode l'UTF-8 sans BOM).
+// Regle d'emission : PS en quotes simples + concatenation, JAMAIS de backtick PS
+// (le backtick fermerait ce template JS) ; backslash litteral => double (\\).
+// ============================================================================
+const dbHostsPs = m.hosts.filter((h) => role(h, 'db'));
+const garageHostsPs = garageHosts.map((n) => hostByName(n)).filter(Boolean);
+const provisionPs = (mgrVar) => {
+  if (!isPrimaryZone) return `Write-Host '=== STANDBY zone: tenants arrive by replication, no provisioning ==='`;
+  if (!m.tenants.length) return `Write-Host '  (no tenant declared)'`;
+  return m.tenants.map((t) => {
+    const email = (t.adminEmail || '').replace(/'/g, '');
+    const seed = t.seed ? ` --seed ${String(t.seed).replace(/'/g, '')}` : '';
+    const args = `${t.slug}${email ? ' ' + email : ''}${seed}`;
+    return `Write-Host '  -> tenant ${t.slug}'\nSudo ${mgrVar} 'CID=$(docker ps -q -f name=vaks-pm_api | head -1); [ -n "$CID" ] && docker exec $CID sh -c ''export DATABASE_URL=$(cat /run/secrets/database_url) && cd /app/api && node prisma/provision-tenant.js ${args}'' || echo "api not ready yet - re-run this script"'`;
+  }).join('\n');
+};
+
+const psPreamble = `# GENERATED - native PowerShell deploy orchestrator (mode ${m.mode}). No bash.
+# Twin of deploy-ssh.sh. Prereqs: an OpenSSH client (ssh.exe/scp.exe) on PATH and
+# .env.local at the repo root with VM_USER + SSH_KEY (+ VM_PASS if sudo needs one).
+${m.mode === 'single' ? '# POSTGRES_PASSWORD / JWT_* / SMTP_PASSWORD are OPTIONAL (generated if absent).' : '# HA also needs POSTGRES_*, PATRONI_*, JWT_ACCESS/REFRESH_SECRET (literal values).'}
+$ErrorActionPreference = 'Stop'
+$Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = (Resolve-Path (Join-Path $Here '..')).Path
+New-Item -ItemType Directory -Force -Path (Join-Path $Here 'logs') | Out-Null
+$ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+try { Start-Transcript -Path (Join-Path $Here ('logs/deploy-' + $ts + '.log')) -Append | Out-Null } catch {}
+foreach ($tool in 'ssh.exe','scp.exe') { if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw ($tool + ' not found on PATH. Install an OpenSSH client (built-in Windows OpenSSH Client feature, or a Win32-OpenSSH installer).') } }
+$envFile = Join-Path $Root '.env.local'
+if (-not (Test-Path $envFile)) { throw ($envFile + ' missing') }
+$Cfg = @{}
+foreach ($line in Get-Content $envFile) {
+  $t = $line.Trim(); if ($t -eq '' -or $t.StartsWith('#')) { continue }
+  $eq = $t.IndexOf('='); if ($eq -lt 1) { continue }
+  $k = $t.Substring(0,$eq).Trim(); $v = $t.Substring($eq+1).Trim()
+  if ($v.Length -ge 2 -and (($v[0] -eq '"' -and $v[-1] -eq '"') -or ($v[0] -eq [char]39 -and $v[-1] -eq [char]39))) { $v = $v.Substring(1,$v.Length-2) }
+  $Cfg[$k] = $v
+}
+function Cfg([string]$n,[string]$d=''){ if ($Cfg.ContainsKey($n) -and $Cfg[$n] -ne '') { return $Cfg[$n] } return $d }
+function Req([string]$n){ $x = Cfg $n; if ($x -eq '') { throw ($n + ' missing or empty in .env.local') } return $x }
+$VmUser = Req 'VM_USER'; $VmPass = Cfg 'VM_PASS' ''
+$SshKey = Req 'SSH_KEY'
+if (-not ([System.IO.Path]::IsPathRooted($SshKey) -or $SshKey -match '^[A-Za-z]:')) { $SshKey = Join-Path $Root $SshKey }
+if (-not (Test-Path $SshKey)) { throw ('SSH private key not found: ' + $SshKey) }
+$SshOpts = @('-o','StrictHostKeyChecking=accept-new','-o','BatchMode=no','-i',$SshKey)
+$REMOTE = '/home/' + $VmUser + '/vakspm-cluster'
+function ShQ([string]$s){ return [char]39 + $s.Replace([string][char]39, [char]39 + '\\' + [char]39 + [char]39) + [char]39 }
+function ShWrap([string]$cmd){ $b=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cmd)); return ('echo ' + [char]39 + $VmPass + [char]39 + ' | sudo -S -p ' + [char]39 + [char]39 + ' bash -c ' + [char]39 + 'echo ' + $b + ' | base64 -d | bash' + [char]39) }
+function Ssh([string]$h,[string]$cmd){ & ssh.exe -n @SshOpts ($VmUser+'@'+$h) $cmd; if ($LASTEXITCODE -ne 0){ throw ('ssh '+$h+' failed: '+$cmd) } }
+function TrySsh([string]$h,[string]$cmd){ & ssh.exe -n @SshOpts ($VmUser+'@'+$h) $cmd; return $LASTEXITCODE }
+function Sudo([string]$h,[string]$cmd){ & ssh.exe -n @SshOpts ($VmUser+'@'+$h) (ShWrap $cmd); if ($LASTEXITCODE -ne 0){ throw ('sudo on '+$h+' failed') } }
+function TrySudo([string]$h,[string]$cmd){ & ssh.exe -n @SshOpts ($VmUser+'@'+$h) (ShWrap $cmd) | Out-Null; return $LASTEXITCODE }
+function SudoOut([string]$h,[string]$cmd){ $o = & ssh.exe -n @SshOpts ($VmUser+'@'+$h) (ShWrap $cmd); return ([string]::Join([string][char]10, @($o))) }
+function Scp([string]$h,[string]$src,[string]$dst){ & scp.exe @SshOpts -r $src ($VmUser+'@'+$h+':'+$dst); if ($LASTEXITCODE -ne 0){ throw ('scp to '+$h+' failed: '+$src) } }
+function RandHex([int]$n){ $b = New-Object byte[] $n; ([System.Security.Cryptography.RandomNumberGenerator]::Create()).GetBytes($b); ($b | ForEach-Object { $_.ToString('x2') }) -join '' }
+function RandB64([int]$n){ $b = New-Object byte[] $n; ([System.Security.Cryptography.RandomNumberGenerator]::Create()).GetBytes($b); [Convert]::ToBase64String($b) }
+function WriteNoBom([string]$p,[string]$c){ [System.IO.File]::WriteAllText($p,$c,(New-Object System.Text.UTF8Encoding $false)) }
+function MkSecret([string]$mgr,[string]$name,[string]$val){ Sudo $mgr ('docker secret inspect ' + $name + ' >/dev/null 2>&1 || printf ' + [char]39 + '%s' + [char]39 + ' ' + (ShQ $val) + ' | docker secret create ' + $name + ' -') }
+function Load-S3 {
+  $f = Join-Path $Root '.s3-creds'
+  if (Test-Path $f) {
+    $c = Get-Content $f
+    $script:S3ACCESS = (($c | Where-Object { $_ -match '^S3_ACCESS=' }) -replace '^S3_ACCESS=','')
+    $script:S3SECRET = (($c | Where-Object { $_ -match '^S3_SECRET=' }) -replace '^S3_SECRET=','')
+  } else {
+    $script:S3ACCESS = 'GK' + (RandHex 12); $script:S3SECRET = RandHex 32
+    WriteNoBom $f ('S3_ACCESS=' + $script:S3ACCESS + [char]10 + 'S3_SECRET=' + $script:S3SECRET + [char]10)
+  }
+}
+function Inject-S3Key {
+  $sf = Join-Path $Here 'docker-stack.gen.yml'
+  $sc = [System.IO.File]::ReadAllText($sf)
+  $sc = [System.Text.RegularExpressions.Regex]::Replace($sc, 'S3_ACCESS_KEY:.*', 'S3_ACCESS_KEY: ' + $script:S3ACCESS)
+  WriteNoBom $sf $sc
+}`;
+
+const psSingle = `
+$NodeIp = '${singleHost.ip}'
+$MgrIp = $NodeIp
+
+Write-Host '=== 1) Docker Engine on ${singleHost.name} (' + $NodeIp + ') ==='
+Ssh $NodeIp ('mkdir -p ' + $REMOTE)
+Scp $NodeIp (Join-Path $Root 'infra/bootstrap') ($REMOTE + '/')
+Scp $NodeIp (Join-Path $Here 'host-${singleHost.name}.sh') ($REMOTE + '/host-${singleHost.name}.sh')
+Sudo $NodeIp ('cd ' + $REMOTE + ' && bash host-${singleHost.name}.sh')
+
+Write-Host '=== 2) Swarm single-node ==='
+Sudo $NodeIp ('docker swarm init --advertise-addr ' + $NodeIp + ' 2>/dev/null || true')
+
+Write-Host '=== 3) Secrets (generated; Postgres + S3 persisted on the control machine) ==='
+$pgf = Join-Path $Root '.pg-creds'
+if (Test-Path $pgf) { $PGPASS = (((Get-Content $pgf) | Where-Object { $_ -match '^PGPASS=' }) -replace '^PGPASS=','') }
+else { $PGPASS = Cfg 'POSTGRES_PASSWORD'; if ($PGPASS -eq '') { $PGPASS = RandHex 24 }; WriteNoBom $pgf ('PGPASS=' + $PGPASS + [char]10) }
+Load-S3
+$jwtA = Cfg 'JWT_ACCESS_SECRET'; if ($jwtA -eq '') { $jwtA = RandB64 48 }
+$jwtR = Cfg 'JWT_REFRESH_SECRET'; if ($jwtR -eq '') { $jwtR = RandB64 48 }
+$smtp = Cfg 'SMTP_PASSWORD'; if ($smtp -eq '') { $smtp = 'changeme-smtp' }
+MkSecret $NodeIp 'jwt_access_secret' $jwtA
+MkSecret $NodeIp 'jwt_refresh_secret' $jwtR
+MkSecret $NodeIp 'postgres_password' $PGPASS
+MkSecret $NodeIp 'database_url' ('postgresql://vakspm:' + $PGPASS + '@postgres:5432/${m.dbName}?schema=public')
+MkSecret $NodeIp 'mfa_encryption_key' (RandB64 32)
+MkSecret $NodeIp 'worker_api_token' (RandHex 32)
+MkSecret $NodeIp 'sso_oidc_secret' (RandHex 16)
+MkSecret $NodeIp 'smtp_password' $smtp
+MkSecret $NodeIp 'syslog_client_key' 'none'
+MkSecret $NodeIp 'garage_rpc_secret' (RandHex 32)
+MkSecret $NodeIp 'garage_admin_token' (RandHex 32)
+MkSecret $NodeIp 's3_secret_key' $S3SECRET
+Write-Host ('  S3 access key (stack + Garage): ' + $S3ACCESS)
+Write-Host '  Postgres password -> .pg-creds (keep it: psql, backups, restore)'
+
+${imageSource === 'build' ? `Write-Host '=== 4) Images: build on the node ==='
+Ssh $NodeIp ('mkdir -p ' + $REMOTE + '/src')
+foreach ($d in 'package.json','package-lock.json','tsconfig.base.json','packages','api','web','worker','mcp') { if (Test-Path (Join-Path $Root $d)) { Scp $NodeIp (Join-Path $Root $d) ($REMOTE + '/src/') } }
+Sudo $NodeIp ('cd ' + $REMOTE + '/src && for s in api web worker mcp; do docker build -t vaks-pm/$s:latest -f $s/Dockerfile . ; done')` : `Write-Host '=== 4) Images: pulled from the registry at deploy time (docker stack deploy) ==='`}
+
+Write-Host '=== 5) Stack deploy ==='
+${encPgVerify ? `if (-not (Test-Path (Join-Path $Root '${encPgCaFile}'))) { throw 'encryption.pgVerify=true but Postgres CA missing: ${encPgCaFile} (place the PEM before deploying)' }` : ''}
+Inject-S3Key
+Ssh $NodeIp ('mkdir -p ' + $REMOTE + '/infra && rm -rf ' + $REMOTE + '/infra/certs')
+Scp $NodeIp (Join-Path $Here 'docker-stack.gen.yml') ($REMOTE + '/docker-stack.gen.yml')
+Scp $NodeIp (Join-Path $Here 'traefik-dynamic.gen.yml') ($REMOTE + '/infra/traefik-dynamic.gen.yml')
+Scp $NodeIp (Join-Path $Here 'garage.gen.toml') ($REMOTE + '/infra/garage.gen.toml')
+if (Test-Path (Join-Path $Root 'infra/certs/wildcard.crt')) {
+  Scp $NodeIp (Join-Path $Root 'infra/certs') ($REMOTE + '/infra/certs')
+} else {
+  Write-Host '  no local wildcard cert - generating a self-signed one on the node'
+  Sudo $NodeIp ('mkdir -p ' + $REMOTE + '/infra/certs && openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj ' + (ShQ '/CN=*.${m.baseDomain || 'local'}') + ' -keyout ' + $REMOTE + '/infra/certs/wildcard.key -out ' + $REMOTE + '/infra/certs/wildcard.crt')
+}
+Sudo $NodeIp 'mkdir -p /srv/vaks/garage'
+${acme ? `Sudo $NodeIp 'mkdir -p /srv/vaks/acme'` : ''}
+Sudo $NodeIp ('cd ' + $REMOTE + ' && docker stack deploy -c docker-stack.gen.yml vaks-pm')
+
+Write-Host '=== 6) Init Garage (single node) ==='
+Sudo $NodeIp 'for i in $(seq 1 40); do docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | grep -q . && break; sleep 5; done'
+$gidRaw = SudoOut $NodeIp 'C=$(docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | head -1); docker exec $C /garage node id 2>/dev/null | grep -m1 -oE ''^[0-9a-f]{64}'''
+$GID = (($gidRaw -split '[\\r\\n]+') | Where-Object { $_ -match '^[0-9a-f]{64}$' } | Select-Object -First 1)
+if (-not $GID) { throw 'Garage node id not found (service not ready? re-run this script)' }
+$GG = 'C=$(docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | head -1); docker exec $C /garage'
+TrySudo $NodeIp ($GG + ' layout assign -z dc1 -c 100G ' + $GID) | Out-Null
+TrySudo $NodeIp ($GG + ' layout apply --version 1') | Out-Null
+TrySudo $NodeIp ($GG + ' key import --yes -n vakspm-app ' + $S3ACCESS + ' ' + $S3SECRET) | Out-Null
+TrySudo $NodeIp ($GG + ' key allow --create-bucket ' + $S3ACCESS) | Out-Null
+TrySudo $NodeIp 'docker service update --force vaks-pm_api' | Out-Null
+Write-Host '  Garage initialized; the API recreates its buckets on restart.'
+
+Sudo $NodeIp 'for i in $(seq 1 40); do docker ps -q -f name=vaks-pm_api | grep -q . && break; sleep 5; done'
+Write-Host '=== 7) Provision tenants ==='
+${provisionPs('$MgrIp')}
+
+Write-Host ''
+Write-Host '======================================================================'
+Write-Host '  SAVE THESE CREDENTIALS - shown only once'
+Write-Host '======================================================================'
+Write-Host '  PostgreSQL user     : vakspm'
+Write-Host ('  PostgreSQL password : ' + $PGPASS)
+Write-Host ('  S3 access key       : ' + $S3ACCESS)
+Write-Host ('  S3 secret key       : ' + $S3SECRET)
+Write-Host '  Also persisted (git-ignored): .pg-creds and .s3-creds at the repo root.'
+Write-Host '======================================================================'
+Write-Host '=== Done. Check: docker stack ps vaks-pm (on ${singleHost.name}) ==='
+try { Stop-Transcript | Out-Null } catch {}`;
+
+const psHa = `
+$MgrIp = '${firstManager.ip}'
+$LeaderIp = '${leaderDb.ip}'
+
+Write-Host '=== 0) Internal TLS: shared self-signed cert (generated on the leader, distributed) ==='
+$certTmp = Join-Path ([System.IO.Path]::GetTempPath()) ('vaks-cert-' + [System.Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $certTmp | Out-Null
+if ((TrySudo $LeaderIp 'test -f /etc/vaks/server.crt && test -f /etc/vaks/server.key') -eq 0) {
+  Write-Host '  cert already present on the leader - reusing'
+  WriteNoBom (Join-Path $certTmp 'server.crt') ((SudoOut $LeaderIp 'cat /etc/vaks/server.crt') + [char]10)
+  WriteNoBom (Join-Path $certTmp 'server.key') ((SudoOut $LeaderIp 'cat /etc/vaks/server.key') + [char]10)
+} else {
+  $san = 'IP:127.0.0.1,DNS:localhost'
+${dbHostsPs.map((h) => `  $san = 'IP:${h.ip},' + $san`).join('\n')}
+  Write-Host ('  generating on the leader (SAN=' + $san + ')')
+  Sudo $LeaderIp ('openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout /tmp/vaks-srv.key -out /tmp/vaks-srv.crt -subj ' + (ShQ '/CN=vaks-internal') + ' -addext ' + (ShQ ('subjectAltName=' + $san)) + ' -addext ' + (ShQ 'keyUsage=critical,digitalSignature,keyEncipherment') + ' -addext ' + (ShQ 'extendedKeyUsage=serverAuth,clientAuth'))
+  WriteNoBom (Join-Path $certTmp 'server.crt') ((SudoOut $LeaderIp 'cat /tmp/vaks-srv.crt') + [char]10)
+  WriteNoBom (Join-Path $certTmp 'server.key') ((SudoOut $LeaderIp 'cat /tmp/vaks-srv.key') + [char]10)
+  Sudo $LeaderIp 'rm -f /tmp/vaks-srv.crt /tmp/vaks-srv.key'
+}
+if ((-not (Test-Path (Join-Path $certTmp 'server.crt'))) -or ((Get-Item (Join-Path $certTmp 'server.crt')).Length -eq 0)) { throw 'internal cert generation/pull failed' }
+
+Write-Host '=== 1) Database tier (etcd+patroni+haproxy) on the db hosts ==='
+$replUser = Cfg 'PATRONI_REPLICATION_USER' 'replicator'
+$replPass = Req 'PATRONI_REPLICATION_PASSWORD'
+$superPass = Req 'PATRONI_SUPERUSER_PASSWORD'
+${dbHostsPs.map((h) => `Write-Host '--- distribute ${h.name} (${h.ip}) ---'
+Ssh '${h.ip}' ('mkdir -p ' + $REMOTE)
+Scp '${h.ip}' (Join-Path $Root 'infra/bootstrap') ($REMOTE + '/')
+Scp '${h.ip}' (Join-Path $Root 'infra/patroni.yml') ($REMOTE + '/bootstrap/patroni.yml')
+Scp '${h.ip}' (Join-Path $Root 'infra/haproxy.cfg') ($REMOTE + '/bootstrap/haproxy.cfg')
+Ssh '${h.ip}' ('mkdir -p ' + $REMOTE + '/bootstrap/certs')
+Scp '${h.ip}' (Join-Path $certTmp 'server.crt') ($REMOTE + '/bootstrap/certs/server.crt')
+Scp '${h.ip}' (Join-Path $certTmp 'server.key') ($REMOTE + '/bootstrap/certs/server.key')
+Scp '${h.ip}' (Join-Path $Here 'host-${h.name}.sh') ($REMOTE + '/host-${h.name}.sh')${encDiskLuks ? `\nSudo '${h.ip}' ('cd ' + $REMOTE + '/bootstrap && bash 15-tang.sh')` : ''}`).join('\n')}
+${dbHostsPs.map((h) => `Write-Host '--- bootstrap ${h.name} (${h.ip}) ---'
+Sudo '${h.ip}' ('cd ' + $REMOTE + ' && REPL_USER=' + (ShQ $replUser) + ' REPL_PASSWORD=' + (ShQ $replPass) + ' SUPERUSER_PASSWORD=' + (ShQ $superPass) + ' bash host-${h.name}.sh')`).join('\n')}
+Remove-Item -Recurse -Force $certTmp -ErrorAction SilentlyContinue
+${isPrimaryZone ? `Write-Host '=== bootstrap role + database (leader elects; replicas skip themselves) ==='
+$pgUser = Req 'POSTGRES_USER'; $pgPass = Req 'POSTGRES_PASSWORD'; $pgDb = Req 'POSTGRES_DB'
+${dbHostsPs.map((h) => `Sudo '${h.ip}' ('cd ' + $REMOTE + '/bootstrap && POSTGRES_USER=' + (ShQ $pgUser) + ' POSTGRES_PASSWORD=' + (ShQ $pgPass) + ' POSTGRES_DB=' + (ShQ $pgDb) + ' bash 25-bootstrap-db.sh')`).join('\n')}` : `Write-Host '=== STANDBY zone: no bootstrap-db (Patroni clones the primary ${standbyPrimaryHost || ''}) ==='`}
+
+Write-Host '=== 2) Swarm: init manager + join ==='
+Sudo $MgrIp ('docker swarm init --advertise-addr ' + $MgrIp + ' 2>/dev/null || true')
+$tokW = (((SudoOut $MgrIp 'docker swarm join-token -q worker') -split '[\\r\\n]+') | Where-Object { $_ -ne '' } | Select-Object -Last 1)
+$tokM = (((SudoOut $MgrIp 'docker swarm join-token -q manager') -split '[\\r\\n]+') | Where-Object { $_ -ne '' } | Select-Object -Last 1)
+${m.hosts.filter((h) => h.ip !== firstManager.ip).map((h) => role(h, 'manager')
+    ? `Sudo '${h.ip}' ('docker swarm join --token ' + $tokM + ' ' + $MgrIp + ':2377 2>/dev/null || true')`
+    : `Sudo '${h.ip}' ('docker swarm join --token ' + $tokW + ' ' + $MgrIp + ':2377 2>/dev/null || true')`).join('\n')}
+
+Write-Host '=== node labels ==='
+Scp $MgrIp (Join-Path $Here 'labels.sh') ($REMOTE + '/labels.sh')
+Sudo $MgrIp ('cd ' + $REMOTE + ' && bash labels.sh')
+
+Write-Host '=== 3) Secrets ==='
+Load-S3
+$pgUser = Req 'POSTGRES_USER'; $pgPass = Req 'POSTGRES_PASSWORD'; $pgDb = Req 'POSTGRES_DB'
+$smtp = Cfg 'SMTP_PASSWORD'; if ($smtp -eq '') { $smtp = 'changeme-smtp' }
+MkSecret $MgrIp 'jwt_access_secret' (Req 'JWT_ACCESS_SECRET')
+MkSecret $MgrIp 'jwt_refresh_secret' (Req 'JWT_REFRESH_SECRET')
+MkSecret $MgrIp 'database_url' ('postgresql://' + $pgUser + ':' + $pgPass + '@' + $MgrIp + ':5000/' + $pgDb + '?schema=public')
+MkSecret $MgrIp 'mfa_encryption_key' (RandB64 32)
+MkSecret $MgrIp 'worker_api_token' (RandHex 32)
+MkSecret $MgrIp 'sso_oidc_secret' (RandHex 16)
+MkSecret $MgrIp 'smtp_password' $smtp
+MkSecret $MgrIp 'syslog_client_key' 'none'
+MkSecret $MgrIp 'garage_rpc_secret' (RandHex 32)
+MkSecret $MgrIp 'garage_admin_token' (RandHex 32)
+MkSecret $MgrIp 's3_secret_key' $S3SECRET
+Write-Host ('  S3 access key (stack + Garage): ' + $S3ACCESS)
+
+${imageSource === 'build' ? `Write-Host '=== 4) Images: build on the manager + distribute ==='
+Ssh $MgrIp ('mkdir -p ' + $REMOTE + '/src')
+foreach ($d in 'package.json','package-lock.json','tsconfig.base.json','packages','api','web','worker','mcp') { if (Test-Path (Join-Path $Root $d)) { Scp $MgrIp (Join-Path $Root $d) ($REMOTE + '/src/') } }
+Sudo $MgrIp ('cd ' + $REMOTE + '/src && for s in api web worker mcp; do docker build -t vaks-pm/$s:latest -f $s/Dockerfile . ; done')
+Sudo $MgrIp ('docker save vaks-pm/api:latest vaks-pm/web:latest vaks-pm/worker:latest vaks-pm/mcp:latest -o /tmp/vakspm-imgs.tar && chown ' + $VmUser + ':' + $VmUser + ' /tmp/vakspm-imgs.tar')
+$tar = New-TemporaryFile
+& scp.exe @SshOpts ($VmUser + '@' + $MgrIp + ':/tmp/vakspm-imgs.tar') $tar.FullName
+if ($LASTEXITCODE -ne 0) { throw 'downloading the image tar from the manager failed' }
+${m.hosts.filter((h) => h.ip !== firstManager.ip).map((h) => `Scp '${h.ip}' $tar.FullName '/tmp/vakspm-imgs.tar'
+Sudo '${h.ip}' 'docker load -i /tmp/vakspm-imgs.tar'`).join('\n')}
+Remove-Item $tar.FullName -ErrorAction SilentlyContinue` : `Write-Host '=== 4) Images: each node pulls ${imagePrefix}-{api,web,worker,mcp}:${imageTag} from the registry at deploy time ==='`}
+
+Write-Host '=== 5) Stack deploy ==='
+${encPgVerify ? `if (-not (Test-Path (Join-Path $Root '${encPgCaFile}'))) { throw 'encryption.pgVerify=true but Postgres CA missing: ${encPgCaFile} (place the PEM before deploying)' }` : ''}
+Inject-S3Key
+Ssh $MgrIp ('mkdir -p ' + $REMOTE + '/infra && rm -rf ' + $REMOTE + '/infra/certs')
+Scp $MgrIp (Join-Path $Here 'docker-stack.gen.yml') ($REMOTE + '/docker-stack.gen.yml')
+Scp $MgrIp (Join-Path $Here 'traefik-dynamic.gen.yml') ($REMOTE + '/infra/traefik-dynamic.gen.yml')
+Scp $MgrIp (Join-Path $Here 'garage.gen.toml') ($REMOTE + '/infra/garage.gen.toml')
+${garageMulti ? `Scp $MgrIp (Join-Path $Root 'infra/garage-reconnect.sh') ($REMOTE + '/infra/garage-reconnect.sh')` : ''}
+if (Test-Path (Join-Path $Root 'infra/certs/wildcard.crt')) {
+  Scp $MgrIp (Join-Path $Root 'infra/certs') ($REMOTE + '/infra/certs')
+} else {
+  Write-Host '  no local wildcard cert - generating a self-signed one on the manager'
+  Sudo $MgrIp ('mkdir -p ' + $REMOTE + '/infra/certs && openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj ' + (ShQ '/CN=*.${m.baseDomain || 'local'}') + ' -keyout ' + $REMOTE + '/infra/certs/wildcard.key -out ' + $REMOTE + '/infra/certs/wildcard.crt')
+}
+${garageHostsPs.map((h) => `Sudo '${h.ip}' 'mkdir -p /srv/vaks/garage'`).join('\n')}
+${acme ? `Sudo '${traefikNode.ip}' 'mkdir -p /srv/vaks/acme'` : ''}
+Sudo $MgrIp ('cd ' + $REMOTE + ' && docker stack deploy -c docker-stack.gen.yml vaks-pm')
+
+Write-Host '=== 6) Init Garage (S3 cluster) ==='
+${garageHostsPs.map((h) => `Sudo '${h.ip}' 'for i in $(seq 1 40); do docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | grep -q . && break; sleep 5; done'`).join('\n')}
+$gnodes = @()
+${garageHostsPs.map((h) => `$l = (((SudoOut '${h.ip}' 'C=$(docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | head -1); I=$(docker exec $C /garage node id 2>/dev/null | grep -m1 -oE ''^[0-9a-f]{64}''); A=$(docker exec $C /garage status 2>/dev/null | grep -oE ''[0-9]+\\.[0-9.]+:3901'' | head -1); echo $I@$A') -split '[\\r\\n]+') | Where-Object { $_ -match '^[0-9a-f]{64}@' } | Select-Object -First 1)
+if ($l) { $gnodes += $l }`).join('\n')}
+Write-Host ('  garage nodes: ' + ($gnodes -join ' '))
+$GG = 'C=$(docker ps -q -f label=com.docker.swarm.service.name=vaks-pm_garage | head -1); docker exec $C /garage'
+foreach ($n in $gnodes) { TrySudo $MgrIp ($GG + ' node connect ' + $n) | Out-Null }
+Start-Sleep -Seconds 3
+$zi = 1
+foreach ($n in $gnodes) { $id = ($n -split '@')[0]; TrySudo $MgrIp ($GG + ' layout assign -z dc' + $zi + ' -c 100G ' + $id) | Out-Null; $zi = $zi + 1 }
+TrySudo $MgrIp ($GG + ' layout apply --version 1') | Out-Null
+TrySudo $MgrIp ($GG + ' key import --yes -n vakspm-app ' + $S3ACCESS + ' ' + $S3SECRET) | Out-Null
+TrySudo $MgrIp ($GG + ' key allow --create-bucket ' + $S3ACCESS) | Out-Null
+TrySudo $MgrIp 'docker service update --force vaks-pm_api' | Out-Null
+Write-Host '  Garage initialized; the API recreates its buckets on restart.'
+
+Sudo $MgrIp 'for i in $(seq 1 40); do docker ps -q -f name=vaks-pm_api | grep -q . && break; sleep 5; done'
+Write-Host '=== 7) Provision tenants ==='
+${provisionPs('$MgrIp')}
+
+Write-Host ''
+Write-Host '======================================================================'
+Write-Host '  SAVE THESE CREDENTIALS - shown only once'
+Write-Host '======================================================================'
+Write-Host ('  S3 access key : ' + $S3ACCESS)
+Write-Host ('  S3 secret key : ' + $S3SECRET)
+Write-Host '     (persisted git-ignored in .s3-creds - back it up off this machine)'
+Write-Host '  DB / JWT secrets come from .env.local (source of truth) - keep it safe.'
+Write-Host '======================================================================'
+Write-Host '=== Done. Check: docker stack ps vaks-pm ==='
+try { Stop-Transcript | Out-Null } catch {}`;
+
+const deployOrchPs = psPreamble + '\n' + (m.mode === 'single' ? psSingle : psHa) + '\n';
 
 // ---------- multidc runbook (dispatcher) ----------
 function multidcRunbook(mf, zones, primary) {
@@ -1418,6 +1735,7 @@ out('garage.gen.toml', garageToml);
 out('labels.sh', labelLines.join('\n') + '\n', true);
 out('secrets.md', secretsMd);
 out('deploy-ssh.sh', deployOrch, true);
+out('deploy.ps1', deployOrchPs); // jumeau natif Windows (sans bash) — additif
 if (garageMulti) out('garage-cluster.md', garageClusterMd);
 for (const h of m.hosts) out(`host-${h.name}.sh`, hostScript(h) + '\n', true);
 // En single, deploy-ssh.sh SCP infra/bootstrap/ comme en HA, mais on embarque
@@ -1429,5 +1747,5 @@ if (m.mode === 'single') {
   out('bootstrap/00-common.sh', common, true);
 }
 
-console.log(`✓ generated in ${outDir}/: docker-stack.gen.yml, traefik-dynamic.gen.yml, garage.gen.toml, labels.sh, secrets.md, deploy-ssh.sh${garageMulti ? ', garage-cluster.md' : ''}, ${m.hosts.length} host-*.sh`);
+console.log(`✓ generated in ${outDir}/: docker-stack.gen.yml, traefik-dynamic.gen.yml, garage.gen.toml, labels.sh, secrets.md, deploy-ssh.sh, deploy.ps1${garageMulti ? ', garage-cluster.md' : ''}, ${m.hosts.length} host-*.sh`);
 if (warnings.length) console.log(`  (${warnings.length} warning(s) above)`);

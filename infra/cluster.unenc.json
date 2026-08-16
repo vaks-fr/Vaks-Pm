@@ -1,0 +1,42 @@
+{
+  "mode": "ha",
+  "baseDomain": "vaks-pm.com",
+  "dbName": "vakspm",
+  "deploymentMode": "pooled",
+  "sshKey": "${SSH_KEY}",
+  "hosts": [
+    {
+      "name": "host1",
+      "ip": "192.168.1.51",
+      "sshUser": "${VM_USER}",
+      "roles": ["manager", "db", "etcd", "cp", "app"]
+    },
+    {
+      "name": "host2",
+      "ip": "192.168.1.50",
+      "sshUser": "${VM_USER}",
+      "roles": ["manager", "db", "etcd", "cp", "app"]
+    },
+    {
+      "name": "host3",
+      "ip": "192.168.1.53",
+      "sshUser": "${VM_USER}",
+      "roles": ["worker", "db", "etcd", "app"]
+    }
+  ],
+  "controlPlane": { "vip": null },
+  "infraPlacement": {
+    "redis": "host1",
+    "garage": ["host1", "host2", "host3"]
+  },
+  "tenants": [
+    { "slug": "demo", "domain": "demo.vaks-pm.com", "profile": "pooled", "seed": "demo" },
+    { "slug": "globex", "domain": "globex.vaks-pm.com", "profile": "pooled", "seed": "demo" }
+  ],
+  "encryption": {
+    "diskLuks": false,
+    "overlay": false,
+    "internalTls": false,
+    "pgVerify": false
+  }
+}

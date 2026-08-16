@@ -318,7 +318,7 @@
     "duplicateTitle": "Dupliquer « {{name}} »",
     "newDraftTitle": "Nouveau brouillon de projet",
     "introBillable": "Un projet facturable prépare une charte PMBOK, signée par le client, puis s'active.",
-    "introNonBillable": "Un projet non facturable concerne un travail interne / organisationnel. Il saute la signature de charte et passe directement de brouillon à actif.",
+    "introNonBillable": "Un projet non facturable concerne un travail interne / organisationnel. Il saute la signature de charte et est créé en brouillon, activable quand vous le souhaitez.",
     "projectType": "Type de projet",
     "typeBillable": "Facturable",
     "typeBillableDesc": "Charte signée par le client requise",
@@ -347,7 +347,8 @@
     "copying": "Copie…",
     "creating": "Création…",
     "duplicateCta": "Dupliquer projet & tâches",
-    "createCta": "Créer le brouillon & ouvrir la charte"
+    "createCta": "Créer le brouillon & ouvrir la charte",
+    "createCtaNonBillable": "Créer le projet"
   },
   "expenses": {
     "category": {

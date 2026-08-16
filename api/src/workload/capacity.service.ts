@@ -109,6 +109,10 @@ export class CapacityService {
     start: Date,
     horizon: Date,
     excludeAllocationIds?: string[],
+    // Défauts org (schedule + pays) pré-chargés par l'appelant pour éviter de les
+    // refetcher à chaque user dans une boucle (invariants sur l'org). Optionnel :
+    // absent = lecture interne (comportement historique).
+    orgDefaults?: { defaultSchedule: EffectiveSchedule; defaultCountry: string },
   ): Promise<UserCapacityCtx> {
     const user = await this.prisma.user.findFirst({
       where: { id: userId, organizationId: orgId },
@@ -139,8 +143,8 @@ export class CapacityService {
           where: { userId, organizationId: orgId, endDate: { gte: start } },
           select: { startDate: true, endDate: true },
         }),
-        this.holidays.getDefaultCountry(orgId),
-        this.buildDefaultSchedule(orgId),
+        orgDefaults ? Promise.resolve(orgDefaults.defaultCountry) : this.holidays.getDefaultCountry(orgId),
+        orgDefaults ? Promise.resolve(orgDefaults.defaultSchedule) : this.buildDefaultSchedule(orgId),
         this.prisma.allocation.findMany({
           where: {
             userId,
@@ -351,23 +355,40 @@ export class CapacityService {
       })).map((u) => [u.id, u.name]),
     );
 
-    let conflictDays = 0;
-    const affected = new Set<string>();
-    const worst: Array<{ userId: string; name: string; date: string; allocatedHours: number; capacityHours: number; projectCount: number; over: number }> = [];
-    let availableHours = 0;
-    let allocatedHours = 0;
-    const perUser: Array<{ userId: string; name: string; availableHours: number; allocatedHours: number; headroomHours: number }> = [];
-
-    for (const userId of userIds) {
-      const ctx = await this.loadUserCapacityCtx(orgId, userId, from, to);
-      // Allocations avec projectId (le ctx n'expose que taskId) pour compter
-      // les projets distincts d'un même jour.
-      const allocs = await this.prisma.allocation.findMany({
-        where: { userId, organizationId: orgId, startDate: { lte: to }, endDate: { gte: from } },
-        select: { projectId: true, startDate: true, endDate: true, hoursPerDay: true },
-      });
+    // Calcul par user (indépendant) — extrait pour être exécuté en concurrence
+    // bornée. Retourne un résultat LOCAL (aucune mutation partagée) → agrégat
+    // strictement identique quel que soit l'ordonnancement des I/O.
+    type PerUserResult = {
+      userId: string;
+      uAvail: number;
+      uAlloc: number;
+      conflictDays: number;
+      hadConflict: boolean;
+      worst: Array<{ userId: string; name: string; date: string; allocatedHours: number; capacityHours: number; projectCount: number; over: number }>;
+    };
+    // Défauts org (schedule + pays) chargés UNE fois — invariants sur la boucle,
+    // évite 3 requêtes settings/holidays par user (cf. loadUserCapacityCtx).
+    const [defSchedule, defCountry] = await Promise.all([
+      this.buildDefaultSchedule(orgId),
+      this.holidays.getDefaultCountry(orgId),
+    ]);
+    const orgDefaults = { defaultSchedule: defSchedule, defaultCountry: defCountry };
+    const computeForUser = async (userId: string): Promise<PerUserResult> => {
+      const [ctx, allocs] = await Promise.all([
+        this.loadUserCapacityCtx(orgId, userId, from, to, undefined, orgDefaults),
+        // Allocations avec projectId (le ctx n'expose que taskId) pour compter
+        // les projets distincts d'un même jour.
+        this.prisma.allocation.findMany({
+          where: { userId, organizationId: orgId, startDate: { lte: to }, endDate: { gte: from } },
+          select: { projectId: true, startDate: true, endDate: true, hoursPerDay: true },
+        }),
+      ]);
+      const name = names.get(userId) ?? '—';
       let uAvail = 0;
       let uAlloc = 0;
+      let cDays = 0;
+      let hadConflict = false;
+      const localWorst: PerUserResult['worst'] = [];
       for (let cur = fromMs; cur <= toMs; cur += MS_PER_DAY) {
         const d = new Date(cur);
         const iso = dateIso(d);
@@ -386,14 +407,40 @@ export class CapacityService {
         uAlloc += allocated;
         const over = allocated - cap;
         if (over > 0.001 && projs.size >= 2) {
-          conflictDays++;
-          affected.add(userId);
-          worst.push({ userId, name: names.get(userId) ?? '—', date: iso, allocatedHours: r1(allocated), capacityHours: r1(cap), projectCount: projs.size, over });
+          cDays++;
+          hadConflict = true;
+          localWorst.push({ userId, name, date: iso, allocatedHours: r1(allocated), capacityHours: r1(cap), projectCount: projs.size, over });
         }
       }
-      availableHours += uAvail;
-      allocatedHours += uAlloc;
-      perUser.push({ userId, name: names.get(userId) ?? '—', availableHours: r1(uAvail), allocatedHours: r1(uAlloc), headroomHours: r1(uAvail - uAlloc) });
+      return { userId, uAvail, uAlloc, conflictDays: cDays, hadConflict, worst: localWorst };
+    };
+
+    // Exécution en tranches concurrentes bornées — supprime la sérialisation du
+    // N+1 (~9 requêtes/user) tout en évitant de saturer le pool Prisma sur un
+    // gros org. Les résultats sont replacés dans l'ORDRE d'entrée.
+    const CONCURRENCY = 6;
+    const results: PerUserResult[] = new Array(userIds.length);
+    for (let i = 0; i < userIds.length; i += CONCURRENCY) {
+      const slice = userIds.slice(i, i + CONCURRENCY);
+      const settled = await Promise.all(slice.map((uid) => computeForUser(uid)));
+      for (let j = 0; j < settled.length; j++) results[i + j] = settled[j];
+    }
+
+    // Agrégation dans l'ordre d'entrée → `perUser` et `worst` identiques au
+    // parcours séquentiel d'origine (day-ascending × users-ascending).
+    let conflictDays = 0;
+    const affected = new Set<string>();
+    const worst: PerUserResult['worst'] = [];
+    let availableHours = 0;
+    let allocatedHours = 0;
+    const perUser: Array<{ userId: string; name: string; availableHours: number; allocatedHours: number; headroomHours: number }> = [];
+    for (const res of results) {
+      conflictDays += res.conflictDays;
+      if (res.hadConflict) affected.add(res.userId);
+      for (const w of res.worst) worst.push(w);
+      availableHours += res.uAvail;
+      allocatedHours += res.uAlloc;
+      perUser.push({ userId: res.userId, name: names.get(res.userId) ?? '—', availableHours: r1(res.uAvail), allocatedHours: r1(res.uAlloc), headroomHours: r1(res.uAvail - res.uAlloc) });
     }
 
     worst.sort((a, b) => b.over - a.over);

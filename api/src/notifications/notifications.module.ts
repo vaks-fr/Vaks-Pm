@@ -6,6 +6,7 @@ import { BillingExportAdminController } from './billing-export-admin.controller'
 import { NotificationsController } from './notifications.controller';
 import { NotificationsInternalController } from './notifications-internal.controller';
 import { MeNotificationPrefsController } from './me-notification-prefs.controller';
+import { MeNotificationsController } from './me-notifications.controller';
 import { FinanceModule } from '../finance/finance.module';
 
 @Global()
@@ -16,6 +17,7 @@ import { FinanceModule } from '../finance/finance.module';
     NotificationsController,
     NotificationsInternalController,
     MeNotificationPrefsController,
+    MeNotificationsController,
     BillingExportAdminController,
   ],
   exports: [NotificationsService],

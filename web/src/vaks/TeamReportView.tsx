@@ -3,12 +3,12 @@
    matrice d'allocation multi-projet, répartition des statuts,
    tableau par membre. Filtrable par semaine / mois.
    ============================================================ */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from './primitives';
 import { api } from '../api/client';
 import type { TeamReportDto, TeamKpiDto } from '@vaks-pm/shared';
-import { StackedColumns, TASK_STATUS_META, STATUS_ORDER, foldedStatusCount } from './report-charts';
+import { ShareBars, LoadBullets, StatusRings, TASK_STATUS_META, STATUS_ORDER, foldedStatusCount } from './report-charts';
 import { HBars, palette } from './finance-charts';
 import './finances.css';
 
@@ -51,6 +51,8 @@ export function TeamReportView() {
   const [data, setData] = useState<TeamReportDto | null>(null);
   const [kpi, setKpi] = useState<TeamKpiDto | null>(null);
   const [utilUser, setUtilUser] = useState<string>('all');
+  const [loadQ, setLoadQ] = useState('');
+  const [statusQ, setStatusQ] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -91,15 +93,60 @@ export function TeamReportView() {
     return map;
   }, [data]);
 
-  const allocCols = (data?.members ?? []).map((m) => ({
+  // Toutes les dérivations sont mémoïsées pour que la frappe dans l'un des DEUX
+  // champs de recherche (loadQ / statusQ) ne recalcule pas l'ensemble : seule la
+  // liste filtrée correspondante est refaite. `statusTot` est notamment en
+  // O(membres×statuts²) — le sortir du chemin de frappe est le vrai gain.
+  const allocCols = useMemo(() => (data?.members ?? []).map((m) => ({
     label: m.name,
     reference: m.capacityHours,
     segments: m.byProject.map((p) => ({ key: p.projectKey, label: p.projectName, color: projColor.get(p.projectKey) ?? 'var(--accent)', value: p.hours })),
-  }));
-  const statusCols = (data?.members ?? []).map((m) => ({
+  })), [data, projColor]);
+  // Stats de charge (refonte bullet trié) : dérivées des mêmes données.
+  const { loadStats, loadHas, loadAvg, loadOverSum, loadOverCount } = useMemo(() => {
+    const loadStats = allocCols.map((c) => {
+      const total = c.segments.reduce((s, x) => s + x.value, 0);
+      const ref = c.reference && c.reference > 0 ? c.reference : 0;
+      return { pct: ref > 0 ? (total / ref) * 100 : 0, over: ref > 0 ? Math.max(0, total - ref) : 0, total };
+    });
+    return {
+      loadStats,
+      loadHas: loadStats.some((r) => r.total > 0),
+      loadAvg: loadStats.length ? Math.round(loadStats.reduce((s, r) => s + r.pct, 0) / loadStats.length) : 0,
+      loadOverSum: Math.round(loadStats.reduce((s, r) => s + r.over, 0)),
+      loadOverCount: loadStats.filter((r) => r.pct > 100).length,
+    };
+  }, [allocCols]);
+  // Recherche par nom (affichée seulement quand l'équipe est nombreuse). Les
+  // stats restent calculées sur TOUTE l'équipe ; seul l'affichage est filtré.
+  const loadQn = loadQ.trim().toLowerCase();
+  const loadShown = useMemo(
+    () => (loadQn ? allocCols.filter((c) => c.label.toLowerCase().includes(loadQn)) : allocCols),
+    [allocCols, loadQn],
+  );
+  const statusCols = useMemo(() => (data?.members ?? []).map((m) => ({
     label: m.name,
     segments: STATUS_ORDER.map((s) => ({ key: s, label: t(TASK_STATUS_META[s].labelKey), color: TASK_STATUS_META[s].color, value: foldedStatusCount(m.statusCounts, s) })),
-  }));
+  })), [data, t]);
+  // Anneaux small-multiples (refonte KPI) : recherche/filtrage + totaux par statut.
+  const statusQn = statusQ.trim().toLowerCase();
+  const statusShown = useMemo(
+    () => (statusQn ? statusCols.filter((c) => c.label.toLowerCase().includes(statusQn)) : statusCols),
+    [statusCols, statusQn],
+  );
+  const { statusTot, statusGrand, statusHas, statusDonePct } = useMemo(() => {
+    const statusTot = STATUS_ORDER.reduce<Record<string, number>>((acc, s) => {
+      acc[s] = statusCols.reduce((sum, c) => sum + (c.segments.find((x) => x.key === s)?.value ?? 0), 0);
+      return acc;
+    }, {});
+    const statusGrand = Object.values(statusTot).reduce((a, b) => a + b, 0);
+    return {
+      statusTot,
+      statusGrand,
+      statusHas: statusGrand > 0,
+      statusDonePct: statusGrand > 0 ? Math.round(((statusTot.DONE ?? 0) / statusGrand) * 100) : 0,
+    };
+  }, [statusCols]);
 
   return (
     <div className="fin-wrap">
@@ -134,40 +181,122 @@ export function TeamReportView() {
 
       {data && (
         <>
-          {/* KPI totals */}
+          {/* KPI totals — cartes de métriques : mini-viz + états calmes (refonte) */}
           <div className="fin-kpis">
-            <div className="fin-kpi fin-kpi-budget">
+            {/* Membres : carte NEUTRE (plus de fond coral « alarmant »). */}
+            <div className="fin-kpi">
               <div className="fin-kpi-cap"><Icon name="users" size={14} /> {t('reports:team.members')}</div>
-              <div className="fin-kpi-val mono">{data.totals.memberCount}</div>
+              <div className={'fin-kpi-val mono' + (data.totals.memberCount === 0 ? ' fin-kpi-dim' : '')}>{data.totals.memberCount || '—'}</div>
             </div>
-            <div className="fin-kpi">
-              <div className="fin-kpi-cap"><Icon name="gauge" size={14} /> {t('reports:team.avgUtilization')}</div>
-              <div className="fin-kpi-val mono">{data.totals.avgUtilizationPct == null ? '—' : data.totals.avgUtilizationPct + '%'}</div>
-              <div className="fin-kpi-sub">{t('reports:team.loggedOverCapacity')}</div>
-            </div>
-            <div className="fin-kpi">
-              <div className="fin-kpi-cap"><Icon name="hourglass" size={14} /> {t('reports:team.loggedHours')}</div>
-              <div className="fin-kpi-val mono">{data.totals.loggedHours}h</div>
-              <div className="fin-kpi-sub">{t('reports:team.capacityHours', { hours: data.totals.capacityHours })}</div>
-            </div>
-            <div className="fin-kpi">
-              <div className="fin-kpi-cap"><Icon name="board" size={14} /> {t('reports:team.allocated')}</div>
-              <div className="fin-kpi-val mono">{data.totals.allocatedHours}h</div>
-              <div className="fin-kpi-sub">{t('reports:team.overPeriod')}</div>
-            </div>
+            {/* Utilisation moyenne : jauge annulaire. */}
+            {(() => {
+              const pct = data.totals.avgUtilizationPct;
+              const R = 16, TH = 5, sz = (R + TH) * 2, C = 2 * Math.PI * R;
+              const frac = pct == null ? 0 : Math.min(1, Math.max(0, pct / 100));
+              const gcol = pct == null ? 'var(--surface-3)' : pct > 100 ? 'var(--c-over)' : pct >= 95 ? 'var(--c-warn)' : 'var(--c-ok)';
+              return (
+                <div className="fin-kpi">
+                  <div className="fin-kpi-cap"><Icon name="gauge" size={14} /> {t('reports:team.avgUtilization')}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <div className={'fin-kpi-val mono' + (pct == null ? ' fin-kpi-dim' : '')}>{pct == null ? '—' : pct + '%'}</div>
+                    <svg width={sz} height={sz} viewBox={`0 0 ${sz} ${sz}`} style={{ flexShrink: 0 }}>
+                      <circle cx={sz / 2} cy={sz / 2} r={R} fill="none" stroke="var(--surface-3)" strokeWidth={TH} />
+                      {pct != null && <circle cx={sz / 2} cy={sz / 2} r={R} fill="none" stroke={gcol} strokeWidth={TH} strokeLinecap="round" strokeDasharray={`${frac * C} ${C}`} transform={`rotate(-90 ${sz / 2} ${sz / 2})`} />}
+                    </svg>
+                  </div>
+                  <div className="fin-kpi-sub">{t('reports:team.loggedOverCapacity')}</div>
+                </div>
+              );
+            })()}
+            {/* Heures loguées : barre loguées / capacité. */}
+            {(() => {
+              const cap = data.totals.capacityHours || 0;
+              const logged = data.totals.loggedHours || 0;
+              return (
+                <div className="fin-kpi">
+                  <div className="fin-kpi-cap"><Icon name="hourglass" size={14} /> {t('reports:team.loggedHours')}</div>
+                  <div className={'fin-kpi-val mono' + (logged === 0 ? ' fin-kpi-dim' : '')}>{data.totals.loggedHours}h</div>
+                  <div className="fin-kpi-bar" style={{ marginTop: 7 }}><div className="fin-kpi-bar-fill" style={{ width: `${cap > 0 ? Math.min(100, (logged / cap) * 100) : 0}%`, background: 'var(--c-ok)' }} /></div>
+                  <div className="fin-kpi-sub">{t('reports:team.capacityHours', { hours: data.totals.capacityHours })}</div>
+                </div>
+              );
+            })()}
+            {/* Alloué : barre alloué / capacité (coral en dépassement). */}
+            {(() => {
+              const cap = data.totals.capacityHours || 0;
+              const alloc = data.totals.allocatedHours || 0;
+              const over = alloc > cap && cap > 0;
+              return (
+                <div className="fin-kpi">
+                  <div className="fin-kpi-cap"><Icon name="board" size={14} /> {t('reports:team.allocated')}</div>
+                  <div className={'fin-kpi-val mono' + (alloc === 0 ? ' fin-kpi-dim' : '')}>{data.totals.allocatedHours}h</div>
+                  <div className="fin-kpi-bar" style={{ marginTop: 7 }}><div className="fin-kpi-bar-fill" style={{ width: `${cap > 0 ? Math.min(100, (alloc / cap) * 100) : 0}%`, background: over ? 'var(--c-over)' : 'var(--c-free)' }} /></div>
+                  <div className="fin-kpi-sub">{t('reports:team.overPeriod')}</div>
+                </div>
+              );
+            })()}
           </div>
 
-          {/* Matrice d'allocation multi-projet */}
+          {/* Charge multi-projet — bullet horizontal trié (refonte KPI) */}
           <div className="fin-card">
             <div className="fin-card-head">
               <div>
                 <div className="fin-card-title">{t('reports:team.multiprojectLoad')}</div>
                 <div className="fin-card-sub">{t('reports:team.multiprojectSub')}</div>
               </div>
+              {loadOverCount > 0 && (
+                <span className="chart-pill-over">{t('reports:team.loadOverbooked', { count: loadOverCount })}</span>
+              )}
             </div>
             <div className="fin-chart-body">
-              {allocCols.length === 0 ? <div style={{ color: 'var(--text-3)' }}>{t('reports:team.noMember')}</div> : (
-                <StackedColumns columns={allocCols} fmt={(n) => `${Math.round(n)}h`} mode="percent" refLabelPct={100} />
+              {!loadHas ? (
+                <div className="chart-empty">
+                  <div className="chart-empty-ico">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18" /><rect x="7" y="12" width="3" height="6" rx="1" /><rect x="13" y="8" width="3" height="10" rx="1" /></svg>
+                  </div>
+                  <div className="chart-empty-title">{t('reports:team.loadEmptyTitle')}</div>
+                  <div className="chart-empty-sub">{t('reports:team.loadEmptySub')}</div>
+                  <div className="chart-ghost">
+                    {[0, 1, 2, 3].map((i) => (
+                      <div className="chart-ghost-row" key={i}><span className="chart-ghost-name" /><span className="chart-ghost-track" /></div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {allocCols.length > 8 && (
+                    <div className="lb-search-row">
+                      {loadQn && (
+                        <span className="lb-search-count">{t('reports:team.loadShowing', { shown: loadShown.length, total: allocCols.length })}</span>
+                      )}
+                      <input
+                        className="fin-search"
+                        style={{ maxWidth: 220 }}
+                        value={loadQ}
+                        onChange={(e) => setLoadQ(e.target.value)}
+                        placeholder={t('reports:team.loadSearchPlaceholder')}
+                      />
+                    </div>
+                  )}
+                  {loadShown.length === 0 ? (
+                    <div style={{ color: 'var(--text-3)', fontSize: 13, padding: '6px 2px' }}>{t('reports:team.loadNoMatch')}</div>
+                  ) : (
+                    <div className={allocCols.length > 12 ? 'load-scroll' : undefined}>
+                      <LoadBullets columns={loadShown} fmt={(n) => `${Math.round(n)}h`} />
+                    </div>
+                  )}
+                  <div className="finc-dual-legend" style={{ flexWrap: 'wrap', marginTop: 12 }}>
+                    <span><i className="finc-dot" style={{ background: 'var(--c-free)' }} /> {t('reports:team.loadUnder')}</span>
+                    <span><i className="finc-dot" style={{ background: 'var(--c-warn)' }} /> {t('reports:team.loadNear')}</span>
+                    <span><i className="finc-dot" style={{ background: 'var(--c-over)' }} /> {t('reports:team.loadOver')}</span>
+                    <span><i style={{ width: 2, height: 13, borderRadius: 0, background: 'var(--border-2)', display: 'inline-block' }} /> {t('reports:team.loadRef')}</span>
+                  </div>
+                  <div className="chart-stat-strip">
+                    <div className="chart-stat"><b className="mono">{loadAvg}%</b><small>{t('reports:team.avgLoad')}</small></div>
+                    <div className="chart-stat"><b className="mono" style={loadOverSum > 0 ? { color: 'var(--c-over)' } : undefined}>{loadOverSum}h</b><small>{t('reports:team.overrunHours')}</small></div>
+                    <div className="chart-stat"><b className="mono">{loadStats.length}</b><small>{t('reports:team.members')}</small></div>
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -175,14 +304,53 @@ export function TeamReportView() {
           {/* Répartition des statuts */}
           <div className="fin-card">
             <div className="fin-card-head">
-              <div className="fin-card-title">{t('reports:team.tasksByStatus')}</div>
+              <div><div className="fin-card-title">{t('reports:team.tasksByStatus')}</div></div>
+              {statusHas && <span className="chart-pill-done">{t('reports:team.statusDonePct', { pct: statusDonePct })}</span>}
             </div>
             <div className="fin-chart-body">
-              {statusCols.length === 0 ? <div style={{ color: 'var(--text-3)' }}>{t('reports:team.noMember')}</div> : (
+              {!statusHas ? (
+                <div className="chart-empty">
+                  <div className="chart-empty-ico">
+                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}><circle cx="12" cy="12" r="8" /></svg>
+                  </div>
+                  <div className="chart-empty-title">{t('reports:team.statusEmptyTitle')}</div>
+                  <div className="chart-empty-sub">{t('reports:team.statusEmptySub')}</div>
+                  <div className="status-rings" style={{ opacity: 0.5 }}>
+                    {[0, 1, 2, 3].map((i) => (
+                      <div className="sr-cell" key={i}>
+                        <div className="sr-donut" style={{ width: 82, height: 82 }}>
+                          <svg viewBox="0 0 82 82" width={82} height={82}><circle cx={41} cy={41} r={30} fill="none" stroke="var(--surface-3)" strokeWidth={10} /></svg>
+                        </div>
+                        <span className="chart-ghost-name" style={{ width: 56 }} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
                 <>
-                  <StackedColumns columns={statusCols} fmt={(n) => String(n)} mode="absolute" />
-                  <div className="finc-dual-legend" style={{ flexWrap: 'wrap', marginTop: 6 }}>
+                  <div className="finc-dual-legend" style={{ flexWrap: 'wrap', marginBottom: 4, justifyContent: 'center' }}>
                     {STATUS_ORDER.map((s) => <span key={s}><i className="finc-dot" style={{ background: TASK_STATUS_META[s].color }} /> {t(TASK_STATUS_META[s].labelKey)}</span>)}
+                  </div>
+                  {statusCols.length > 8 && (
+                    <div className="lb-search-row">
+                      {statusQn && (
+                        <span className="lb-search-count">{t('reports:team.loadShowing', { shown: statusShown.length, total: statusCols.length })}</span>
+                      )}
+                      <input className="fin-search" style={{ maxWidth: 220 }} value={statusQ} onChange={(e) => setStatusQ(e.target.value)} placeholder={t('reports:team.loadSearchPlaceholder')} />
+                    </div>
+                  )}
+                  {statusShown.length === 0 ? (
+                    <div style={{ color: 'var(--text-3)', fontSize: 13, padding: '6px 2px' }}>{t('reports:team.loadNoMatch')}</div>
+                  ) : (
+                    <div className={statusCols.length > 16 ? 'chart-scroll' : undefined}>
+                      <StatusRings columns={statusShown} />
+                    </div>
+                  )}
+                  <div className="chart-stat-strip">
+                    <div className="chart-stat"><b className="mono">{statusGrand}</b><small>{t('reports:team.statusTotalTasks')}</small></div>
+                    <div className="chart-stat"><b className="mono" style={{ color: TASK_STATUS_META.DONE.color }}>{statusTot.DONE ?? 0}</b><small>{t('reports:charts.status.done')}</small></div>
+                    <div className="chart-stat"><b className="mono" style={{ color: TASK_STATUS_META.IN_PROGRESS.color }}>{statusTot.IN_PROGRESS ?? 0}</b><small>{t('reports:charts.status.inProgress')}</small></div>
+                    <div className="chart-stat"><b className="mono" style={{ color: TASK_STATUS_META.ON_HOLD.color }}>{statusTot.ON_HOLD ?? 0}</b><small>{t('reports:charts.status.onHold')}</small></div>
                   </div>
                 </>
               )}
@@ -255,12 +423,24 @@ export function TeamReportView() {
                     if (!rows.length || rows.every((u) => u.totalHours === 0)) {
                       return <div style={{ color: 'var(--text-3)' }}>{t('reports:team.noHoursLogged')}</div>;
                     }
+                    const billSum = rows.reduce((s, u) => s + u.billableHours, 0);
+                    const opSum = rows.reduce((s, u) => s + u.operationalHours, 0);
+                    const totSum = billSum + opSum;
+                    const avgBillPct = totSum > 0 ? Math.round((billSum / totSum) * 100) : 0;
                     return (
                       <>
-                        <StackedColumns columns={cols} fmt={(n) => `${Math.round(n * 10) / 10}h`} mode="percent" refLabelPct={100} />
-                        <div className="finc-dual-legend" style={{ marginTop: 6 }}>
+                        <div className={rows.length > 14 ? 'load-scroll' : undefined}>
+                          <ShareBars columns={cols} fmt={(n) => `${Math.round(n * 10) / 10}h`} sortByKey="bill" />
+                        </div>
+                        <div className="finc-dual-legend" style={{ marginTop: 12 }}>
                           <span><i className="finc-dot" style={{ background: 'oklch(0.62 0.13 155)' }} /> {t('reports:team.billable')}</span>
                           <span><i className="finc-dot" style={{ background: 'oklch(0.7 0.04 260)' }} /> {t('reports:team.operationalAdmin')}</span>
+                        </div>
+                        <div className="chart-stat-strip">
+                          <div className="chart-stat"><b className="mono">{avgBillPct}%</b><small>{t('reports:team.billable')}</small></div>
+                          <div className="chart-stat"><b className="mono" style={{ color: 'oklch(0.62 0.13 155)' }}>{Math.round(billSum * 10) / 10}h</b><small>{t('reports:team.billable')}</small></div>
+                          <div className="chart-stat"><b className="mono">{Math.round(opSum * 10) / 10}h</b><small>{t('reports:team.operationalAdmin')}</small></div>
+                          <div className="chart-stat"><b className="mono">{rows.length}</b><small>{t('reports:team.members')}</small></div>
                         </div>
                       </>
                     );

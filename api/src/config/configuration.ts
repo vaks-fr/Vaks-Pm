@@ -69,6 +69,20 @@ export default () => ({
   // Entra de test : un client secret partagé suffit (cf. SSO.md §5).
   sso: {
     oidcClientSecret: process.env.SSO_OIDC_CLIENT_SECRET ?? '',
+    // Tolérance d'horloge (ms) appliquée aux conditions temporelles de
+    // l'assertion SAML (NotBefore / NotOnOrAfter / SessionNotOnOrAfter).
+    // node-saml applique 0 par défaut : la moindre dérive entre l'horloge de
+    // l'IdP du client et celle de nos hôtes provoque des échecs de connexion
+    // intermittents, remontés à l'utilisateur par un message volontairement
+    // générique — quasi indiagnosticable côté client. 30 s est le compromis
+    // usuel chez les SP. Valeur bornée à [0, 300000] ; toute valeur invalide
+    // ou négative (dont -1, qui DÉSACTIVE la validation temporelle côté
+    // node-saml) retombe sur le défaut.
+    samlClockSkewMs: (() => {
+      const raw = Number(process.env.SSO_SAML_CLOCK_SKEW_MS);
+      if (!Number.isFinite(raw) || raw < 0) return 30_000;
+      return Math.min(Math.trunc(raw), 300_000);
+    })(),
   },
   // Modèle de déploiement (multi-tenant).
   //   `dedicated` (défaut) = 1 tenant par instance (on-premise, cellule) :

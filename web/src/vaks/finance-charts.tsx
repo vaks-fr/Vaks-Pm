@@ -73,8 +73,8 @@ export function PieChart({
         {(centerLabel || centerSub) && (
           <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', textAlign: 'center', pointerEvents: 'none' }}>
             <div style={{ maxWidth: size - thickness * 2 - 4, overflow: 'hidden' }}>
-              {centerLabel && <div className="mono" style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.05, whiteSpace: 'nowrap' }}>{centerLabel}</div>}
-              {centerSub && <div style={{ fontSize: 10, color: 'var(--text-3)' }}>{centerSub}</div>}
+              {centerLabel && <div className="mono" style={{ fontSize: 18, fontWeight: 800, letterSpacing: '-.01em', lineHeight: 1.05, whiteSpace: 'nowrap' }}>{centerLabel}</div>}
+              {centerSub && <div style={{ fontSize: 10.5, color: 'var(--text-3)', marginTop: 1 }}>{centerSub}</div>}
             </div>
           </div>
         )}
