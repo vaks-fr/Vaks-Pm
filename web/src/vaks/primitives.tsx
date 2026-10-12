@@ -9,6 +9,7 @@ import { MONTHS, labels as LABELS, userById, type Priority, type Task, type User
 const ICONS: Record<string, string> = {
   board: 'M4 4h6v16H4zM14 4h6v10h-6z',
   list: 'M8 6h12M8 12h12M8 18h12M3.5 6h.01M3.5 12h.01M3.5 18h.01',
+  table: 'M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18',
   timeline: 'M3 6h10M3 12h16M3 18h7M17 4v4M21 10v4M9 16v4',
   gauge: 'M12 13l4-4M5.6 18a9 9 0 1 1 12.8 0',
   dash: 'M4 13h7V4H4zM13 9h7V4h-7zM13 20h7v-9h-7zM4 20h7v-5H4z',

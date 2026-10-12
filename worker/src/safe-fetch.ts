@@ -69,13 +69,47 @@ function isPrivateV4(ip: string): boolean {
   return false;
 }
 
+/** Retire les crochets d'un littéral IPv6 tel que renvoyé par `URL.hostname`. */
+export function stripBrackets(host: string): string {
+  return host.replace(/^\[|\]$/g, '');
+}
+
+/**
+ * Extrait l'IPv4 d'une IPv6 IPv4-mapped (`::ffff:x`), en forme pointée
+ * (`::ffff:127.0.0.1`) ou hexa telle que produite par `new URL()`
+ * (`::ffff:7f00:1`). `null` si ce n'est pas une IPv4-mapped.
+ */
+export function ipv4Mapped(ip6: string): string | null {
+  const x = ip6.toLowerCase().trim();
+  const dotted = x.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (dotted) return dotted[1];
+  if (!x.includes('ffff')) return null;
+  const halves = x.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  let hextets: string[];
+  if (halves.length === 2) {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 0) return null;
+    hextets = [...head, ...Array(fill).fill('0'), ...tail];
+  } else {
+    hextets = head;
+  }
+  if (hextets.length !== 8) return null;
+  const h = hextets.map((v) => parseInt(v || '0', 16));
+  if (h.some((n) => Number.isNaN(n) || n < 0 || n > 0xffff)) return null;
+  if (h[0] || h[1] || h[2] || h[3] || h[4] || h[5] !== 0xffff) return null;
+  return `${(h[6] >> 8) & 255}.${h[6] & 255}.${(h[7] >> 8) & 255}.${h[7] & 255}`;
+}
+
 function isPrivateV6(ip: string): boolean {
-  const x = ip.toLowerCase();
+  const x = stripBrackets(ip.toLowerCase());
   if (x === '::1' || x === '::') return true;
   if (x.startsWith('fe80')) return true;
   if (x.startsWith('fc') || x.startsWith('fd')) return true;
-  const m = x.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (m) return isPrivateV4(m[1]);
+  const mapped = ipv4Mapped(x);
+  if (mapped !== null) return isPrivateV4(mapped);
   return false;
 }
 
@@ -83,7 +117,8 @@ function isPrivateV6(ip: string): boolean {
  * Une IP (littérale ou résolue) est-elle interdite ? `allow` peut ré-autoriser
  * une IP privée qui matche — jamais loopback/metadata.
  */
-function ipBlocked(ip: string, allow: BlockList | null): boolean {
+export function ipBlocked(ipRaw: string, allow: BlockList | null): boolean {
+  const ip = stripBrackets(ipRaw);
   const v = isIP(ip);
   if (v === 4) {
     if (alwaysBlockedV4(ip)) return true;
@@ -92,16 +127,21 @@ function ipBlocked(ip: string, allow: BlockList | null): boolean {
   }
   if (v === 6) {
     const x = ip.toLowerCase();
-    if (x === '::1') return true;
-    const m = x.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (m && alwaysBlockedV4(m[1])) return true;
-    if (isPrivateV6(ip)) return allow && allow.check(ip, 'ipv6') ? false : true;
+    if (x === '::1' || x === '::') return true;
+    // IPv4-mapped (pointée OU hexa — `new URL()` normalise en hexa) : règles v4.
+    const mapped = ipv4Mapped(x);
+    if (mapped !== null) return ipBlocked(mapped, allow);
+    if (isPrivateV6(x)) return allow && allow.check(x, 'ipv6') ? false : true;
     return false;
   }
   return true;
 }
 
-function isBlockedHost(host: string, allow: BlockList | null): boolean {
+export function isBlockedHost(hostRaw: string, allow: BlockList | null): boolean {
+  if (!hostRaw) return true;
+  // `URL.hostname` garde les crochets d'un littéral IPv6 (`[::1]`) → `isIP` = 0
+  // → serait pris pour un hostname. On les retire avant tout test.
+  const host = stripBrackets(hostRaw.toLowerCase());
   if (!host) return true;
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
   if (host.endsWith('.local') || host.endsWith('.internal')) return true;
@@ -111,7 +151,7 @@ function isBlockedHost(host: string, allow: BlockList | null): boolean {
   return false;
 }
 
-async function assertSafe(raw: string, allow: BlockList | null): Promise<URL> {
+export async function assertSafe(raw: string, allow: BlockList | null): Promise<URL> {
   let u: URL;
   try {
     u = new URL(raw);
@@ -124,7 +164,7 @@ async function assertSafe(raw: string, allow: BlockList | null): Promise<URL> {
   if (isBlockedHost(u.hostname, allow)) {
     throw new Error('Cible interne/privée interdite (anti-SSRF).');
   }
-  if (isIP(u.hostname) === 0) {
+  if (isIP(stripBrackets(u.hostname)) === 0) {
     let addrs: { address: string }[];
     try {
       addrs = await dnsLookup(u.hostname, { all: true });

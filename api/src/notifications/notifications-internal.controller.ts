@@ -21,17 +21,27 @@ export class NotificationsInternalController {
   ) {}
 
   /**
-   * Conf SMTP courante (pour une org donnée — pour l'instant on prend la première
-   * org car la stack est mono-tenant ; quand on passera multi-tenant, le worker
-   * devra passer `?orgId=`).
+   * Conf SMTP courante de l'org (première org de la base courante — en pooled
+   * le tenant est posé par `X-Tenant-Slug` ; `?orgId=` pour cibler).
+   *
+   * Le mot de passe SMTP (chiffré at-rest dans OrgSetting) est renvoyé ICI,
+   * déchiffré, au worker — route overlay-only + `X-Worker-Token`. C'est le seul
+   * canal : l'API ne l'embarque plus dans le payload des jobs BullMQ (Redis sans
+   * auth, persistant, jobs failed conservés = secret de tous les tenants en
+   * clair). Le worker le garde en mémoire (cache 60 s par tenant).
    */
   @Get('smtp')
   async getSmtp(@Query('orgId') orgId?: string) {
     const id = orgId ?? (await this.firstOrgId());
     if (!id) return { smtp: null, notifications: null };
     const all = await this.settings.getAll(id);
+    const smtp = readSmtpSettings(all);
+    const password =
+      smtp.authMode === 'password'
+        ? await this.settings.getDecryptedSecret(id, 'smtp.password').catch(() => '')
+        : '';
     return {
-      smtp: readSmtpSettings(all),
+      smtp: { ...smtp, password: password || null },
       notifications: readNotificationsSettings(all),
     };
   }

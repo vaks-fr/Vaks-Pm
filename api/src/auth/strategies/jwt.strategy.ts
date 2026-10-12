@@ -70,13 +70,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       if (hostSlug && payload.tenant && payload.tenant !== hostSlug) {
         throw new UnauthorizedException('Token émis pour un autre tenant');
       }
-      // Force-logout-all instantané : rejette tout token émis avant l'epoch.
-      // `iat` est en secondes (claim JWT standard).
-      if (payload.iat) {
-        const revokedMs = await this.revokedEpochMs(payload.orgId);
-        if (revokedMs && payload.iat * 1000 < revokedMs) {
-          throw new UnauthorizedException('Session révoquée (force-logout)');
-        }
+    }
+    // Force-logout-all instantané : rejette tout token émis avant l'epoch
+    // (`Organization.sessionsRevokedAt`). Dans TOUS les modes de déploiement —
+    // dedicated (compose/Helm sans SERVICE_ROLE) compris — sinon l'admin croit
+    // avoir déconnecté tout le monde alors que les JWT courent jusqu'à expiration.
+    // `iat` est en secondes (claim JWT standard).
+    if (payload.iat) {
+      const revokedMs = await this.revokedEpochMs(payload.orgId);
+      if (revokedMs && payload.iat * 1000 < revokedMs) {
+        throw new UnauthorizedException('Session révoquée (force-logout)');
       }
     }
     return {

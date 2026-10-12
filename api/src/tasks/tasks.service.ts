@@ -347,6 +347,35 @@ export class TasksService {
   }
 
   /**
+   * Lecture self-only pour le flux ICS personnel (`CalendarService`, slice C).
+   * Mêmes filtres que `myTasks` (assigné, non DONE, projet actif) restreints
+   * aux tâches avec échéance — une tâche sans `dueDate` n'a rien à afficher
+   * dans un calendrier. Select minimal : aucune donnée d'autres membres.
+   */
+  async tasksForUserCalendar(orgId: string, userId: string) {
+    return this.prisma.task.findMany({
+      where: {
+        organizationId: orgId,
+        deletedAt: null,
+        status: { not: TaskStatus.DONE },
+        dueDate: { not: null },
+        assignees: { some: { userId } },
+        project: { status: 'ACTIVE', kind: 'STANDARD', deletedAt: null },
+      },
+      orderBy: { dueDate: 'asc' },
+      take: TASK_LIST_HARD_LIMIT,
+      select: {
+        id: true,
+        title: true,
+        dueDate: true,
+        priority: true,
+        status: true,
+        project: { select: { key: true, name: true } },
+      },
+    });
+  }
+
+  /**
    * Remontée de preuve de l'arbre au moment où un agent soumet un parent en
    * revue. Le plancher est celui du PARENT (enjeu projet × confiance ∩ capacités
    * de vérification), c'est-à-dire la politique réglée en admin — jamais quelque
@@ -2284,14 +2313,23 @@ export class TasksService {
     // Réaligne sur la colonne foldée (APPROVED → In review, CHANGES_REQUESTED → In progress).
     const decisionColId = await this.columnForStatus(task.projectId, toStatus);
     const updated = await this.prisma.$transaction(async (tx) => {
-      await tx.task.update({
-        where: { id: taskId },
+      // Écriture CONDITIONNÉE au statut lu : deux décisions concurrentes
+      // (APPROVE + CHANGES_REQUESTED, ou revue humaine + validateur agent) ne
+      // peuvent pas passer toutes les deux — la seconde voit count=0 → 409.
+      const hit = await tx.task.updateMany({
+        where: { id: taskId, status: TaskStatus.IN_REVIEW },
         data: {
           status: toStatus,
-          ...(decisionColId ? { boardColumn: { connect: { id: decisionColId } } } : {}),
+          ...(decisionColId ? { boardColumnId: decisionColId } : {}),
           ...(toStatus === TaskStatus.CHANGES_REQUESTED ? { retryCount: { increment: 1 } } : {}),
         },
       });
+      if (hit.count === 0) {
+        throw new ConflictException({
+          code: 'NOT_IN_REVIEW',
+          message: "La tâche n'est plus en revue (décision concurrente).",
+        });
+      }
       await tx.taskStatusHistory.create({
         data: {
           organizationId: orgId, projectId: task.projectId, taskId,
@@ -3371,7 +3409,22 @@ export class TasksService {
     for (const m of projectMembers) allowed.add(m.userId);
     for (const id of grandfathered) allowed.add(id);
 
-    const offenders = userIds.filter((id) => !allowed.has(id));
+    let offenders = userIds.filter((id) => !allowed.has(id));
+    if (offenders.length > 0) {
+      // Héritage owner→agent : un agent dont l'**owner** est dans le périmètre
+      // du projet est éligible sans ajout membre explicite (le projet est
+      // `agentsEnabled` — vérifié plus haut dès qu'un agent est présent). Le set
+      // `allowed` = exactement « membres directs ∪ membres d'équipe affectée »,
+      // donc « owner ∈ allowed » ⇔ « owner membre du projet ».
+      const offenderAgents = await this.prisma.user.findMany({
+        where: { id: { in: offenders }, kind: 'AGENT', ownerId: { not: null } },
+        select: { id: true, ownerId: true },
+      });
+      const inherited = new Set(
+        offenderAgents.filter((a) => a.ownerId && allowed.has(a.ownerId)).map((a) => a.id),
+      );
+      offenders = offenders.filter((id) => !inherited.has(id));
+    }
     if (offenders.length > 0) {
       throw new BadRequestException(
         `Assigné(s) hors périmètre projet : ${offenders.join(', ')}. ` +

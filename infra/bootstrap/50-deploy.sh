@@ -26,6 +26,9 @@ echo "[50] création des secrets Swarm"
 create_secret jwt_access_secret   "$JWT_ACCESS_SECRET"
 create_secret jwt_refresh_secret  "$JWT_REFRESH_SECRET"
 create_secret database_url        "$DATABASE_URL"
+# Mot de passe Redis (requirepass) — REQUIS par la stack (redis + api/controlplane/
+# worker). HEX uniquement (inséré dans REDIS_URL). Généré si non fourni.
+create_secret redis_password      "${REDIS_PASSWORD:-$(openssl rand -hex 32)}"
 
 echo "[50] déploiement de la stack ($STACK_FILE)"
 docker stack deploy -c "$STACK_FILE" vaks-pm

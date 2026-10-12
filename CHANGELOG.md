@@ -2,6 +2,83 @@
 
 User-facing changes, most recent first.
 
+## 2026-10-12-1 — 2026-10-12
+
+### Risk register (RAID)
+- New **Risks** tab on every project: a 5×5 probability × impact heatmap
+  (click a cell to filter), an exposure summary by severity, and a sortable
+  register with owner, score, status and mitigation.
+- Risks can be **raised automatically**: a milestone at risk, a budget
+  threshold being crossed or a forecast overrun opens (or updates) a risk on
+  its own, and automatic risks that stay inactive are closed after 14 days.
+  Your edits to status, owner and mitigation are never overwritten.
+
+### Tasks & planning
+- **Bulk edit**: from the List view, open an editable grid (status, assignee,
+  due date, priority, estimate), select several tasks and apply changes in one
+  go. Edits are kept as a draft until you click **Save** — or **Discard**.
+- **Calendar**: a personal calendar card on the dashboard and a calendar tab
+  on each project, showing due dates and milestones.
+- **Calendar subscription (ICS)**: subscribe to your own tasks from Outlook,
+  Google Calendar or Apple Calendar with a private feed link.
+- **Planning (Gantt)**: Week and Month modes now fit the screen exactly with no
+  stray horizontal scroll, and short custom ranges fill the whole width.
+- When two reviewers decide on the same task at the same moment, the second
+  one now gets a clear conflict message instead of both decisions applying.
+
+### Documents
+- **In-app preview** of Markdown and text files (`.md`, `.txt`, `.csv`,
+  `.json`, `.yaml`…) for project documents, agent deliverables and task
+  attachments — no download needed.
+- Fixed: downloading a file whose name contains accents or emoji failed.
+
+### Reports & finance
+- Burndown and Cumulative Flow charts now stop at today instead of drawing a
+  flat "actual" line into the future.
+- Fixed clipped axis labels on the Earned Value and monthly cost/revenue
+  charts for large amounts.
+- **Finance by client**: client names are visible again (the column had
+  collapsed), including the "Internal / no client" row.
+- The cost breakdown no longer shows a phantom 1.00 forecast when a project
+  has no costs; long KPI card titles wrap instead of overflowing.
+- Workload: the subtitle no longer says "this week" when browsing another week.
+- Statistics exports now include the AI-agent task statuses.
+
+### AI agents & AI connector (MCP)
+- AI agents automatically inherit access to the projects of their human
+  owner (limited to projects where agents are enabled).
+- AI connector error messages are now localized (English, French, Italian,
+  German).
+- Turning AI write access off (or back on) now also applies to existing AI
+  connections, not only new ones.
+
+### Administration & integrations
+- New **personal access token policy**: choose who can create personal API
+  tokens — everyone, administrators only, or nobody.
+- Removing a user's seat now also stops their personal tokens and AI
+  connections.
+- SSO: when all seats are taken, users signing in for the first time are
+  created as "seat pending" instead of being refused.
+- **Slack** is now a webhook format (alongside Teams and generic JSON).
+- New **metrics endpoint** for monitoring tools (Prometheus format,
+  organization-scoped, `monitoring:read` scope).
+- Microsoft Teams provisioning reports an invalid certificate as a
+  configuration error instead of retrying endlessly.
+
+### Fixes
+- You are no longer signed out when the app is open in several browser tabs.
+- Skill reminders now run for every organization in multi-tenant installs.
+
+### Security & dependencies
+- A broad security hardening pass and up-to-date third-party dependencies
+  (no known vulnerable packages at release time).
+
+### Upgrading a self-hosted install
+- **Redis now requires a password.** On Docker Swarm, create the secret once
+  before redeploying — `openssl rand -hex 32 | docker secret create redis_password -`
+  (new installs get it from the bootstrap scripts). With Helm, `redis.auth` is
+  enabled by default and the password is generated for you.
+
 ## 2026-08-16-2 — 2026-08-16
 
 ### Reports — redesigned KPI charts

@@ -2,6 +2,8 @@ import { Controller, Get, Param, ParseUUIDPipe, Query, UseFilters, UseGuards } f
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../rbac/permissions.guard';
+import { ProjectAccessGuard } from '../rbac/project-access.guard';
+import { ProjectAccess, fromTaskParam } from '../rbac/project-access.decorator';
 import { RequirePermissions, PublicApi } from '../rbac/require-permissions.decorator';
 import { Audited } from '../audit-logs/audited.decorator';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
@@ -11,13 +13,16 @@ import { FileSourceExceptionFilter } from './file-source-exception.filter';
 /**
  * Lecture, par les agents IA, des documents d'une source externe (SharePoint…)
  * rattachée au projet d'une tâche. Même périmètre d'accès que le work-context :
- * `@PublicApi('task:view')` pour être atteignable par un PAT agent (MCP). La
- * tâche est résolue org-scoped ; les gates (licence, toggles, grant) sont
- * évaluées côté service. Proxy live — aucune copie.
+ * `@PublicApi('task:view')` pour être atteignable par un PAT agent (MCP), ET
+ * appartenance au projet de la tâche exigée (`ProjectAccessGuard`) — sans quoi
+ * tout membre de l'org / tout PAT `task:view` lisait les documents de contexte
+ * de n'importe quel projet. Les gates (licence, toggles, grant) sont évaluées
+ * côté service. Proxy live — aucune copie.
  */
 @ApiTags('tasks')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, ProjectAccessGuard)
+@ProjectAccess(fromTaskParam('taskId'))
 @UseFilters(FileSourceExceptionFilter)
 @Controller()
 export class FileSourcesController {

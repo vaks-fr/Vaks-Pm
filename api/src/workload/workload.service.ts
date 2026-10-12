@@ -549,6 +549,28 @@ export class WorkloadService {
   }
 
   /**
+   * Lecture self-only pour le flux ICS personnel (`CalendarService`, slice C).
+   * Volontairement PAS de `accessibleProjectScope` : le token ICS n'identifie
+   * qu'un user, jamais un rôle élevé — filtrer strictement sur `userId` évite
+   * toute fuite de la charge d'autres membres même si l'appelant est admin.
+   */
+  async allocationsForUserCalendar(orgId: string, userId: string) {
+    return this.prisma.allocation.findMany({
+      where: { organizationId: orgId, userId },
+      orderBy: { startDate: 'asc' },
+      select: {
+        id: true,
+        startDate: true,
+        endDate: true,
+        hoursPerDay: true,
+        notes: true,
+        task: { select: { title: true } },
+        project: { select: { key: true, name: true } },
+      },
+    });
+  }
+
+  /**
    * Pour chaque allocation, calcule `workdays`, `effectiveHours` et
    * `blockedDays` en tenant compte du `WorkSchedule` (custom ou défaut org),
    * des `TimeOff`, et des jours fériés du `countryCode` du user.

@@ -22,6 +22,7 @@ import type {
   WatchingEntryDto,
   WorkspaceAgentDto,
   DependencyDto,
+  RiskDto,
 } from '@vaks-pm/shared';
 import { DEMO_STATE_KEY, DEMO_STATE_VERSION } from './config';
 import { buildSeed } from './seed';
@@ -49,6 +50,7 @@ export interface DemoState {
   watching: WatchingEntryDto[];
   agents: WorkspaceAgentDto[];
   dependencies: DependencyDto[];
+  risks: RiskDto[];
 }
 
 let state: DemoState | null = null;

@@ -1,0 +1,107 @@
+{
+  "title": "Risk register",
+  "tab": "Risks",
+  "empty": "No risks recorded yet.",
+  "emptyHint": "Log a risk manually, or let automation rules (milestone at risk, budget threshold, forecast overrun) feed this register automatically.",
+  "loading": "Loading…",
+  "newRisk": "New risk",
+  "editTitle": "Edit risk",
+  "createTitle": "New risk",
+  "field": {
+    "title": "Title",
+    "description": "Description",
+    "probability": "Probability",
+    "impact": "Impact",
+    "score": "Score",
+    "category": "Category",
+    "mitigation": "Mitigation",
+    "owner": "Owner",
+    "status": "Status",
+    "source": "Source"
+  },
+  "noOwner": "No owner",
+  "titleRequired": "A title is required.",
+  "category": {
+    "RISK": "Risk",
+    "ASSUMPTION": "Assumption",
+    "ISSUE": "Issue",
+    "DEPENDENCY": "Dependency"
+  },
+  "status": {
+    "OPEN": "Open",
+    "MITIGATING": "Mitigating",
+    "RESOLVED": "Resolved",
+    "ACCEPTED": "Accepted"
+  },
+  "source": {
+    "MANUAL": "Manual",
+    "AUTO": "Auto"
+  },
+  "matrix": {
+    "title": "Probability × impact matrix",
+    "probability": "Probability",
+    "impact": "Impact",
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "clear": "clear",
+    "activeCount_one": "{{count}} active · click a cell to filter",
+    "activeCount_other": "{{count}} active · click a cell to filter",
+    "cellCount_one": "{{count}} risk",
+    "cellCount_other": "{{count}} risks",
+    "probScale": { "1": "Rare", "2": "Unlikely", "3": "Possible", "4": "Likely", "5": "Almost certain" },
+    "impactScale": { "1": "Insignificant", "2": "Minor", "3": "Moderate", "4": "Major", "5": "Severe" },
+    "range": { "low": "1–4", "medium": "5–9", "high": "10–14", "critical": "15–25" }
+  },
+  "sev": {
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "critical": "Critical"
+  },
+  "exposure": {
+    "title": "Risk exposure"
+  },
+  "automation": {
+    "header": "Automation rules feeding this register",
+    "raised_one": "{{count}} risk raised",
+    "raised_other": "{{count}} risks raised",
+    "idle": "No risk raised yet",
+    "active": "Active",
+    "off": "Idle",
+    "rule": {
+      "milestone_at_risk": "Milestone at risk",
+      "budget_threshold": "Budget threshold",
+      "forecast_overrun": "Forecast overrun"
+    }
+  },
+  "seg": {
+    "all": "All",
+    "open": "Open",
+    "mitigating": "Mitigating",
+    "closed": "Closed"
+  },
+  "action": {
+    "create": "Create",
+    "edit": "Edit",
+    "resolve": "Resolve",
+    "delete": "Delete",
+    "save": "Save",
+    "cancel": "Cancel"
+  },
+  "autoBadgeHint": "Auto-detected by rule \"{{rule}}\" — editing or resolving it will not be overwritten while the condition still holds.",
+  "confirmDelete": "Delete this risk? This cannot be undone.",
+  "confirmDeleteTitle": "Delete risk",
+  "created": "Risk created.",
+  "saved": "Risk saved.",
+  "resolved": "Risk resolved.",
+  "deleted": "Risk deleted.",
+  "readOnlyHint": "You can view the risk register. Only project managers can edit it.",
+  "col": {
+    "risk": "Risk",
+    "score": "Score",
+    "owner": "Owner",
+    "status": "Status",
+    "probImpact": "Prob × Impact"
+  }
+}

@@ -1,0 +1,69 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+  Mirrors the Swarm isolation (docker-stack.yml `mcp-api` overlay):
+   - mcp (internet-facing) may only talk to the api + DNS. An RCE in the mcp pod
+     must not reach Redis (`oauth:refresh:*` → PAT forgery), object storage or
+     the worker.
+   - Redis only accepts connections from api / controlplane / worker.
+  Ingress to mcp itself is left open (the Ingress controller must reach it).
+*/ -}}
+{{- if .Values.mcp.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "vakspm.fullname" . }}-mcp-egress
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "vakspm.selectorLabels" (dict "root" . "component" "mcp") | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "vakspm.selectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.api.port }}
+    # DNS (resolving the api Service name), ONLY towards the cluster DNS
+    # namespace — an open port-53 egress would be a DNS-tunnel exfil path from a
+    # compromised mcp pod. Namespace configurable (OpenShift: openshift-dns).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+{{- end }}
+{{- if .Values.redis.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "vakspm.fullname" . }}-redis-ingress
+  labels:
+    {{- include "vakspm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "vakspm.selectorLabels" (dict "root" . "component" "redis") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- range $c := list "api" "controlplane" "worker" }}
+        - podSelector:
+            matchLabels:
+              {{- include "vakspm.selectorLabels" (dict "root" $ "component" $c) | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 6379
+{{- end }}
+{{- end }}

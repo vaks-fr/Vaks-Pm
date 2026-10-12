@@ -267,6 +267,17 @@ POST('/time-entries', (ctx) => m.createTimeEntry(body(ctx)));
 PATCH('/time-entries/:id', (ctx) => m.updateTimeEntry(ctx.params.id, body(ctx)));
 DELETE('/time-entries/:id', (ctx) => m.deleteTimeEntry(ctx.params.id));
 
+// Registre de risques (RAID)
+GET('/projects/:id/risks', ({ params }) =>
+  getState()
+    .risks.filter((r) => r.projectId === params.id)
+    .sort((a, b) => b.score - a.score),
+);
+POST('/projects/:id/risks', (ctx) => m.createRisk(ctx.params.id, body(ctx)));
+PATCH('/projects/:id/risks/:riskId', (ctx) => m.updateRisk(ctx.params.id, ctx.params.riskId, body(ctx)));
+POST('/projects/:id/risks/:riskId/resolve', (ctx) => m.resolveRisk(ctx.params.id, ctx.params.riskId));
+DELETE('/projects/:id/risks/:riskId', (ctx) => m.deleteRisk(ctx.params.id, ctx.params.riskId));
+
 // Watchers
 POST('/tasks/:id/watch', (ctx) => m.watchTask(ctx.params.id, true));
 DELETE('/tasks/:id/watch', (ctx) => m.watchTask(ctx.params.id, false));

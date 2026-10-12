@@ -343,5 +343,21 @@
     "expiryRequired": "Date d'expiration requise (max 2 ans).",
     "revoked": "Jeton révoqué",
     "revokeConfirm": "Révoquer ce jeton ? Les appels avec cette clé cesseront immédiatement."
+  },
+  "calendarFeed": {
+    "title": "Flux calendrier (ICS)",
+    "desc": "Abonnez votre calendrier (Outlook, Google Calendar, Apple Calendar…) aux échéances de vos tâches et à vos allocations. L'URL est personnelle et secrète — quiconque la possède peut lire votre calendrier.",
+    "urlLabel": "URL d'abonnement",
+    "copy": "Copier",
+    "copied": "URL copiée",
+    "howto": "Dans votre app calendrier, utilisez « S'abonner via URL » (ou « Ajouter un calendrier > À partir d'une URL ») et collez ce lien.",
+    "inactive": "Aucun abonnement actif.",
+    "generate": "Générer l'URL",
+    "generated": "URL générée",
+    "regenerate": "Régénérer",
+    "regenerateConfirm": "Régénérer l'URL invalide l'ancienne — tout abonnement existant dans un calendrier cessera de se mettre à jour. Continuer ?",
+    "revoke": "Révoquer",
+    "revokeConfirm": "Révoquer l'abonnement calendrier ? L'URL actuelle cessera immédiatement de fonctionner.",
+    "revoked": "Abonnement révoqué"
   }
 }

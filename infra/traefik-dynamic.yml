@@ -60,6 +60,20 @@ http:
         sourceRange:
           - "192.0.2.1/32"
 
+    # Anti-DoS au bord sur /mcp, par IP source. Chaque POST /mcp coûte un
+    # aller-retour API (me/mcp-context) → borner AVANT l'API. Seuils larges :
+    # les connecteurs cloud (claude.ai, Copilot Studio, ChatGPT) sortent d'un
+    # petit pool d'IP partagé entre tous leurs utilisateurs. Le budget fin reste
+    # le throttler `token` de l'API (par jeton).
+    mcp-ratelimit:
+      rateLimit:
+        average: 600
+        period: 1m
+        burst: 300
+    mcp-inflight:
+      inFlightReq:
+        amount: 200
+
   routers:
     # Garde-fou bord : bloque /api/v1/internal AVANT le router `api` (priorité
     # plus haute). Le trafic worker→api passe par le DNS overlay `api:3000`,
@@ -98,7 +112,7 @@ http:
       priority: 150
       # Pas de `compress` : le transport MCP est du streaming (même raison que
       # le router `ws`).
-      middlewares: [security-headers]
+      middlewares: [security-headers, mcp-ratelimit, mcp-inflight]
       tls: {}
     # RFC 9728 — Protected Resource Metadata, servi par le serveur MCP : c'est
     # ainsi que les clients IA découvrent QUEL serveur d'autorisation interroger.

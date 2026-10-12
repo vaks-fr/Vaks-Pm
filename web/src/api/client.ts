@@ -171,6 +171,9 @@ import type {
   LicenseStatusDto,
   LicenseHistoryRowDto,
   InboxListDto,
+  RiskDto,
+  CreateRiskInput,
+  UpdateRiskInput,
 } from '@vaks-pm/shared';
 
 import { newMutationId, trackPendingMutation } from '../realtime/store';
@@ -251,12 +254,6 @@ export const setTokens = (access: string | null, refresh: string | null): void =
   }
 };
 
-/** Compat : conservé pour les appels qui ne posent que l'access (boot avec
- *  un seul token connu, ou reset). */
-export const setAccessToken = (t: string | null): void => {
-  if (t === null) setTokens(null, null);
-  else setTokens(t, refreshToken);
-};
 export const getAccessToken = (): string | null => accessToken;
 export const getRefreshToken = (): string | null => refreshToken;
 
@@ -284,6 +281,37 @@ async function extractError(res: Response): Promise<Error> {
   return new ApiError(msg ?? `Erreur ${res.status}`, res.status, body);
 }
 
+// Multi-onglets : le refresh token est ROTATIF (l'ancien est révoqué à chaque
+// refresh) et partagé via localStorage. Sans synchro, l'onglet B garde en
+// mémoire le jeton que l'onglet A vient de faire tourner → son refresh suivant
+// prend 401 → déconnexion. Trois parades :
+//  1. l'event `storage` aligne la mémoire sur ce qu'un autre onglet écrit
+//     (y compris la purge d'un logout → tous les onglets se déconnectent) ;
+//  2. le refresh est sérialisé entre onglets (Web Locks) ;
+//  3. sous le verrou, si le jeton stocké a changé, on l'adopte sans rappeler l'API.
+function storedTokens(): { access: string | null; refresh: string | null } {
+  try {
+    return { access: localStorage.getItem(ACCESS_KEY), refresh: localStorage.getItem(REFRESH_KEY) };
+  } catch {
+    return { access: null, refresh: null };
+  }
+}
+
+if (typeof window !== 'undefined' && !DEMO) {
+  window.addEventListener('storage', (e) => {
+    if (e.key !== ACCESS_KEY && e.key !== REFRESH_KEY && e.key !== null) return;
+    const s = storedTokens();
+    accessToken = s.access;
+    refreshToken = s.refresh;
+  });
+}
+
+/** Exécute `fn` sous un verrou partagé par tous les onglets de l'origine (repli : sans verrou). */
+async function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  return locks ? await locks.request('vaks-auth-refresh', fn) : fn();
+}
+
 // Refresh single-flight : si plusieurs requêtes prennent 401 en même temps,
 // on ne déclenche qu'UN appel /auth/refresh, toutes les autres attendent son
 // résultat puis rejouent leur requête initiale.
@@ -294,13 +322,20 @@ async function tryRefresh(): Promise<boolean> {
   if (DEMO) return false;
   if (!refreshToken) return false;
   if (refreshInFlight) return refreshInFlight;
-  const current = refreshToken;
-  refreshInFlight = (async () => {
+  const stale = refreshToken;
+  refreshInFlight = withRefreshLock(async () => {
     try {
+      // Un autre onglet a déjà fait tourner le jeton pendant qu'on attendait le verrou.
+      const s = storedTokens();
+      if (s.refresh && s.refresh !== stale) {
+        accessToken = s.access;
+        refreshToken = s.refresh;
+        return true;
+      }
       const res = await fetch(`${BASE}/auth/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken: current }),
+        body: JSON.stringify({ refreshToken: stale }),
       });
       if (!res.ok) return false;
       const body = (await res.json()) as { accessToken: string; refreshToken: string };
@@ -311,7 +346,7 @@ async function tryRefresh(): Promise<boolean> {
     } finally {
       refreshInFlight = null;
     }
-  })();
+  });
   return refreshInFlight;
 }
 
@@ -1380,6 +1415,20 @@ export const api = {
   deleteCustomStatus: (statusId: string) =>
     request<{ removed: true }>(`/custom-statuses/${statusId}`, { method: 'DELETE' }),
 
+  // ---- registre de risques (RAID, MVP=RISK) ----
+  listRisks: (projectId: string) => request<RiskDto[]>(`/projects/${projectId}/risks`),
+  createRisk: (projectId: string, dto: CreateRiskInput) =>
+    request<RiskDto>(`/projects/${projectId}/risks`, { method: 'POST', body: JSON.stringify(dto) }),
+  updateRisk: (projectId: string, riskId: string, dto: UpdateRiskInput) =>
+    request<RiskDto>(`/projects/${projectId}/risks/${riskId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(dto),
+    }),
+  resolveRisk: (projectId: string, riskId: string) =>
+    request<RiskDto>(`/projects/${projectId}/risks/${riskId}/resolve`, { method: 'POST' }),
+  deleteRisk: (projectId: string, riskId: string) =>
+    request<{ removed: true }>(`/projects/${projectId}/risks/${riskId}`, { method: 'DELETE' }),
+
   // ---- valeurs de champs personnalisés (par entité) ----
   getTaskCustomFields: (taskId: string) =>
     request<CustomFieldValueDto[]>(`/tasks/${taskId}/custom-fields`),
@@ -1836,6 +1885,10 @@ export const api = {
     request<ApiTokenCreated>('/me/api-tokens', { method: 'POST', body: JSON.stringify(body) }),
   deleteMyApiToken: (id: string) =>
     request<{ id: string; revoked: true }>(`/me/api-tokens/${id}`, { method: 'DELETE' }),
+  // -------- Flux ICS personnel (slice C calendrier) --------
+  getMyCalendarFeed: () => request<{ enabled: boolean; token: string | null }>('/me/calendar-feed'),
+  rotateMyCalendarFeed: () => request<{ token: string }>('/me/calendar-feed/rotate', { method: 'POST' }),
+  revokeMyCalendarFeed: () => request<{ revoked: true }>('/me/calendar-feed', { method: 'DELETE' }),
   orgApiTokenScopes: () => request<{ scopes: string[] }>('/admin/api-tokens/scopes'),
   // ---- Clés de chiffrement (DORA) : statut + rotation KEK/DEK (crypto:manage) ----
   cryptoStatus: () => request<CryptoStatusDto>('/admin/crypto/status'),

@@ -10,8 +10,9 @@
     "build:demo": "vite build --mode demo",
     "preview": "vite preview",
     "preview:demo": "vite preview --mode demo",
-    "i18n:extract": "i18next-parser",
-    "i18n:check": "node scripts/i18n-parity.mjs"
+    "i18n:extract": "i18next-cli extract",
+    "i18n:check": "node scripts/i18n-parity.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.0",
@@ -31,10 +32,11 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.0",
     "@tailwindcss/postcss": "^4.0.0",
-    "i18next-parser": "^9.0.0",
     "postcss": "^8.4.38",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.9.0",
-    "vite": "^8.0.0"
+    "vite": "^8.0.0",
+    "vitest": "^4.1.11",
+    "i18next-cli": "^1.75.2"
   }
 }

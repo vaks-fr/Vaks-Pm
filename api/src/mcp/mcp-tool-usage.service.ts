@@ -215,10 +215,14 @@ export class McpToolUsageService implements OnModuleDestroy {
         if (keys.length) {
           const vals = await this.redis.mget(...keys);
           keys.forEach((k, i) => {
-            // `<prefix>:<slug>:<tokenHash>:<tool>:<window>` — ni le slug, ni le
-            // hash, ni le nom de tool ne contiennent de « : ».
+            // `<prefix>:<slug>:<tokenHash>:<tool>:<window>` (5 segments). Les
+            // compteurs d'ACTION (`<tool>:<action>`, 6 segments, posés seulement
+            // quand un quota ciblé existe) sont ignorés : leurs appels sont déjà
+            // comptés sous le tool de base — les agréger créait une ligne fantôme
+            // au nom de l'action et un double comptage.
             const parts = k.split(':');
-            const tool = parts[parts.length - 2] ?? '?';
+            if (parts.length !== 5) return;
+            const tool = parts[3];
             byTool.set(tool, (byTool.get(tool) ?? 0) + Number(vals[i] ?? 0));
           });
         }

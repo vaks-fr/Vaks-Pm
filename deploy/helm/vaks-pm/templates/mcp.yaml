@@ -33,8 +33,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # Internet-facing piece: stricter than the chart-wide contexts (the mcp image
+      # runs as the unprivileged `node` user, uid 1000).
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- toYaml .Values.mcp.podSecurityContext | nindent 8 }}
       # > DRAIN_MS (25s) > VAKS_API_TIMEOUT_MS (20s): a legit tool call can hold
       # 20s, a shorter grace would sever exactly the slow calls we want to protect.
       terminationGracePeriodSeconds: 30
@@ -43,7 +45,11 @@ spec:
           image: {{ include "vakspm.image" (dict "root" . "repo" .Values.image.mcp.repository) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- toYaml .Values.mcp.securityContext | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem: the only writable path.
+            - name: tmp
+              mountPath: /tmp
           # No envFrom/secretRef on purpose: the MCP holds no state and no secret.
           env:
             - name: NODE_ENV
@@ -91,6 +97,11 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.mcp.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
       {{- with .Values.mcp.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

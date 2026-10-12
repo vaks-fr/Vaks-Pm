@@ -6,6 +6,7 @@ import {
   NestInterceptor,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { extractBearer } from '../auth/bearer.util';
 import type { Request } from 'express';
 import { Observable } from 'rxjs';
 import { AdminSettingsService } from '../admin/admin-settings.service';
@@ -88,8 +89,9 @@ export class McpConfirmInterceptor implements NestInterceptor {
     const policy = (await this.settings.getMcpConfirmPolicy(user.orgId)) as ConfirmPolicy;
     if (!requiresConfirmation(policy, tool, isWrite)) return next.handle();
 
-    const auth = req.headers['authorization'];
-    const bearer = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    // Même extracteur que JwtAuthGuard (Authorization PUIS X-Api-Key) : sinon un
+    // appel Copilot Studio (X-Api-Key) liait le jeton de confirmation au hash de ''.
+    const bearer = extractBearer(req) ?? '';
     const bearerHash = createHash('sha256').update(bearer).digest('hex').slice(0, 32);
     const hash = argsHash(method, req.originalUrl, req.body);
 

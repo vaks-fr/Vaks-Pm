@@ -153,7 +153,7 @@ const ROLES = {
     const hash = await argon2.hash(adminPassword);
     const admin = await prisma.user.upsert({
       where: { organizationId_email: { organizationId: org.id, email: adminEmail } },
-      update: { passwordHash: hash, isAdmin: true, licensed: true },
+      update: { passwordHash: hash, isAdmin: true, licensed: true, mustChangePassword: true },
       create: {
         organizationId: org.id,
         email: adminEmail,
@@ -161,6 +161,7 @@ const ROLES = {
         name: 'Admin',
         isAdmin: true,
         licensed: true,
+        mustChangePassword: true,
       },
     });
     await prisma.membership.upsert({

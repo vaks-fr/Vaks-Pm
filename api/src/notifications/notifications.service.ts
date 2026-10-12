@@ -1395,23 +1395,22 @@ export class NotificationsService {
     attachments?: EmailJobData['attachments'],
   ): Promise<void> {
     let html = rendered.html;
-    // Conf SMTP résolue PAR TENANT (on est dans le contexte tenant ici) + mot
-    // de passe déchiffré. Transmis au job pour que le worker l'utilise tel quel
-    // (le worker ne sait pas, sinon, quel tenant a émis le job en pooled).
+    // Conf SMTP résolue PAR TENANT (on est dans le contexte tenant ici) —
+    // transport seulement. SÉCURITÉ : le mot de passe n'est JAMAIS mis dans le
+    // job (Redis sans auth + persistant + jobs failed conservés) ; le worker le
+    // récupère déchiffré via `GET /internal/notifications/smtp` (overlay +
+    // X-Worker-Token, scopé tenant par `X-Tenant-Slug`).
     const all = await this.settings.getAll(orgId);
     const smtpCfg = readSmtpSettings(all);
     let smtp: EmailJobData['smtp'];
     if (smtpCfg.host) {
-      const password = await this.settings
-        .getDecryptedSecret(orgId, 'smtp.password')
-        .catch(() => '');
       smtp = {
         host: smtpCfg.host,
         port: smtpCfg.port,
         encryption: smtpCfg.encryption,
         authMode: smtpCfg.authMode,
         user: smtpCfg.user,
-        password: password || null,
+        password: null,
       };
     }
     const inlineImages: NonNullable<EmailJobData['inlineImages']> = [];

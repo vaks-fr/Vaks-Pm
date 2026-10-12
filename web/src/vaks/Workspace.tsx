@@ -29,6 +29,7 @@ import { KanbanView } from './KanbanView';
 import { CommandPalette } from './CommandPalette';
 import { DashboardView } from './DashboardView';
 import { ListView } from './ListView';
+import { TableView } from './TableView';
 import ChangePasswordDialog from './ChangePasswordDialog';
 // Vues lourdes chargées à la demande (code-splitting) : chaque `import()` sort
 // dans un chunk séparé, hors du bundle initial. On ne charge TaskDetail /
@@ -55,6 +56,7 @@ const MembersView = lazy(() => import('./MembersView').then((m) => ({ default: m
 const ProjectDocumentsView = lazy(() =>
   import('./projects/ProjectDocumentsView').then((m) => ({ default: m.ProjectDocumentsView })),
 );
+const RisksView = lazy(() => import('./RisksView').then((m) => ({ default: m.RisksView })));
 const AdminPanel = lazy(() => import('./AdminPanel').then((m) => ({ default: m.AdminPanel })));
 const TeamView = lazy(() => import('./TeamView').then((m) => ({ default: m.TeamView })));
 const AgentsWorkspaceView = lazy(() => import('./AgentsWorkspaceView').then((m) => ({ default: m.AgentsWorkspaceView })));
@@ -149,6 +151,7 @@ const NAV: NavEntry[] = [
   { id: 'workload', labelKey: 'nav.workload', icon: 'gauge', star: true },
   { id: 'timesheet', labelKey: 'nav.timesheet', icon: 'hourglass' },
   { id: 'documents', labelKey: 'nav.documents', icon: 'paperclip' },
+  { id: 'risks', labelKey: 'nav.risks', icon: 'warn' },
   { id: 'members', labelKey: 'nav.members', icon: 'users' },
 ];
 
@@ -514,6 +517,12 @@ export default function Workspace() {
   // (`mytasks`) — première chose vue à la connexion. Le board projet est
   // désormais explicite (`?view=board`).
   const [view, setViewState] = useState(() => searchParams.get('view') || 'mytasks');
+  // Mode « édition en masse » : la vue Liste bascule dans la grille éditable
+  // (TableView) au lieu d'un onglet séparé. Réinitialisé dès qu'on quitte la Liste.
+  const [massEdit, setMassEdit] = useState(false);
+  useEffect(() => {
+    if (view !== 'list') setMassEdit(false);
+  }, [view]);
   const setView = useCallback(
     (next: string) => {
       setViewState(next);
@@ -2091,7 +2100,22 @@ export default function Workspace() {
               onComposerConsumed={consumeNewTask}
             />
           )}
-          {hasProject && view === 'list' && <ListView tasks={filtered} monday={mondayRef.current} density={t.density} onOpen={setOpenId} />}
+          {hasProject && view === 'list' && !massEdit && (
+            <ListView tasks={filtered} monday={mondayRef.current} density={t.density} onOpen={setOpenId} onMassEdit={() => setMassEdit(true)} />
+          )}
+          {hasProject && view === 'list' && massEdit && (
+            <TableView
+              tasks={filtered}
+              monday={mondayRef.current}
+              density={t.density}
+              subStatuses={subStatuses}
+              projectId={projectIdRef.current}
+              onOpen={setOpenId}
+              updateTask={updateTask}
+              onMoveColumn={moveTaskColumn}
+              onExit={() => setMassEdit(false)}
+            />
+          )}
           {hasProject && view === 'documents' && projectIdRef.current && (
             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
               <div className="subbar" style={{ borderBottom: 'none' }}>
@@ -2123,6 +2147,18 @@ export default function Workspace() {
           )}
           {hasProject && view === 'reports' && projectIdRef.current && (
             <ReportsView projectId={projectIdRef.current} monday={mondayRef.current} onOpenTask={setOpenId} />
+          )}
+          {hasProject && view === 'risks' && projectIdRef.current && (
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+              <div className="subbar" style={{ borderBottom: 'none' }}>
+                <div className="row gap2">
+                  <h1 className="view-h1">{tr('nav.risks')}</h1>
+                </div>
+              </div>
+              <div style={{ padding: '0 20px 20px' }}>
+                <RisksView projectId={projectIdRef.current} />
+              </div>
+            </div>
           )}
           {hasProject && view === 'finances' && projectIdRef.current && canSeeFinance && (
             <FinancesView

@@ -15,6 +15,10 @@ spec:
       annotations:
         # Roll pods when config/secret change.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # Rolls the pod when Redis auth / secret inputs change (e.g. enabling
+        # redis.auth on upgrade rewrites REDIS_URL in the Secret: pods must
+        # restart to read it, or they keep the password-less URL → NOAUTH).
+        checksum/secret-inputs: {{ include "vakspm.secretInputsChecksum" . }}
         {{- with .Values.api.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

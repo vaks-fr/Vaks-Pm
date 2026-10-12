@@ -264,6 +264,7 @@
     "emptyHintManage": "Use “Add” to upload one.",
     "added": "Document added · {{name}}",
     "uploadFailed": "Upload failed: {{message}}",
+    "viewTitle": "Preview",
     "downloadTitle": "Download",
     "downloadFailed": "Download failed: {{message}}",
     "deleteTitle": "Delete",

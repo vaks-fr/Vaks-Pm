@@ -512,7 +512,12 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
   //  - 'week'  : 7 jours, lundi UTC ≤ `from` → `lundi+6`, dayW = avail/7
   //  - 'month' : mois UTC contenant `from`, dayW = avail/N
   //  - 'custom': from/to tel quel, dayW = avail/VISIBLE_DAYS (scroll possible)
-  const avail = Math.max(600, containerW - LABEL_W - 4);
+  // Largeur réellement disponible pour la piste de jours. On NE force PAS de
+  // plancher à 600 : en 'week'/'month' la piste doit remplir *exactement* la
+  // largeur visible (sinon on scrolle horizontalement alors que la fenêtre tient
+  // à l'écran — bug sur écran étroit / sidebar ouverte). En 'custom' le plancher
+  // de lisibilité est déjà garanti par DAY_W_MIN, donc ce max(600) était inutile.
+  const avail = Math.max(1, containerW - LABEL_W - 4);
   const view = useMemo(() => {
     if (viewMode === 'week') {
       const a = new Date(from);
@@ -547,7 +552,12 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
     const totalDays = daysBetween(start, end) + 1;
     return {
       from: start, to: end, totalDays,
-      dayW: Math.max(DAY_W_MIN, Math.floor(avail / VISIBLE_DAYS)),
+      // Densité : on vise VISIBLE_DAYS jours à l'écran, MAIS si la plage
+      // choisie est plus courte on divise par le nombre de jours réel pour
+      // qu'elle *remplisse* la largeur (sinon une plage de 17 j laissait une
+      // large zone vide à droite — « custom va pas du tout »). Plage plus
+      // longue que VISIBLE_DAYS ⇒ densité fixe + scroll horizontal.
+      dayW: Math.max(DAY_W_MIN, Math.floor(avail / Math.min(VISIBLE_DAYS, totalDays))),
       label: null,
     };
   }, [viewMode, from, to, avail, weekStart, fmt]);
@@ -1216,7 +1226,10 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
         </div>
       </div>
 
-      <div className="gantt-scroll" ref={setScrollRef}>
+      <div
+        className={'gantt-scroll' + (viewMode === 'custom' ? '' : ' is-fit')}
+        ref={setScrollRef}
+      >
         <div className="gantt-grid" style={{ width: LABEL_W + trackW }}>
           {/* sticky header */}
           <div className="gantt-head" style={{ height: HEAD_H }}>
@@ -1607,18 +1620,23 @@ export function TimelineView({ projectId, onOpen, refreshKey = 0 }: Props) {
                                 <span className="gantt-mile-dot" />
                               </div>
                             )}
-                            {!t.isMilestone && widthDays * dayW >= 110 && (
-                              <span
-                                className="gantt-rspan mono"
-                                style={{
-                                  left:
-                                    xAtDay(daysBetween(epoch, sStart) + widthDays) +
-                                    8,
-                                }}
-                              >
-                                {tr('timeline:daysSpan', { days: widthDays })}
-                              </span>
-                            )}
+                            {(() => {
+                              if (t.isMilestone || widthDays * dayW < 110) return null;
+                              const spanLeft =
+                                xAtDay(daysBetween(epoch, sStart) + widthDays) + 8;
+                              // On n'affiche le libellé de durée que s'il tient
+                              // dans la piste visible. Pour une tâche dont la fin
+                              // dépasse la fenêtre, `spanLeft` tombait au-delà de
+                              // `trackW` → le libellé flottait dans le vide à
+                              // droite de la grille (et créait un scroll fantôme
+                              // en mode custom). 44px ≈ largeur max du libellé.
+                              if (spanLeft + 44 > trackW) return null;
+                              return (
+                                <span className="gantt-rspan mono" style={{ left: spanLeft }}>
+                                  {tr('timeline:daysSpan', { days: widthDays })}
+                                </span>
+                              );
+                            })()}
                           </div>
                         </div>
                       );

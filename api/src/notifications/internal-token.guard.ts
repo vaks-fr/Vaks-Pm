@@ -1,5 +1,6 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Request } from 'express';
+import { constantTimeEqual } from '../common/constant-time-eq.util';
 
 /**
  * Guard pour les endpoints internes appelés par le worker BullMQ. Valide un
@@ -30,7 +31,8 @@ export class InternalTokenGuard implements CanActivate {
     }
     const req = ctx.switchToHttp().getRequest<Request>();
     const got = req.headers['x-worker-token'];
-    if (got !== expected) throw new UnauthorizedException('Invalid worker token');
+    const value = Array.isArray(got) ? got[0] : got;
+    if (!constantTimeEqual(value, expected)) throw new UnauthorizedException('Invalid worker token');
     return true;
   }
 }

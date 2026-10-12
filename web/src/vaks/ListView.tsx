@@ -4,7 +4,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { columns as COLUMNS, users as USERS, type Task, type User } from './data';
-import { Avatar, AvatarStack, fmt, Icon, PriorityDot, ProgressRing, Tag } from './primitives';
+import { Avatar, AvatarStack, fmt, Icon, PriorityDot, Tag } from './primitives';
 import { localizeColName } from './colLabel';
 
 interface Group {
@@ -19,16 +19,18 @@ export function ListView({
   tasks,
   monday,
   onOpen,
+  onMassEdit,
 }: {
   tasks: Task[];
   monday: Date;
   density?: string;
   onOpen: (id: string) => void;
+  onMassEdit?: () => void;
 }) {
   const { t } = useTranslation('tasks');
   const [groupBy, setGroupBy] = useState<'status' | 'assignee' | 'priority'>('status');
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const [sortBy, setSortBy] = useState<'none' | 'due' | 'priority' | 'progress' | 'title'>('none');
+  const [sortBy, setSortBy] = useState<'none' | 'due' | 'priority' | 'title'>('none');
   const [filterPrio, setFilterPrio] = useState<'' | 'urgent' | 'high' | 'normal' | 'low'>('');
 
   // Filtre (priorité) appliqué avant le regroupement.
@@ -53,8 +55,6 @@ export function ListView({
           }
           case 'priority':
             return PRIO[a.priority] - PRIO[b.priority];
-          case 'progress':
-            return (b.progress ?? 0) - (a.progress ?? 0);
           case 'title':
             return a.title.localeCompare(b.title);
           default:
@@ -127,10 +127,15 @@ export function ListView({
               <option value="none">{t('list.sortNone')}</option>
               <option value="due">{t('list.due')}</option>
               <option value="priority">{t('list.priority')}</option>
-              <option value="progress">{t('list.progress')}</option>
               <option value="title">{t('list.task')}</option>
             </select>
           </label>
+          {onMassEdit && (
+            <button type="button" className="btn btn-sm btn-ghost row gap1" onClick={onMassEdit} title={t('table.massEditHint')}>
+              <Icon name="table" size={15} />
+              {t('table.massEdit')}
+            </button>
+          )}
         </div>
       </div>
 
@@ -140,7 +145,6 @@ export function ListView({
         <span>{t('list.priority')}</span>
         <span>{t('list.due')}</span>
         <span>{t('list.estimate')}</span>
-        <span>{t('list.progress')}</span>
       </div>
 
       {groups.map((g) => {
@@ -186,12 +190,6 @@ export function ListView({
                       )}
                     </div>
                     <div className="mono">{t.estimate ? t.estimate + 'h' : <span className="lr-empty">—</span>}</div>
-                    <div className="row gap2">
-                      <ProgressRing value={t.progress} size={20} />
-                      <span className="mono" style={{ fontSize: 12, color: 'var(--text-3)' }}>
-                        {t.progress}%
-                      </span>
-                    </div>
                   </div>
                 );
               })}

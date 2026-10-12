@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { createHash, randomBytes } from 'crypto';
 import { Permission } from '@vaks-pm/shared';
 import { ApiTokensService } from '../api-tokens/api-tokens.service';
@@ -66,7 +72,7 @@ export class OAuthService {
   // détection « write » (chevauchement lecture/écriture → write:true permanent).
   // Le gating de `log_time` est assuré par l'EXPOSITION du tool (flag allowWrite),
   // pas par ce scope.
-  private static readonly WRITE_SCOPES: Permission[] = [
+  static readonly WRITE_SCOPES: readonly Permission[] = [
     'project:create',
     'project:update',
     'task:create',
@@ -101,8 +107,17 @@ export class OAuthService {
    *  Réservé aux HUMAINS : la façade OAuth délègue une session utilisateur ; un
    *  agent IA (kind=AGENT) s'authentifie par PAT minté, jamais par OAuth. */
   private async assertUserActive(orgId: string, userId: string): Promise<void> {
+    // `licensed: true` : un compte dont le siège a été retiré perd aussi ses
+    // connexions IA (le PAT émis serait de toute façon refusé par `verify()`).
     const u = await this.prisma.user.findFirst({
-      where: { id: userId, organizationId: orgId, deletedAt: null, status: 'ACTIVE', kind: 'HUMAN' },
+      where: {
+        id: userId,
+        organizationId: orgId,
+        deletedAt: null,
+        status: 'ACTIVE',
+        kind: 'HUMAN',
+        licensed: true,
+      },
       select: { id: true },
     });
     if (!u) throw new UnauthorizedException('Compte désactivé — la connexion IA a été coupée.');
@@ -234,7 +249,15 @@ export class OAuthService {
       applicationType,
       createdAt: Date.now(),
     };
-    await this.store.saveClient(this.slug(), client);
+    const max = Number(process.env.OAUTH_DCR_MAX_CLIENTS) || 5000;
+    if (!(await this.store.saveClientCapped(this.slug(), client, max))) {
+      // Plafond anti-abus (DCR = route publique). Large par défaut : un client IA
+      // se réenregistre à chaque reconnexion ; surchargeable par env.
+      throw new HttpException(
+        { error: 'temporarily_unavailable', error_description: 'Trop de clients enregistrés, réessayer plus tard.' },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     // Réponse DCR au format **RFC 7591** (snake_case) : les clients (Claude,
     // ChatGPT…) lisent `client_id`/`redirect_uris` — un camelCase casse le flux.
     return {
@@ -385,16 +408,12 @@ export class OAuthService {
 
   async revokeConnection(userId: string, connId: string): Promise<{ revoked: boolean }> {
     const conn = await this.store.getConnection(this.slug(), connId);
+    // Propriétaire d'abord : sans ce contrôle, connaître le connId d'un tiers
+    // suffisait à révoquer SON jeton d'accès (IDOR — déconnexion forcée).
+    if (!conn || conn.userId !== userId) return { revoked: false };
     // Couper l'access token courant IMMÉDIATEMENT (sinon il survivrait ≤1 h).
     if (conn?.tokenId) await this.revokeTokenSafe(conn.orgId, conn.tokenId, userId);
     return { revoked: await this.store.deleteConnection(this.slug(), userId, connId) };
-  }
-
-  /** Coupe TOUTES les connexions IA d'un user (appelé à la suspension/suppression). */
-  async revokeAllUserConnections(userId: string): Promise<number> {
-    const conns = await this.store.listConnections(this.slug(), userId);
-    for (const c of conns) if (c.tokenId) await this.revokeTokenSafe(c.orgId, c.tokenId, userId);
-    return this.store.revokeUserConnections(this.slug(), userId);
   }
 
   /** Vue **admin org-wide** : toutes les connexions IA de l'org, enrichies du
@@ -410,7 +429,9 @@ export class OAuthService {
       lastUsedAt: number;
     }>
   > {
-    const conns = await this.store.listAllConnections(this.slug());
+    // Cloisonnement org : le store est par tenant (slug) mais une base peut
+    // porter plusieurs orgs — ne jamais lister les connexions d'une autre.
+    const conns = (await this.store.listAllConnections(this.slug())).filter((c) => c.orgId === orgId);
     const ids = [...new Set(conns.map((c) => c.userId))];
     const users = ids.length
       ? await this.prisma.user.findMany({
@@ -431,9 +452,9 @@ export class OAuthService {
   }
 
   /** Révocation **par un admin** d'une connexion IA (n'importe quel user). */
-  async adminRevokeConnection(connId: string): Promise<{ revoked: boolean }> {
+  async adminRevokeConnection(orgId: string, connId: string): Promise<{ revoked: boolean }> {
     const conn = await this.store.getConnection(this.slug(), connId);
-    if (!conn) return { revoked: false };
+    if (!conn || conn.orgId !== orgId) return { revoked: false };
     if (conn.tokenId) await this.revokeTokenSafe(conn.orgId, conn.tokenId, conn.userId);
     return { revoked: await this.store.deleteConnection(this.slug(), conn.userId, connId) };
   }
@@ -670,6 +691,8 @@ export class OAuthService {
         throw new UnauthorizedException('Vérification PKCE échouée.');
       }
     }
+    // Client DCR réellement utilisé : sort de la période d'essai (1 h → 90 j).
+    if (!client.confidential) await this.store.promoteClient(this.slug(), client.clientId);
     // Première émission : on ouvre une **connexion IA** stable (listable/révocable).
     const connId = await this.store.createConnection(this.slug(), {
       userId: rec.userId,
@@ -681,13 +704,37 @@ export class OAuthService {
   }
 
   private async refreshGrant(body: Record<string, string | undefined>) {
-    const { refresh_token, client_id } = body;
+    const { refresh_token, client_id, client_secret } = body;
     if (!refresh_token) throw new BadRequestException('refresh_token requis.');
-    const rec = await this.store.consumeRefresh(this.slug(), refresh_token);
-    if (!rec) throw new UnauthorizedException('refresh_token invalide ou expiré.');
-    if (client_id && client_id !== rec.clientId) {
+    // 1. Lecture SANS consommation : le client est authentifié AVANT de brûler
+    //    le refresh — un secret erroné (ou un voleur qui tâtonne) ne doit pas
+    //    tuer la chaîne du client légitime.
+    const peek = await this.store.peekRefresh(this.slug(), refresh_token);
+    if (!peek) throw new UnauthorizedException('refresh_token invalide ou expiré.');
+    if (client_id && client_id !== peek.clientId) {
       throw new UnauthorizedException('client_id incohérent.');
     }
+    // Client pré-enregistré révoqué par l'admin : ses refresh meurent avec lui.
+    // Marqueur EXPLICITE — les clients DCR partagent le préfixe `vaks_mcpc_`,
+    // l'absence du client ne prouve donc rien.
+    if (await this.store.isPreClientRevoked(this.slug(), peek.clientId)) {
+      throw new UnauthorizedException('Client OAuth révoqué — se reconnecter.');
+    }
+    // Client confidentiel (pré-enregistré : Copilot Studio…) : même preuve qu'à
+    // l'échange de code (RFC 6749 §6) — sinon un refresh volé suffit.
+    const pre = await this.store.getPreClient(this.slug(), peek.clientId);
+    if (pre?.confidential) {
+      if (client_id !== peek.clientId) {
+        throw new UnauthorizedException('client_id requis pour ce client.');
+      }
+      if (!client_secret || this.sha256(client_secret) !== pre.secretHash) {
+        throw new UnauthorizedException('client_secret invalide.');
+      }
+    }
+    // 2. Client authentifié → consommation atomique (GETDEL). Null = un refresh
+    //    concurrent l'a déjà consommé.
+    const rec = await this.store.consumeRefresh(this.slug(), refresh_token);
+    if (!rec) throw new UnauthorizedException('refresh_token invalide ou expiré.');
     // La connexion doit exister (sinon : révoquée par l'user/admin) ET l'utilisateur
     // doit être encore actif (sinon : suspendu/supprimé → on coupe la chaîne).
     if (!(await this.store.getConnection(this.slug(), rec.connId))) {
@@ -695,7 +742,13 @@ export class OAuthService {
     }
     await this.assertUserActive(rec.orgId, rec.userId);
     await this.store.touchConnection(this.slug(), rec.connId);
-    return this.issue(rec.userId, rec.orgId, rec.clientId, rec.scopes, rec.connId);
+    // Scopes du jeton = consentis ∩ politique org COURANTE : couper
+    // `mcp.allowWrites` retire l'écriture au prochain refresh (≤ TTL de l'access
+    // token). Le refresh, lui, garde les scopes CONSENTIS : réactiver l'écriture
+    // la rend aux connexions existantes (sinon elles ne faisaient que rétrécir).
+    const allowed = new Set(await this.computeScopes(rec.orgId));
+    const scopes = rec.scopes.filter((sc) => allowed.has(sc));
+    return this.issue(rec.userId, rec.orgId, rec.clientId, scopes, rec.connId, rec.scopes);
   }
 
   /** Émet la paire access (PAT court) + refresh, au format réponse OAuth. */
@@ -705,6 +758,8 @@ export class OAuthService {
     clientId: string,
     scopes: Permission[],
     connId: string,
+    /** Scopes consentis, conservés dans le refresh (défaut : ceux du jeton). */
+    consentedScopes: Permission[] = scopes,
   ) {
     const expiresAt = new Date(Date.now() + OAuthService.ACCESS_TTL_SEC * 1000).toISOString();
     const minted = await this.apiTokens.create(orgId, 'USER', {
@@ -723,7 +778,7 @@ export class OAuthService {
       userId,
       orgId,
       clientId,
-      scopes,
+      scopes: consentedScopes,
       connId,
     });
     return {

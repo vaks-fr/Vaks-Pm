@@ -88,5 +88,12 @@ services:
     volumes:
       - ./certs:/certs:ro
     networks: [dmz]
+    # Durcissement : pièce exposée à Internet (image déjà non-root, `USER node`).
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 256
     # Pas de ports publiés : seul Traefik est exposé. Le conteneur n'est joint
     # que par Traefik via le DNS du réseau `dmz` (http://mcp:8080).

@@ -29,6 +29,6 @@ export function buildServer(
   registerPrompts(server, api, allowWrite, lang);
   // Resources = données passives attachées au contexte par l'utilisateur. En
   // lecture seule par nature : aucun gating `allowWrite`.
-  registerResources(server, api);
+  registerResources(server, api, lang);
   return server;
 }

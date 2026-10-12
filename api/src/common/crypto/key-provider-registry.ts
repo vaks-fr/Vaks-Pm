@@ -42,7 +42,7 @@ export class KeyProviderRegistry implements KeyProvider {
   register(scheme: KekScheme, provider: KeyProvider): void {
     if (scheme === 'local') throw new Error("le schéma 'local' est réservé");
     this.providers.set(scheme, provider);
-    this.logger.log(`KeyProvider externe enregistré : ${scheme}`);
+    this.logger.log(`External KeyProvider registered: ${scheme}`);
   }
 
   private bySchemeOrThrow(scheme: KekScheme): KeyProvider {

@@ -2,6 +2,8 @@ import http from 'node:http';
 import https from 'node:https';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { McpConfig } from './config.js';
+import { pickLang } from './i18n.js';
+import { msg } from './i18n-messages.js';
 
 /**
  * Client HTTP minimal vers l'API Vaks-PM, **lié à une requête MCP** : il porte
@@ -83,13 +85,6 @@ export function withCallContext<T>(ctx: CallContext, fn: () => T): T {
 
 export class ApiClient {
   /**
-   * Repli si aucun contexte async n'est actif (jamais posé explicitement — le
-   * chemin normal est `withCallContext`, qui est correct même quand plusieurs
-   * handlers tournent en concurrence sur ce client). Reste à `{}` en pratique.
-   */
-  private callContext: CallContext = {};
-
-  /**
    * Langue de l'utilisateur, posée après lecture de `/me/mcp-context`. Sans
    * elle, l'API retombait systématiquement sur l'anglais pour TOUT ce qui passe
    * par l'IA : messages d'erreur traduits (`ExceptionI18nFilter`) et exports de
@@ -108,6 +103,12 @@ export class ApiClient {
      * client qui s'annonce, rien ne l'authentifie — comme `justification`.
      */
     private readonly clientUserAgent?: string,
+    /**
+     * IP du client IA (`req.ip` du MCP, derrière Traefik), relayée en
+     * `X-Forwarded-For` : l'API l'utilise comme clé de throttling par IP et
+     * comme IP d'audit. Sans elle, tout le trafic MCP partageait un seau unique.
+     */
+    private readonly clientIp?: string,
   ) {}
 
   /** Pose la langue relayée à l'API via `Accept-Language` (étiquette IETF). */
@@ -164,6 +165,11 @@ export class ApiClient {
       'x-vaks-agent': MCP_AGENT_ID,
       'user-agent': MCP_AGENT_ID,
     };
+    // IP du client IA : une seule valeur (celle calculée par le MCP), jamais la
+    // chaîne XFF entrante brute — l'API fait confiance à un saut (`trust proxy 1`).
+    if (this.clientIp && /^[0-9a-fA-F:.]{2,45}$/.test(this.clientIp)) {
+      headers['x-forwarded-for'] = this.clientIp;
+    }
     // Langue de l'utilisateur → messages d'erreur et exports dans SA langue.
     if (this.language) headers['accept-language'] = this.language;
     // Provenance : QUEL client IA est à l'origine de l'appel. Le `user-agent`
@@ -177,9 +183,8 @@ export class ApiClient {
     // Contexte d'audit (chantier agents 1) : nom du tool + justification.
     // Headers ASCII only — on encode la justification en RFC 2047 n'étant pas
     // praticable côté serveur, on remplace les caractères non-latin1 (rare).
-    // Contexte async d'abord (correct sous batch/concurrence), champ d'instance
-    // en repli — cf. `callContextStore`.
-    const ctx = callContextStore.getStore() ?? this.callContext;
+    // Contexte async (correct sous batch/concurrence) — cf. `callContextStore`.
+    const ctx: CallContext = callContextStore.getStore() ?? {};
     if (ctx.tool) headers['x-vaks-mcp-tool'] = ctx.tool.slice(0, 200);
     if (ctx.confirmToken) headers['x-vaks-confirm-token'] = ctx.confirmToken.slice(0, 200);
     // Contexte de coût : imputation de l'appel à une tâche, à défaut un projet.
@@ -232,31 +237,33 @@ export class ApiClient {
         },
       );
       req.on('error', (e) =>
-        reject(new VaksApiError(`Impossible de joindre l'API Vaks-PM (${e.message}).`, 0)),
+        reject(new VaksApiError(msg(this.lang(), 'apiUnreachable', e.message), 0)),
       );
-      req.on('timeout', () => req.destroy(new VaksApiError("Délai dépassé en joignant l'API.", 0)));
+      req.on('timeout', () => req.destroy(new VaksApiError(msg(this.lang(), 'apiTimeout'), 0)));
       if (payload !== undefined) req.write(payload);
       req.end();
     });
   }
 
-  /** Traduit un statut HTTP en message exploitable par l'agent IA. */
+  /** Langue des messages : celle posée après le handshake, sinon anglais. */
+  private lang() {
+    return pickLang(this.language);
+  }
+
+  /** Traduit un statut HTTP en message exploitable (lu par l'IA ET l'utilisateur). */
   private explain(status: number, detail: string): string {
+    const l = this.lang();
     switch (status) {
       case 401:
-        return (
-          'Accès Vaks-PM coupé : cette connexion IA a été déconnectée (par l’utilisateur dans ' +
-          'Sécurité → Connexions IA, ou par un administrateur) ou le jeton a expiré. ' +
-          'Pour continuer, l’utilisateur doit reconnecter le connecteur Vaks-PM dans son client IA.'
-        );
+        return msg(l, 'api401');
       case 403:
-        return `Accès refusé : le périmètre de l'utilisateur ne couvre pas cette opération (${detail}).`;
+        return msg(l, 'api403', detail);
       case 404:
-        return `Ressource introuvable (${detail}).`;
+        return msg(l, 'api404', detail);
       case 429:
-        return 'Trop de requêtes (rate-limit). Réessayer plus tard.';
+        return msg(l, 'api429');
       default:
-        return `Erreur API (${status}) : ${detail}`;
+        return msg(l, 'apiOther', status, detail);
     }
   }
 }

@@ -27,6 +27,55 @@ export class ProjectAccessService {
     private readonly rbac: RbacService,
   ) {}
 
+  /**
+   * Héritage owner→agent. Un agent IA (`kind=AGENT`) n'a pas besoin d'être
+   * ajouté membre de chaque projet : il **hérite de l'accès projet de son owner
+   * humain**, borné aux projets `agentsEnabled` (les seuls qui acceptent des
+   * agents — la case « Agents IA » du projet est donc le point d'opt-in). Le
+   * lien est recalculé **à la volée** (pas de `ProjectMember` matérialisé pour
+   * l'agent) : si l'owner quitte le projet, l'agent perd l'accès au tick
+   * suivant. Renvoie l'`ownerId` si `userId` est un agent avec owner, sinon
+   * `null` (les humains ne passent jamais par l'héritage).
+   */
+  private async agentOwnerId(userId: string): Promise<string | null> {
+    const u = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { kind: true, ownerId: true },
+    });
+    return u?.kind === 'AGENT' ? (u.ownerId ?? null) : null;
+  }
+
+  /**
+   * `true` si `agentUserId` est un agent dont l'**owner** est membre (direct ou
+   * via une équipe affectée) du projet **et** que le projet est `agentsEnabled`.
+   * Base commune de l'héritage owner→agent pour les vérifications mono-projet
+   * ({@link canAccessProject}, {@link canWriteTasks}).
+   */
+  private async agentInheritsProject(
+    orgId: string,
+    agentUserId: string,
+    projectId: string,
+  ): Promise<boolean> {
+    const ownerId = await this.agentOwnerId(agentUserId);
+    if (!ownerId) return false;
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, organizationId: orgId, deletedAt: null, agentsEnabled: true },
+      select: { id: true },
+    });
+    if (!project) return false;
+    const [ownerDirect, ownerViaTeam] = await Promise.all([
+      this.prisma.projectMember.findFirst({
+        where: { projectId, userId: ownerId },
+        select: { projectId: true },
+      }),
+      this.prisma.projectTeam.findFirst({
+        where: { projectId, team: { members: { some: { userId: ownerId } } } },
+        select: { projectId: true },
+      }),
+    ]);
+    return !!ownerDirect || !!ownerViaTeam;
+  }
+
   async canAccessProject(
     orgId: string,
     userId: string,
@@ -59,7 +108,10 @@ export class ProjectAccessService {
         select: { projectId: true },
       }),
     ]);
-    return !!directMember || !!viaTeam;
+    if (directMember || viaTeam) return true;
+    // Héritage owner→agent : un agent accède au projet si son owner en est
+    // membre (projet agentsEnabled uniquement). Recalculé à la volée.
+    return this.agentInheritsProject(orgId, userId, projectId);
   }
 
   /**
@@ -121,7 +173,13 @@ export class ProjectAccessService {
       where: { projectId, team: { members: { some: { userId } } } },
       select: { projectId: true },
     });
-    return !!viaTeam;
+    if (viaTeam) return true;
+    // Héritage owner→agent : un agent édite les tâches d'un projet non billable
+    // agentsEnabled si son owner en est membre — même plancher qu'un membre
+    // ordinaire (un projet billable exigerait un rôle projet explicite, que
+    // l'héritage n'accorde pas : les agents billables restent à ajouter à la
+    // main, comportement volontairement conservateur).
+    return this.agentInheritsProject(orgId, userId, projectId);
   }
 
   /**
@@ -221,6 +279,31 @@ export class ProjectAccessService {
     const ids = new Set<string>();
     for (const m of direct) ids.add(m.projectId);
     for (const t of viaTeam) ids.add(t.projectId);
+
+    // Héritage owner→agent : ajoute les projets `agentsEnabled` dont l'owner de
+    // l'agent est membre (direct ou via équipe). Borne l'exposition aux seuls
+    // projets qui acceptent des agents, jamais tout le portefeuille de l'owner.
+    const ownerId = await this.agentOwnerId(userId);
+    if (ownerId) {
+      const [ownerDirect, ownerViaTeam] = await Promise.all([
+        this.prisma.projectMember.findMany({
+          where: {
+            userId: ownerId,
+            project: { organizationId: orgId, deletedAt: null, agentsEnabled: true },
+          },
+          select: { projectId: true },
+        }),
+        this.prisma.projectTeam.findMany({
+          where: {
+            project: { organizationId: orgId, deletedAt: null, agentsEnabled: true },
+            team: { members: { some: { userId: ownerId } } },
+          },
+          select: { projectId: true },
+        }),
+      ]);
+      for (const m of ownerDirect) ids.add(m.projectId);
+      for (const t of ownerViaTeam) ids.add(t.projectId);
+    }
     return [...ids];
   }
 

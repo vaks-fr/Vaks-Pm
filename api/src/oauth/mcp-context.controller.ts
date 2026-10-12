@@ -1,6 +1,5 @@
 import { Controller, ForbiddenException, Get, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import type { Permission } from '@vaks-pm/shared';
 import { billingUnitForProvider } from '@vaks-pm/shared';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PublicApi } from '../rbac/require-permissions.decorator';
@@ -8,32 +7,14 @@ import { AuthUser, CurrentUser } from '../auth/current-user.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { CacheService } from '../common/cache.service';
+import { OAuthService } from './oauth.service';
 
 /**
- * Scopes d'écriture exposés via MCP (miroir de `OAuthService.WRITE_SCOPES`).
- * Sert au serveur MCP à **masquer** les tools d'écriture quand le jeton ne les
- * porte pas (org sans `mcp.allowWrites`) — plutôt que de lister des tools qui
- * échoueraient en 403.
+ * Scopes d'écriture exposés via MCP : source UNIQUE = `OAuthService.WRITE_SCOPES`
+ * (était une copie à garder en phase à la main). Sert au serveur MCP à
+ * **masquer** les tools d'écriture quand le jeton ne les porte pas.
  */
-// `time:log` volontairement absent : il est aussi un scope de LECTURE (toujours
-// accordé pour lire la timesheet) → l'inclure rendrait `write:true` en
-// permanence. Le tool d'écriture `log_time` est gated par l'exposition (flag
-// allowWrite dérivé d'ICI), pas par ce scope. Garder en phase avec
-// `OAuthService.WRITE_SCOPES`.
-const MCP_WRITE_SCOPES: Permission[] = [
-  'project:create',
-  'project:update',
-  'task:create',
-  'task:update',
-  'allocation:manage',
-  'comment:create',
-  'finance:manage',
-  'client:manage',
-  'team:create',
-  'team:manage_members',
-  'project:assign_managers',
-  'task:delete',
-];
+const MCP_WRITE_SCOPES = OAuthService.WRITE_SCOPES;
 
 /**
  * Contexte du jeton pour le **serveur MCP** (phase 11). Appelé une fois par
@@ -73,6 +54,14 @@ export class McpContextController {
 
   @Get()
   async context(@CurrentUser() user: AuthUser) {
+    // Seuls les jetons d'API (`vaks_…`) pilotent le MCP. Un JWT de session passe
+    // `@PublicApi` (le SPA consomme les mêmes routes) mais contournerait toute
+    // la gouvernance IA, conditionnée à `viaApiToken` (kill switch, quotas,
+    // confirmation, gate finance, politique PAT). Le serveur MCP filtre déjà le
+    // format ; ceci est la défense en profondeur côté API.
+    if (!user.viaApiToken) {
+      throw new ForbiddenException("Le connecteur IA (MCP) n'accepte que les jetons d'API Vaks-PM.");
+    }
     // Kill switch org, relu à chaque requête MCP (cf. en-tête de classe).
     // Cache court : ce handler est sur le chemin chaud (un appel par tool call)
     // et `getMcpEnabled` fait un `findUnique` non caché — sans cache on ajoutait

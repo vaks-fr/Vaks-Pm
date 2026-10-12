@@ -139,8 +139,6 @@ export const AUDIT_ACTIONS = {
   MCP_CONFIRM_REJECTED: 'mcp.confirm_rejected',
 } as const;
 
-export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS] | string;
-
 // Type-only (effacé à la compilation) → pas de cycle d'import runtime avec
 // audit-log.service, qui reste la source du type.
 import type { AuditSeverity } from './audit-log.service';

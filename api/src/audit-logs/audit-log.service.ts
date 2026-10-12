@@ -196,7 +196,7 @@ export class AuditLogService implements OnModuleInit, OnApplicationShutdown {
     this.droppedSinceLastReport++;
     const now = Date.now();
     if (now - this.lastDropReport > 60_000) {
-      this.logger.warn(`Audit buffer overflow: ${this.droppedSinceLastReport} entrée(s) droppée(s)`);
+      this.logger.warn(`Audit buffer overflow: ${this.droppedSinceLastReport} entry(ies) dropped`);
       this.droppedSinceLastReport = 0;
       this.lastDropReport = now;
     }

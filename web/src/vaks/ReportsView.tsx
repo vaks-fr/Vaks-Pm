@@ -326,8 +326,13 @@ function BurndownChart({ data }: { data: BurndownReport }) {
   const idealPath = data.points
     .map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.idealRemainingHours).toFixed(1)}`)
     .join(' ');
+  // Le « réel » s'arrête à aujourd'hui : au-delà, l'API renvoie l'état courant
+  // reporté à plat, ce qui se lit comme une mesure. L'idéal couvre toute la fenêtre.
+  const today = new Date().toISOString().slice(0, 10);
+  const isPast = (p: { date: string }) => p.date <= today;
   const actualPath = data.points
-    .map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.actualRemainingHours).toFixed(1)}`)
+    .map((p, i) => (isPast(p) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.actualRemainingHours).toFixed(1)}` : ''))
+    .filter(Boolean)
     .join(' ');
 
   const yTicks = [0, maxY / 2, maxY];
@@ -366,7 +371,7 @@ function BurndownChart({ data }: { data: BurndownReport }) {
       {/* réel */}
       <path d={actualPath} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
       {/* points réels + zone de survol (tooltip date/valeur) */}
-      {data.points.map((p, i) => (
+      {data.points.map((p, i) => isPast(p) && (
         <g key={i}>
           <circle cx={x(i)} cy={y(p.actualRemainingHours)} r="3" fill="var(--accent)" pointerEvents="none" />
           <circle cx={x(i)} cy={y(p.actualRemainingHours)} r="10" fill="transparent"
@@ -1157,7 +1162,8 @@ export function ReportsView({ projectId, monday, onOpenTask }: Props) {
       !cfd || cfd.points.length <= 1 ? null : (
         <div className="card" style={{ padding: 14 }}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>{t('reports:cfd.title')}</div>
-          <CfdChart points={cfd.points} />
+          {/* Historique pur : pas de points au-delà d'aujourd'hui (l'état courant reporté à plat). */}
+          <CfdChart points={cfd.points.filter((p) => p.date <= new Date().toISOString().slice(0, 10))} />
           <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>{t('reports:cfd.note')}</div>
         </div>
       ),

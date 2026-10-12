@@ -54,7 +54,7 @@ export class SeatService {
       if (grantIds.length) await this.grantSeats(orgId, grantIds, actor);
       if (revokeIds.length) await this.revokeOrphanedSeats(orgId, revokeIds, actor);
     } catch (err) {
-      this.logger.warn(`Réconciliation auto-licence échouée: ${(err as Error).message}`);
+      this.logger.warn(`Auto-license reconciliation failed: ${(err as Error).message}`);
     }
   }
 
@@ -70,7 +70,7 @@ export class SeatService {
     const remaining = await this.licenses.seatsRemaining(orgId); // null = illimité
     const toGrant = remaining == null ? candidates : candidates.slice(0, Math.max(0, remaining));
     if (!toGrant.length) {
-      this.logger.warn(`Auto-licence: plafond atteint, ${candidates.length} user(s) restent sans siège.`);
+      this.logger.warn(`Auto-license: seat cap reached, ${candidates.length} user(s) left without a seat.`);
       return;
     }
     const gIds = toGrant.map((u) => u.id);

@@ -42,6 +42,7 @@ import {
   EMPTY_AGENT_CHARTER_VIEW,
 } from '../agents/context/agent-charter-view';
 import { MAX_TEXT_DOC_BYTES, textMimeFor } from './text-document';
+import { contentDisposition } from '../common/content-disposition.util';
 
 /**
  * Refus commun aux surfaces du charter qui rendent le document ENTIER (export
@@ -564,10 +565,7 @@ export class ProjectsController {
     }
     const buffer = await this.s3.getObjectBuffer(this.s3.buckets.charters, key);
     res.setHeader('Content-Type', charter.signedDocument.mimeType || 'application/octet-stream');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${charter.signedDocument.filename}"`,
-    );
+    res.setHeader('Content-Disposition', contentDisposition(charter.signedDocument.filename));
     res.setHeader('Content-Length', String(buffer.length));
     res.send(buffer);
   }
@@ -647,6 +645,9 @@ export class ProjectsController {
     // Préfixe UUID pour éviter les collisions de noms (plusieurs offres homonymes).
     const storedName = `${randomUUID()}-${safeName}`;
     const key = docKey(projectId, storedName);
+    // Appartenance projet vérifiée AVANT d'écrire le blob : sinon un non-membre
+    // remplit le bucket d'objets orphelins (404 après coup, blob jamais purgé).
+    await this.projects.findOne(user.orgId, projectId, user.userId, user.isAdmin);
     await this.s3.putObject(this.s3.buckets.charters, key, file.buffer, file.mimetype);
     return this.projects.recordDocument(user.orgId, projectId, user.userId, user.isAdmin, {
       kind: docKind,
@@ -816,7 +817,7 @@ export class ProjectsController {
     if (!exists) throw new NotFoundException('Blob du document introuvable');
     const buffer = await this.s3.getObjectBuffer(this.s3.buckets.charters, doc.storageKey);
     res.setHeader('Content-Type', doc.mimeType || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${doc.filename}"`);
+    res.setHeader('Content-Disposition', contentDisposition(doc.filename));
     res.setHeader('Content-Length', String(buffer.length));
     res.send(buffer);
   }

@@ -343,5 +343,21 @@
     "expiryRequired": "Ablaufdatum erforderlich (max. 2 Jahre).",
     "revoked": "Token widerrufen",
     "revokeConfirm": "Diesen Token widerrufen? Aufrufe mit diesem Schlüssel werden sofort eingestellt."
+  },
+  "calendarFeed": {
+    "title": "Kalender-Feed (ICS)",
+    "desc": "Abonnieren Sie Ihre Kalender-App (Outlook, Google Kalender, Apple Kalender…) für Ihre Aufgabenfälligkeiten und Zuweisungen. Die URL ist persönlich und geheim — wer sie besitzt, kann Ihren Kalender lesen.",
+    "urlLabel": "Abonnement-URL",
+    "copy": "Kopieren",
+    "copied": "URL kopiert",
+    "howto": "Verwenden Sie in Ihrer Kalender-App „Von URL abonnieren“ (oder „Kalender hinzufügen > Von URL“) und fügen Sie diesen Link ein.",
+    "inactive": "Kein aktives Abonnement.",
+    "generate": "URL erzeugen",
+    "generated": "URL erzeugt",
+    "regenerate": "Neu erzeugen",
+    "regenerateConfirm": "Das Neuerzeugen macht die alte URL ungültig — jedes bestehende Abonnement in einer Kalender-App wird nicht mehr aktualisiert. Fortfahren?",
+    "revoke": "Widerrufen",
+    "revokeConfirm": "Kalenderabonnement widerrufen? Die aktuelle URL funktioniert danach sofort nicht mehr.",
+    "revoked": "Abonnement widerrufen"
   }
 }

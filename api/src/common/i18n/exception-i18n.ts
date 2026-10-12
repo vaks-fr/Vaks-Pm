@@ -307,6 +307,16 @@ const M: Record<string, [string, string, string]> = {
   'Énumération Graph échouée (HTTP {}).': ['Graph enumeration failed (HTTP {}).', 'Enumerazione Graph non riuscita (HTTP {}).', 'Graph-Enumeration fehlgeschlagen (HTTP {}).'],
   'État de session SAML invalide ou expiré.': ['Invalid or expired SAML session state.', 'Stato di sessione SAML non valido o scaduto.', 'Ungültiger oder abgelaufener SAML-Sitzungsstatus.'],
   'État de session SSO invalide ou expiré.': ['Invalid or expired SSO session state.', 'Stato di sessione SSO non valido o scaduto.', 'Ungültiger oder abgelaufener SSO-Sitzungsstatus.'],
+  // ── Connecteur IA / OAuth (audit MCP 2026-09) ──
+  "Le connecteur IA (MCP) est désactivé pour votre organisation. Contactez votre administrateur.": ['The AI connector (MCP) is disabled for your organization. Contact your administrator.', "Il connettore IA (MCP) è disattivato per la tua organizzazione. Contatta il tuo amministratore.", 'Der KI-Connector (MCP) ist für Ihre Organisation deaktiviert. Wenden Sie sich an Ihren Administrator.'],
+  "Le connecteur IA (MCP) n'accepte que les jetons d'API Vaks-PM.": ['The AI connector (MCP) only accepts Vaks-PM API tokens.', 'Il connettore IA (MCP) accetta solo token API Vaks-PM.', 'Der KI-Connector (MCP) akzeptiert nur Vaks-PM-API-Token.'],
+  "La création de jetons d'API personnels est désactivée par votre organisation.": ['Creating personal API tokens is disabled by your organization.', 'La creazione di token API personali è disattivata dalla tua organizzazione.', 'Das Erstellen persönlicher API-Token ist von Ihrer Organisation deaktiviert.'],
+  "Les sessions ouvertes via la passerelle IA ne donnent accès qu'à l'authentification.": ['Sessions opened through the AI gateway only give access to authentication.', "Le sessioni aperte tramite il gateway IA danno accesso solo all'autenticazione.", 'Über das KI-Gateway geöffnete Sitzungen gewähren nur Zugriff auf die Authentifizierung.'],
+  'Compte désactivé — la connexion IA a été coupée.': ['Account disabled — the AI connection has been cut.', 'Account disattivato — la connessione IA è stata interrotta.', 'Konto deaktiviert — die KI-Verbindung wurde getrennt.'],
+  'Client OAuth révoqué — se reconnecter.': ['OAuth client revoked — reconnect.', 'Client OAuth revocato — riconnettersi.', 'OAuth-Client widerrufen — erneut verbinden.'],
+  'client_id requis pour ce client.': ['client_id required for this client.', 'client_id obbligatorio per questo client.', 'client_id für diesen Client erforderlich.'],
+  'client_secret invalide.': ['Invalid client_secret.', 'client_secret non valido.', 'Ungültiges client_secret.'],
+  'Le jeton doit porter les claims `exp` et `iat` (jeton sans expiration refusé).': ['The token must carry the `exp` and `iat` claims (tokens without expiry are refused).', 'Il token deve contenere i claim `exp` e `iat` (token senza scadenza rifiutato).', 'Das Token muss die Claims `exp` und `iat` enthalten (Token ohne Ablauf werden abgelehnt).'],
 };
 
 // Precompute exact + pattern matchers on normalized keys.

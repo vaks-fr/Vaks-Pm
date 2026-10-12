@@ -107,6 +107,26 @@ mcp:
   tolerations: []
   affinity: {}
   podAnnotations: {}
+  # Hardened by default (internet-facing; image runs as `node`, uid 1000).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile: { type: RuntimeDefault }
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities: { drop: ["ALL"] }
+
+# Network isolation (mirrors the Swarm `mcp-api` overlay): the mcp pods may
+# only reach the api (+ DNS), and Redis only accepts api/controlplane/worker.
+# Needs a CNI that enforces NetworkPolicy (Calico, Cilium, k3s' kube-router…);
+# on one that doesn't, these objects are inert, never harmful.
+networkPolicy:
+  enabled: true
+  # Namespace hosting the cluster DNS (mcp egress on port 53 is limited to it).
+  # kube-system for most distributions (k3s included); openshift-dns on OpenShift.
+  dnsNamespace: kube-system
 
 # Control-plane — ONLY deployed when tenancy.mode == "pooled".
 controlplane:
@@ -280,6 +300,14 @@ externalDatabase:
 redis:
   enabled: true           # deploy a single-node in-cluster Redis
   image: redis:7-alpine
+  # requirepass: without it any pod able to reach the Service reads/writes
+  # Redis — including `oauth:refresh:*` (forging an OAuth refresh = minting a
+  # user PAT). Password generated and kept in the chart Secret (REDIS_PASSWORD)
+  # unless set here; with secrets.existingSecret, that Secret must carry
+  # REDIS_PASSWORD and a REDIS_URL embedding it (redis://:<pw>@<host>:6379).
+  auth:
+    enabled: true
+    password: ""          # alphanumeric; empty = generated
   persistence:
     enabled: true
     size: 2Gi

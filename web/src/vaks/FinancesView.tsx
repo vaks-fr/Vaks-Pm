@@ -485,7 +485,8 @@ export function FinancesView({ projectId, pushToast }: Props) {
       <div className="fin-card">
         <div className="fin-card-head">
           <div className="fin-card-title">{t('finances:project.breakdown.title')}</div>
-          <div className="fin-card-sub2 mono">{t('finances:project.breakdown.forecast', { amount: money(d.bdTotal) })}</div>
+          {/* bdTotal vaut 1 quand il n'y a aucun coût (garde de division) : afficher la vraie somme. */}
+          <div className="fin-card-sub2 mono">{t('finances:project.breakdown.forecast', { amount: money(d.breakdown.reduce((s, x) => s + x.amount, 0)) })}</div>
         </div>
         <div className="fin-bd">
           <div className="fin-bd-bar">

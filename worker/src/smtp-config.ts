@@ -1,7 +1,8 @@
 /**
- * Récupère la configuration SMTP depuis l'API (clés `smtp.*` dans OrgSetting).
- * Le mot de passe SMTP n'est PAS exposé par l'API : on le lit côté worker
- * dans la variable d'env `SMTP_PASSWORD` (montée comme Swarm secret).
+ * Récupère la configuration SMTP depuis l'API (clés `smtp.*` dans OrgSetting),
+ * mot de passe compris (déchiffré par l'API, route overlay-only + jeton
+ * worker — jamais via le payload Redis des jobs). Fallback : env
+ * `SMTP_PASSWORD` (Swarm secret) quand l'admin n'en a pas saisi.
  *
  * Cache mémoire 60 s, **par tenant** (`tenantSlug`) — en pooled, la conf SMTP
  * (From/Reply-To/branding) d'un tenant ne doit jamais fuiter vers un autre.
@@ -18,7 +19,7 @@ export interface SmtpConfig {
   encryption: SmtpEncryption;
   authMode: SmtpAuthMode;
   user: string | null;
-  /** Lu depuis env SMTP_PASSWORD (jamais en DB). */
+  /** Depuis l'API (chiffré at-rest côté API), sinon env SMTP_PASSWORD. Jamais journalisé. */
   password: string | null;
   fromName: string;
   fromAddress: string;
@@ -69,7 +70,14 @@ async function fetchFromApi(tenantSlug?: string | null): Promise<SmtpConfig> {
   const res = await fetch(`${base}/api/v1/internal/notifications/smtp`, { headers });
   if (!res.ok) throw new Error(`SMTP fetch failed: ${res.status}`);
   const json = (await res.json()) as {
-    smtp: { host: string; port: number; encryption: SmtpEncryption; authMode: SmtpAuthMode; user: string | null } | null;
+    smtp: {
+      host: string;
+      port: number;
+      encryption: SmtpEncryption;
+      authMode: SmtpAuthMode;
+      user: string | null;
+      password?: string | null;
+    } | null;
     notifications: { fromName: string; fromAddress: string; replyTo: string | null } | null;
   };
   if (!json.smtp || !json.notifications) throw new Error('No org SMTP config');
@@ -79,7 +87,7 @@ async function fetchFromApi(tenantSlug?: string | null): Promise<SmtpConfig> {
     encryption: json.smtp.encryption,
     authMode: json.smtp.authMode,
     user: json.smtp.user,
-    password: process.env.SMTP_PASSWORD ?? null,
+    password: json.smtp.password || process.env.SMTP_PASSWORD || null,
     fromName: json.notifications.fromName,
     fromAddress: json.notifications.fromAddress,
     replyTo: json.notifications.replyTo,

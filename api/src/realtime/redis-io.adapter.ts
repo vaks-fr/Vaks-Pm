@@ -11,7 +11,7 @@ import type { ServerOptions } from 'socket.io';
  * un emit fait sur l'instance A n'atteint pas les clients connectés sur B.
  */
 export class RedisIoAdapter extends IoAdapter {
-  private readonly logger = new Logger(RedisIoAdapter.name);
+  private readonly redisLogger = new Logger(RedisIoAdapter.name);
   private adapterConstructor?: ReturnType<typeof createAdapter>;
 
   constructor(private readonly appCtx: INestApplicationContext) {
@@ -23,10 +23,11 @@ export class RedisIoAdapter extends IoAdapter {
     const url = config.get<string>('redisUrl') ?? 'redis://redis:6379';
     const pub = new Redis(url, { lazyConnect: false, maxRetriesPerRequest: null });
     const sub = pub.duplicate();
-    pub.on('error', (e) => this.logger.error(`redis pub error: ${e.message}`));
-    sub.on('error', (e) => this.logger.error(`redis sub error: ${e.message}`));
+    pub.on('error', (e) => this.redisLogger.error(`redis pub error: ${e.message}`));
+    sub.on('error', (e) => this.redisLogger.error(`redis sub error: ${e.message}`));
     this.adapterConstructor = createAdapter(pub, sub);
-    this.logger.log(`Socket.IO Redis adapter connected (${url})`);
+    // Jamais l'URL brute : elle porte le mot de passe `requirepass`.
+    this.redisLogger.log(`Socket.IO Redis adapter connected (${pub.options.host}:${pub.options.port})`);
   }
 
   createIOServer(port: number, options?: ServerOptions): unknown {

@@ -53,7 +53,7 @@ export class OidcClientService {
       try {
         return await this.tenantCrypto.decrypt(provider.organizationId, provider.oidcClientSecretEnc);
       } catch (e) {
-        this.logger.error(`Déchiffrement du secret OIDC échoué (${provider.slug}): ${(e as Error).message}`);
+        this.logger.error(`OIDC client secret decryption failed (${provider.slug}): ${(e as Error).message}`);
         throw new BadRequestException('Secret client OIDC illisible (clé de chiffrement ?).');
       }
     }
@@ -72,7 +72,7 @@ export class OidcClientService {
       const privateKeyPem = await this.tenantCrypto.decrypt(provider.organizationId, provider.oidcPrivateKeyEnc);
       return { privateKeyPem, thumbprint: provider.oidcCertThumbprint };
     } catch (e) {
-      this.logger.error(`Déchiffrement de la clé privée OIDC échoué (${provider.slug}): ${(e as Error).message}`);
+      this.logger.error(`OIDC private key decryption failed (${provider.slug}): ${(e as Error).message}`);
       throw new BadRequestException('Clé privée OIDC illisible (clé de chiffrement ?).');
     }
   }

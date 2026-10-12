@@ -5,10 +5,13 @@ import {
   resolveTenantHost,
   resourceOrigin,
   authorizationServer,
+  validHost,
 } from './config.js';
 import { buildServer } from './server.js';
-import { ApiClient, VaksApiError } from './api-client.js';
+import { ApiClient } from './api-client.js';
 import { ACCEPT_LANGUAGE, pickLang } from './i18n.js';
+import { classifyHandshakeError, extractBearer, isVaksToken } from './auth.js';
+import { langFromAcceptLanguage, msg } from './i18n-messages.js';
 
 /**
  * Point d'entrée du serveur MCP Vaks-PM.
@@ -18,14 +21,18 @@ import { ACCEPT_LANGUAGE, pickLang } from './i18n.js';
  * crée un serveur + transport jetables → simple à scaler horizontalement,
  * sans état de session partagé entre réplicas.
  *
- * Auth (incrément 1) : on extrait le `Authorization: Bearer vaks_…` et on le
- * relaie à l'API, qui le valide (phase 9) et applique le RBAC. Le serveur MCP
- * ne détient AUCUN secret et ne touche ni la DB, ni Redis, ni Garage.
- * L'incrément 2 ajoutera la couche OAuth (RFC 9728 + façade Entra) pour le login
- * navigateur sans coller de jeton.
+ * Auth : on extrait le `Authorization: Bearer vaks_…` et on le relaie à l'API,
+ * qui le valide (phase 9) et applique le RBAC. Seuls les jetons `vaks_…` sont
+ * relayés (cf. `isVaksToken`). Le login navigateur passe par la façade OAuth
+ * (RFC 9728, métadonnées ci-dessous). Le serveur MCP ne détient AUCUN secret
+ * et ne touche ni la DB, ni Redis, ni Garage.
  */
 const cfg = loadConfig();
 const app = express();
+// Derrière Traefik (un saut) : `req.ip` = IP réelle du client IA, relayée à
+// l'API en `X-Forwarded-For`. Sans ça l'API voit l'IP du conteneur mcp pour
+// TOUS les clients de TOUS les tenants → un seul seau de throttling (DoS).
+app.set('trust proxy', 1);
 
 /** Réponse d'erreur JSON-RPC (le corps attendu par un client MCP). */
 function rpcError(res: Response, status: number, code: number, message: string) {
@@ -63,7 +70,7 @@ app.use((req, res, next) => {
     // `/healthz` est exempté — c'est la sonde Swarm, pas du trafic MCP.
     if (req.path !== '/healthz') {
       res.setHeader('Connection', 'close');
-      return rpcError(res, 503, -32000, 'Serveur MCP en cours d’arrêt, réessayer (un autre réplica prend le relais).');
+      return rpcError(res, 503, -32000, msg(langFromAcceptLanguage(req.headers['accept-language']), 'shuttingDown'));
     }
   }
   inFlight++;
@@ -74,6 +81,17 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '4mb' }));
+
+// Host entrant validé AVANT tout usage (URLs renvoyées au client, Host relayé à
+// l'API). Un Host invalide ou hors allow-list → 421 (Misdirected Request).
+// `/healthz` exempté : la sonde Swarm frappe 127.0.0.1:8080.
+app.use((req, res, next) => {
+  if (req.path === '/healthz') return next();
+  const host = validHost(cfg, req.headers.host);
+  if (!host) return rpcError(res, 421, -32000, msg(langFromAcceptLanguage(req.headers['accept-language']), 'unknownHost'));
+  req.headers.host = host;
+  next();
+});
 
 // Healthchecks Swarm/K8s.
 app.get('/healthz', (_req, res) => res.status(200).json({ status: 'ok' }));
@@ -110,40 +128,19 @@ function resourceMetadataUrl(req: Request): string {
   return `${resourceOrigin(req.headers.host)}/.well-known/oauth-protected-resource`;
 }
 
-/**
- * Extrait le jeton porteur. Chemin nominal : `Authorization: Bearer vaks_…`.
- *
- * Repli sur l'en-tête NON RÉSERVÉ `X-Api-Key` : certains clients — notamment les
- * **custom connectors Power Platform / Copilot Studio** — RÉSERVENT l'en-tête
- * `Authorization` et le strippent silencieusement, si bien qu'un jeton d'agent
- * (PAT) n'arrivait jamais. `X-Api-Key` contourne ce mur. On accepte la valeur
- * telle quelle (PAT brut) OU préfixée `Bearer ` — le champ de connexion côté
- * Copilot laisse souvent l'un ou l'autre. Le repli ne concerne QUE le transport
- * du jeton : la validation (API) et le RBAC sont inchangés.
- */
-function extractBearer(req: Request): string | null {
-  const auth = req.headers['authorization'];
-  if (typeof auth === 'string' && auth.startsWith('Bearer ')) return auth.slice(7).trim() || null;
-  const raw = req.headers['x-api-key'];
-  const alt = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof alt === 'string' && alt.trim()) {
-    const v = alt.trim();
-    return (v.startsWith('Bearer ') ? v.slice(7).trim() : v) || null;
-  }
-  return null;
-}
-
 app.post('/mcp', async (req: Request, res: Response) => {
+  // Langue des erreurs AVANT le handshake : celle annoncée par le client IA.
+  const reqLang = langFromAcceptLanguage(req.headers['accept-language']);
   // 1. Jeton bearer obligatoire (Authorization: Bearer …, repli X-Api-Key).
-  const bearer = extractBearer(req);
-  if (!bearer) {
+  const bearer = extractBearer(req.headers);
+  if (!bearer || !isVaksToken(bearer)) {
     // RFC 9728 §5.1 : on pointe le client vers les métadonnées de la ressource
     // → il découvre l'AS et lance le flux OAuth (login navigateur).
     res.setHeader(
       'WWW-Authenticate',
       `Bearer realm="vaks-pm-mcp", resource_metadata="${resourceMetadataUrl(req)}"`,
     );
-    return rpcError(res, 401, -32001, "Jeton d'accès requis (Authorization: Bearer …).");
+    return rpcError(res, 401, -32001, msg(reqLang, 'tokenRequired'));
   }
 
   // 2. Host tenant reconstitué (mode pooled) pour que l'API résolve la bonne org.
@@ -152,17 +149,17 @@ app.post('/mcp', async (req: Request, res: Response) => {
   // Studio, ChatGPT…). Relayé à l'API pour le journal d'audit — c'est la seule
   // trace de la provenance d'une action, et elle manquait.
   const clientUa = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined;
-  const api = new ApiClient(cfg, bearer, tenantHost, clientUa);
+  const api = new ApiClient(cfg, bearer, tenantHost, clientUa, req.ip);
+  // Le handshake part dans la langue du client : un refus de l'API (connecteur
+  // désactivé…) revient ainsi traduit. Remplacée ensuite par la langue du user.
+  api.setLanguage(ACCEPT_LANGUAGE[reqLang]);
 
   // 2bis. Contexte du jeton (validation **tôt** + scopes accordés). Un 401 ici
   // = jeton refusé côté API (invalide, expiré, révoqué, ou — pour un agent —
   // propriétaire humain inactif) → on propage `WWW-Authenticate` pour que le
-  // client IA relance le login (RFC 9728). `me/mcp-context` ne renvoie PAS de
-  // 403 en pratique (`verify()` retombe sur 401 dans tous les cas de refus) ;
-  // la branche 403 ci-dessous est un filet défensif générique, pas un check du
-  // scope `mcp:access` (aucun gate ne lit ce scope — cf. commentaire
-  // `PERMISSIONS` côté shared). Toute autre erreur (API injoignable) → on
-  // dégrade en lecture seule plutôt que de bloquer la session.
+  // client IA relance le login (RFC 9728). Un 403 = connecteur désactivé par
+  // l'organisation (`mcp.enabled`). Toute autre erreur → 503 (fail-closed,
+  // cf. `classifyHandshakeError`).
   let allowWrite = false;
   let allowFinance = false;
   let actorKind: string | undefined;
@@ -188,35 +185,22 @@ app.post('/mcp', async (req: Request, res: Response) => {
     lang = pickLang(ctx?.preferredLanguage);
     api.setLanguage(ACCEPT_LANGUAGE[lang]);
   } catch (e) {
-    if (e instanceof VaksApiError && e.status === 401) {
+    const failure = classifyHandshakeError(e);
+    if (failure.kind === 'unauthorized') {
       res.setHeader(
         'WWW-Authenticate',
         `Bearer realm="vaks-pm-mcp", error="invalid_token", resource_metadata="${resourceMetadataUrl(req)}"`,
       );
-      return rpcError(
-        res,
-        401,
-        -32001,
-        'Accès Vaks-PM expiré ou déconnecté. Cette connexion IA a été révoquée (par vous-même ' +
-          'dans Sécurité → Connexions IA, ou par un administrateur) ou le jeton a expiré. ' +
-          'Reconnectez le connecteur Vaks-PM pour continuer.',
-      );
+      return rpcError(res, 401, -32001, msg(reqLang, 'accessExpired'));
     }
-    if (e instanceof VaksApiError && e.status === 403) {
-      // Cas réel depuis que `me/mcp-context` relit `mcp.enabled` : l'organisation
-      // a désactivé le connecteur. Échec DUR volontaire — contrairement au 401,
-      // se réauthentifier n'y changerait rien, donc on ne relance pas le flux
-      // d'autorisation.
-      // On lit le message BRUT de l'API (`body.message`) et non `e.message`, que
-      // `explain()` habille d'un « le périmètre de l'utilisateur ne couvre pas
-      // cette opération » — faux ici : c'est un interrupteur d'organisation, pas
-      // un défaut de droits.
-      const body = e.body as { message?: unknown } | null | undefined;
-      const reason = typeof body?.message === 'string' ? body.message : null;
-      return rpcError(res, 403, -32003, reason ?? 'Accès refusé par Vaks-PM pour ce jeton.');
+    if (failure.kind === 'forbidden') {
+      // L'organisation a désactivé le connecteur. Échec DUR volontaire — se
+      // réauthentifier n'y changerait rien, donc pas de relance du flux OAuth.
+      return rpcError(res, 403, -32003, failure.reason ?? msg(reqLang, 'accessDenied'));
     }
-    // API injoignable / autre : on continue en lecture seule (les tools de
-    // lecture marcheront ou échoueront d'eux-mêmes avec un message clair).
+    // API injoignable / 429 / 5xx : jamais de serveur dégradé (fail-closed).
+    res.setHeader('Connection', 'close');
+    return rpcError(res, 503, -32000, msg(reqLang, 'apiUnavailable'));
   }
 
   // 3. Serveur + transport jetables (stateless).
@@ -235,7 +219,7 @@ app.post('/mcp', async (req: Request, res: Response) => {
     // eslint-disable-next-line no-console
     console.error('[mcp] handler error', e);
     if (!res.headersSent) {
-      rpcError(res, 500, -32603, 'Erreur interne du serveur MCP.');
+      rpcError(res, 500, -32603, msg(lang, 'internalError'));
     }
   }
 });
@@ -248,11 +232,11 @@ app.get('/mcp', (req: Request, res: Response) => {
   if (accept.includes('text/html')) {
     return res.redirect(302, `${authorizationServer(cfg, req.headers.host)}/login`);
   }
-  return rpcError(res, 405, -32000, 'Méthode non autorisée (serveur MCP stateless : utiliser POST /mcp).');
+  return rpcError(res, 405, -32000, msg(langFromAcceptLanguage(req.headers['accept-language']), 'methodNotAllowed'));
 });
 // DELETE (fin de session) n'a pas de sens en stateless.
-app.delete('/mcp', (_req: Request, res: Response) =>
-  rpcError(res, 405, -32000, 'Méthode non autorisée (serveur MCP stateless : utiliser POST /mcp).'),
+app.delete('/mcp', (req: Request, res: Response) =>
+  rpcError(res, 405, -32000, msg(langFromAcceptLanguage(req.headers['accept-language']), 'methodNotAllowed')),
 );
 
 const httpServer = app.listen(cfg.port, () => {

@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { TenancyService } from '../tenancy/tenancy.service';
@@ -10,6 +11,13 @@ import { AutomationsEvaluatorService, RunCounters } from './automations-evaluato
 import { RecurringTasksService } from './recurring-tasks.service';
 import { AgentNudgeService, ORG_NUDGE_SUBJECT } from '../agents/agent-nudge.service';
 import { AutomationsHooksService } from './automations-hooks.service';
+// `import type` : même patron que `automation-actions.service.ts` (résolution
+// lazy par token, aucun import de valeur RisksModule → AutomationsModule).
+import type { RiskAutoService } from '../risks/risk-auto.service';
+import { LAZY_RISK_AUTO } from '../risks/risk-auto.tokens';
+
+/** Péremption des risques AUTO sans condition re-déclenchée (§ RiskAutoService.reapStale). */
+const RISK_REAP_STALE_DAYS = 14;
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -43,7 +51,17 @@ export class AutomationsCronService implements OnModuleInit, OnModuleDestroy {
     private readonly nudge: AgentNudgeService,
     // Même module (AutomationsModule) → injection directe sans cycle.
     private readonly hooks: AutomationsHooksService,
+    private readonly moduleRef: ModuleRef,
   ) {}
+
+  /** `RiskAutoService` en lazy (cf. commentaire d'import : sens de dépendance). */
+  private riskAuto(): RiskAutoService | null {
+    try {
+      return this.moduleRef.get<RiskAutoService>(LAZY_RISK_AUTO, { strict: false });
+    } catch {
+      return null;
+    }
+  }
 
   onModuleInit() {
     this.timer = setInterval(() => {
@@ -121,6 +139,11 @@ export class AutomationsCronService implements OnModuleInit, OnModuleDestroy {
         if (hour === s.dailyHour) {
           const c = await this.evaluator.runDailyRules(org.id, s);
           this.report(org.id, 'daily', c);
+
+          // Réconciliation « condition levée » du registre de risques AUTO
+          // (RiskAutoService.reapStale) : cadence quotidienne, best-effort,
+          // fire-and-forget — ne bloque jamais le reste du tick.
+          void this.riskAuto()?.reapStale(org.id, RISK_REAP_STALE_DAYS);
         }
         // Règles hebdo : même jour+heure pour les deux (le rappel timesheet
         // porte le réglage, l'overtime et l'occupation suivent la même cadence

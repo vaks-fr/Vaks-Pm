@@ -26,7 +26,7 @@ interface WebhookConfig {
   url: string;
   secret: string;
   active: boolean;
-  /** 'raw' (enveloppe Vaks) ou 'teams' (Adaptive Card). */
+  /** 'raw' (enveloppe Vaks), 'teams' (Adaptive Card) ou 'slack' (Block Kit). */
   format?: string;
 }
 
@@ -142,7 +142,7 @@ function fact(title: string, value: unknown): { title: string; value: string } |
  * Format consommé directement par « Post card in a chat or channel »
  * (Power Automate) : objet `{ type: 'message', attachments: [adaptive card] }`.
  */
-function buildTeamsMessage(event: string, payload: unknown): unknown {
+export function buildTeamsMessage(event: string, payload: unknown): unknown {
   const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, any>;
   const label =
     event === 'automation.alert'
@@ -195,6 +195,77 @@ function buildTeamsMessage(event: string, payload: unknown): unknown {
   };
 }
 
+// Limite Slack Block Kit : 10 fields max par bloc `section`.
+const SLACK_FIELDS_PER_SECTION = 10;
+
+/**
+ * Construit un message Slack (Block Kit) à partir de l'event + payload.
+ * Même résolution de label/headline/facts que `buildTeamsMessage` — garantit
+ * la couverture de tous les kinds déjà rendus en Teams sans carte à trous.
+ * Format consommé directement par un Incoming Webhook Slack :
+ * `{ blocks: [...] }` en POST JSON.
+ */
+export function buildSlackMessage(event: string, payload: unknown): unknown {
+  const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, any>;
+  const label =
+    event === 'automation.alert'
+      ? AUTOMATION_KIND_LABELS[String(p.kind)] ?? EVENT_LABELS[event]
+      : EVENT_LABELS[event] ?? event;
+  const headline =
+    (event === 'automation.alert' ? p.message || p.title : undefined) ||
+    p.title ||
+    p.name ||
+    p.message ||
+    (typeof p.body === 'string' ? p.body.slice(0, 200) : '') ||
+    label;
+
+  const facts = [
+    fact('Statut', p.status),
+    fact('Priorité', p.priority),
+    fact(
+      'Assigné à',
+      Array.isArray(p.assignees)
+        ? p.assignees.map((a: any) => a?.user?.name || a?.name || a?.userId).filter(Boolean).join(', ')
+        : undefined,
+    ),
+    fact('Auteur', p.author?.name || p.authorName),
+    fact('Échéance', typeof p.dueDate === 'string' ? p.dueDate.slice(0, 10) : undefined),
+    fact('Équipe', p.team?.name),
+    fact('Compétence', p.skill?.name || p.proposedName),
+    fact('Projet', p.project?.name),
+  ].filter(Boolean) as Array<{ title: string; value: string }>;
+
+  const blocks: unknown[] = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: String(label).slice(0, 150), emoji: true },
+    },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: String(headline).slice(0, 2000) },
+    },
+  ];
+
+  // Découpage en paquets de 10 fields (limite Slack par bloc `section`).
+  for (let i = 0; i < facts.length; i += SLACK_FIELDS_PER_SECTION) {
+    const chunk = facts.slice(i, i + SLACK_FIELDS_PER_SECTION);
+    blocks.push({
+      type: 'section',
+      fields: chunk.map((f) => ({
+        type: 'mrkdwn',
+        text: `*${f.title}:*\n${f.value}`.slice(0, 2000),
+      })),
+    });
+  }
+
+  return { blocks };
+}
+
+/** Signature HMAC-SHA256 du corps, format `sha256=<hex>` (header `X-Vaks-Signature`). */
+export function signBody(secret: string, body: string): string {
+  return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
+}
+
 export async function processWebhook(job: WebhookJob, attempt: number): Promise<void> {
   const cfg = await fetchWebhookConfig(job.webhookId, job.tenantSlug);
   if (!cfg) {
@@ -225,16 +296,18 @@ export async function processWebhook(job: WebhookJob, attempt: number): Promise<
   const bodyObj =
     cfg.format === 'teams'
       ? buildTeamsMessage(job.event, job.payload)
-      : {
-          event: job.event,
-          deliveryId: job.deliveryId,
-          organizationId: job.organizationId,
-          at: new Date().toISOString(),
-          payload: job.payload,
-        };
+      : cfg.format === 'slack'
+        ? buildSlackMessage(job.event, job.payload)
+        : {
+            event: job.event,
+            deliveryId: job.deliveryId,
+            organizationId: job.organizationId,
+            at: new Date().toISOString(),
+            payload: job.payload,
+          };
   const bodyStr = JSON.stringify(bodyObj);
   const ts = Math.floor(Date.now() / 1000).toString();
-  const sig = 'sha256=' + createHmac('sha256', cfg.secret).update(bodyStr).digest('hex');
+  const sig = signBody(cfg.secret, bodyStr);
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);

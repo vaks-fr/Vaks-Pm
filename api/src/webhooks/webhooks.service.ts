@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
+import { isBlockedHost as isBlockedHostShared } from '../common/url-guard';
 import { isIP, BlockList } from 'node:net';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
@@ -84,7 +85,7 @@ export const KNOWN_EVENTS: WebhookEvent[] = [
 ];
 
 export type WebhookScopeType = 'ORG' | 'PROJECT' | 'TEAM';
-export type WebhookFormat = 'raw' | 'teams';
+export type WebhookFormat = 'raw' | 'teams' | 'slack';
 
 export interface CreateWebhookDto {
   url: string;
@@ -322,7 +323,9 @@ export class WebhooksService {
   }
 
   private normFormat(f?: string): WebhookFormat {
-    return f === 'teams' ? 'teams' : 'raw';
+    if (f === 'teams') return 'teams';
+    if (f === 'slack') return 'slack';
+    return 'raw';
   }
 
   async remove(orgId: string, id: string, actorId?: string) {
@@ -671,65 +674,12 @@ export class WebhooksService {
   }
 
   /**
-   * Vrai si l'hôte est loopback / privé / link-local / interne (SSRF).
-   * `allowInternal` (mode on-prem) peut ré-autoriser une IP **privée** matchant
-   * un CIDR approuvé — jamais loopback (`127/8`, `::1`) ni metadata (`169.254/16`).
+   * Vrai si l'hôte est loopback / privé / link-local / interne (SSRF). Délègue
+   * à `common/url-guard.ts` (implémentation unique : crochets IPv6, IPv4-mapped
+   * pointée/hexa, `allowInternal` = CIDR approuvés hors loopback/metadata).
    */
   private isBlockedHost(host: string, allowInternal: BlockList | null = null): boolean {
-    if (!host) return true;
-    if (host === 'localhost' || host.endsWith('.localhost')) return true;
-    if (host.endsWith('.local') || host.endsWith('.internal')) return true;
-    const v = isIP(host);
-    if (v === 4 || v === 6) return this.ipBlocked(host, v, allowInternal);
-    // hostname non-IP : on laisse passer (résolution DNS non effectuée ici ;
-    // la frontière réseau Swarm + l'allowlist couvrent le reste).
-    return false;
-  }
-
-  /** Toujours bloqué même dans un CIDR approuvé : loopback 127/8 + metadata 169.254/16. */
-  private alwaysBlockedV4(ip: string): boolean {
-    const [a, b] = ip.split('.').map((n) => parseInt(n, 10));
-    return a === 127 || (a === 169 && b === 254);
-  }
-
-  /** Une IP littérale est-elle interdite ? `allowInternal` ré-autorise les privées matchantes. */
-  private ipBlocked(ip: string, v: number, allowInternal: BlockList | null): boolean {
-    if (v === 4) {
-      if (this.alwaysBlockedV4(ip)) return true;
-      if (this.isPrivateV4(ip)) return allowInternal && allowInternal.check(ip, 'ipv4') ? false : true;
-      return false;
-    }
-    const x = ip.toLowerCase();
-    if (x === '::1') return true;
-    const m = x.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (m && this.alwaysBlockedV4(m[1])) return true;
-    if (this.isPrivateV6(ip)) return allowInternal && allowInternal.check(ip, 'ipv6') ? false : true;
-    return false;
-  }
-
-  private isPrivateV4(ip: string): boolean {
-    const p = ip.split('.').map((n) => parseInt(n, 10));
-    if (p.length !== 4 || p.some((n) => !Number.isFinite(n))) return true;
-    const [a, b] = p;
-    if (a === 10) return true; // 10.0.0.0/8
-    if (a === 127) return true; // loopback
-    if (a === 0) return true; // 0.0.0.0/8
-    if (a === 169 && b === 254) return true; // link-local / metadata
-    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12
-    if (a === 192 && b === 168) return true; // 192.168/16
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
-    return false;
-  }
-
-  private isPrivateV6(ip: string): boolean {
-    const x = ip.toLowerCase();
-    if (x === '::1' || x === '::') return true;
-    if (x.startsWith('fe80')) return true; // link-local
-    if (x.startsWith('fc') || x.startsWith('fd')) return true; // ULA fc00::/7
-    // IPv4-mapped (::ffff:a.b.c.d) → revérifier la partie v4.
-    const m = x.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (m) return this.isPrivateV4(m[1]);
-    return false;
+    return isBlockedHostShared(host, allowInternal);
   }
 
   // ============================================================
@@ -859,7 +809,11 @@ export class WebhooksService {
     active: hook.active,
     scopeType: hook.scopeType as WebhookScopeType,
     scopeId: hook.scopeId,
-    format: (hook.format === 'teams' ? 'teams' : 'raw') as WebhookFormat,
+    format: (hook.format === 'teams'
+      ? 'teams'
+      : hook.format === 'slack'
+        ? 'slack'
+        : 'raw') as WebhookFormat,
     autoDisabledAt: hook.autoDisabledAt,
     createdAt: hook.createdAt,
     updatedAt: hook.updatedAt,

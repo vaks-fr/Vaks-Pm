@@ -28,7 +28,8 @@ export interface EmailJobData {
    * Quand fourni (host non vide), le worker l'utilise tel quel — indispensable
    * en mode pooled où le worker ne peut pas deviner le tenant d'un job. Absent
    * = le worker retombe sur sa conf globale + env `SMTP_PASSWORD` (legacy/dev).
-   * Le mot de passe vit uniquement en mémoire/Redis le temps du job.
+   * `password` est toujours `null` côté API (jamais de secret dans Redis) : le
+   * worker le lit via la route interne `/internal/notifications/smtp`.
    */
   smtp?: {
     host: string;
@@ -71,8 +72,8 @@ export function getEmailQueue(): Queue<EmailJobData> {
     connection: {
       host: url.hostname,
       port: Number(url.port || 6379),
-      password: url.password || undefined,
-      username: url.username || undefined,
+      password: url.password ? decodeURIComponent(url.password) : undefined,
+      username: url.username ? decodeURIComponent(url.username) : undefined,
       maxRetriesPerRequest: null,
     },
     defaultJobOptions: {

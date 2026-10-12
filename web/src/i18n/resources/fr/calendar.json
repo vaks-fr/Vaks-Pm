@@ -1,0 +1,31 @@
+{
+  "personalTitle": "Mon calendrier",
+  "personalSub": "Vos échéances sur l'ensemble de vos projets",
+  "projectTitle": "Calendrier",
+  "projectSub": "Échéances et jalons de ce projet",
+  "loading": "Chargement du calendrier…",
+  "empty": "Rien de prévu ce mois-ci",
+  "prevMonth": "Mois précédent",
+  "nextMonth": "Mois suivant",
+  "thisMonth": "Ce mois-ci",
+  "today": "Aujourd'hui",
+  "more": "+{{count}} de plus",
+  "eventCount_one": "{{count}} élément",
+  "eventCount_other": "{{count}} éléments",
+  "legend": {
+    "today": "Aujourd'hui",
+    "milestone": "Jalon",
+    "overdue": "En retard",
+    "holiday": "Jour férié",
+    "timeOff": "Congé"
+  },
+  "allocated": "{{hours}} h",
+  "tt": {
+    "due": "{{title}} · échéance {{date}}",
+    "milestone": "{{title}} · jalon {{date}}",
+    "overdue": "{{title}} · en retard depuis {{date}}",
+    "holiday": "{{name}} · {{date}}",
+    "timeOff": "{{type}} · {{start}} → {{end}}",
+    "allocated": "{{hours}} h allouées le {{date}}"
+  }
+}

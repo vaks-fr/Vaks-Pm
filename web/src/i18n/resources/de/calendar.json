@@ -1,0 +1,31 @@
+{
+  "personalTitle": "Mein Kalender",
+  "personalSub": "Ihre Fristen über alle Projekte hinweg",
+  "projectTitle": "Kalender",
+  "projectSub": "Fristen und Meilensteine dieses Projekts",
+  "loading": "Kalender wird geladen…",
+  "empty": "Diesen Monat ist nichts geplant",
+  "prevMonth": "Voriger Monat",
+  "nextMonth": "Nächster Monat",
+  "thisMonth": "Dieser Monat",
+  "today": "Heute",
+  "more": "+{{count}} weitere",
+  "eventCount_one": "{{count}} Eintrag",
+  "eventCount_other": "{{count}} Einträge",
+  "legend": {
+    "today": "Heute",
+    "milestone": "Meilenstein",
+    "overdue": "Überfällig",
+    "holiday": "Feiertag",
+    "timeOff": "Abwesenheit"
+  },
+  "allocated": "{{hours}} Std.",
+  "tt": {
+    "due": "{{title}} · fällig {{date}}",
+    "milestone": "{{title}} · Meilenstein {{date}}",
+    "overdue": "{{title}} · überfällig seit {{date}}",
+    "holiday": "{{name}} · {{date}}",
+    "timeOff": "{{type}} · {{start}} → {{end}}",
+    "allocated": "{{hours}} Std. am {{date}} zugewiesen"
+  }
+}

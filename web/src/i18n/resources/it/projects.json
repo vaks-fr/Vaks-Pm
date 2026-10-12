@@ -264,6 +264,7 @@
     "emptyHintManage": "Usa «Aggiungi» per caricarne uno.",
     "added": "Documento aggiunto · {{name}}",
     "uploadFailed": "Caricamento non riuscito: {{message}}",
+    "viewTitle": "Anteprima",
     "downloadTitle": "Scarica",
     "downloadFailed": "Download non riuscito: {{message}}",
     "deleteTitle": "Elimina",

@@ -1,6 +1,9 @@
 {{- if .Values.redis.enabled }}
-{{- /* In-cluster single-node Redis — cache / pub-sub / BullMQ. No auth (cluster
-       network only). For production HA, set redis.enabled=false + externalRedis.url. */ -}}
+{{- /* In-cluster single-node Redis — cache / pub-sub / BullMQ. requirepass from the
+       chart Secret (redis.auth.enabled, default on) + NetworkPolicy restricting
+       ingress to api/controlplane/worker (networkPolicy.enabled). For production
+       HA, set redis.enabled=false + externalRedis.url. */ -}}
+{{- include "vakspm.assertRedisAuthSecret" . -}}
 {{- $name := include "vakspm.redis.fullname" . -}}
 apiVersion: v1
 kind: Service
@@ -64,7 +67,25 @@ spec:
       containers:
         - name: redis
           image: {{ .Values.redis.image }}
+          {{- if .Values.redis.auth.enabled }}
+          # $(REDIS_PASSWORD) is expanded by the kubelet at start: the pod spec
+          # only ever shows the placeholder, never the password.
+          args: ["--appendonly", "yes", "--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vakspm.secretName" . }}
+                  key: REDIS_PASSWORD
+            # Lets redis-cli (probes, kubectl exec) authenticate.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vakspm.secretName" . }}
+                  key: REDIS_PASSWORD
+          {{- else }}
           args: ["--appendonly", "yes"]
+          {{- end }}
           ports:
             - name: redis
               containerPort: 6379

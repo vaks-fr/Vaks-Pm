@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { Icon } from './primitives';
 import ChangePasswordDialog from './ChangePasswordDialog';
 import ApiTokensSection from './ApiTokensSection';
+import CalendarFeedSection from './CalendarFeedSection';
 
 /**
  * Préférences notif **par utilisateur** (#14). Sémantique opt-out : par défaut
@@ -430,6 +431,9 @@ export default function SecuritySettings({ onClose }: { onClose: () => void }) {
 
             <div style={{ borderTop: '1px solid var(--border)', margin: '16px 0 12px' }} />
             <ApiTokensSection mode="user" flash={(m, k) => (k === 'err' ? setError(m) : undefined)} />
+
+            <div style={{ borderTop: '1px solid var(--border)', margin: '16px 0 12px' }} />
+            <CalendarFeedSection flash={(m, k) => (k === 'err' ? setError(m) : undefined)} />
 
             <div style={{ borderTop: '1px solid var(--border)', margin: '16px 0 12px' }} />
             <AiConnectionsSection onError={setError} />

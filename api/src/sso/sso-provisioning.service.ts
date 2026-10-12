@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RolesService } from '../admin/roles.service';
 import { AuditLogService } from '../audit-logs/audit-log.service';
 import { AUDIT_ACTIONS, severityForAction } from '../audit-logs/audit-actions';
+import { LicenseService } from '../licensing/license.service';
 import { RoleScope } from '@vaks-pm/shared';
 import { Prisma } from '@db';
 import type { IdentityProvider } from '@db';
@@ -30,6 +31,7 @@ export class SsoProvisioningService {
     private readonly prisma: PrismaService,
     private readonly roles: RolesService,
     private readonly audit: AuditLogService,
+    private readonly licenses: LicenseService,
   ) {}
 
   /**
@@ -93,7 +95,7 @@ export class SsoProvisioningService {
   private async applyRole(orgId: string, userId: string, roleKey: string): Promise<void> {
     const role = await this.roles.findByKey(orgId, roleKey);
     if (role.scope !== RoleScope.ORG) {
-      this.logger.warn(`Role ${roleKey} n'est pas ORG-scoped — ignoré pour le mapping SSO.`);
+      this.logger.warn(`Role ${roleKey} is not ORG-scoped - ignored for SSO mapping.`);
       return;
     }
     const willBeAdmin = role.key === 'ORG_ADMIN';
@@ -226,6 +228,23 @@ export class SsoProvisioningService {
     const role = this.resolveRoleKey(provider, claims.groups);
     const roleRow = await this.roles.findByKey(orgId, role.roleKey).catch(() => null);
     const isAdmin = roleRow?.key === 'ORG_ADMIN';
+    // JIT à la connexion = utilisateur interactif réel → on TENTE d'attribuer un
+    // siège (sinon il tomberait sur l'écran « aucun siège »), comme le ferait
+    // UsersService.create. Mais contrairement à UsersService, on ne refuse
+    // JAMAIS un login SSO légitime pour un quota plein : si la licence est au
+    // plafond, le compte est créé seat-pending (licensed=false) — même modèle
+    // que le provisioning SCIM en débordement (cf. assertSeatAvailable ci-dessus
+    // pour ce dernier). L'admin attribue ensuite le siège manuellement.
+    let seatAvailable = true;
+    try {
+      await this.licenses.assertSeatAvailable(orgId);
+    } catch (e) {
+      if (e instanceof ForbiddenException && (e.getResponse() as any)?.error === 'SEAT_LIMIT_REACHED') {
+        seatAvailable = false;
+      } else {
+        throw e;
+      }
+    }
     let created;
     try {
       created = await this.prisma.user.create({
@@ -236,11 +255,11 @@ export class SsoProvisioningService {
           passwordHash: null,
           isAdmin,
           status: 'ACTIVE',
-          // JIT à la connexion = utilisateur interactif réel → siège attribué
-          // (sinon il tomberait sur l'écran « aucun siège »). NB : un compte
+          // Siège attribué si disponible, sinon compte créé seat-pending
+          // (licensed=false) — cf. commentaire ci-dessus. NB : un compte
           // pré-provisionné par SCIM (seat-pending) passe par le chemin UPDATE
           // ci-dessus et conserve l'état de siège décidé par l'admin.
-          licensed: true,
+          licensed: seatAvailable,
           authProvider: provider.type,
           externalId: claims.externalId,
           idpSource,
@@ -273,7 +292,14 @@ export class SsoProvisioningService {
       resourceLabel: claims.email,
       ip: meta?.ip,
       userAgent: meta?.userAgent,
-      detail: { idp: idpSource, roleKey: role.roleKey, externalId: claims.externalId },
+      detail: {
+        idp: idpSource,
+        roleKey: role.roleKey,
+        externalId: claims.externalId,
+        // Seul signal disponible pour tracer un dépassement de quota au JIT :
+        // UsersService n'a pas de mécanisme d'alerte séparé, juste ce 403 évité.
+        seatPending: !seatAvailable,
+      },
     });
     return {
       userId: created.id,

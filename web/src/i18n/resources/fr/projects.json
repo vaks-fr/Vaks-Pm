@@ -264,6 +264,7 @@
     "emptyHintManage": "Utilise « Ajouter » pour en téléverser un.",
     "added": "Document ajouté · {{name}}",
     "uploadFailed": "Upload échoué : {{message}}",
+    "viewTitle": "Aperçu",
     "downloadTitle": "Télécharger",
     "downloadFailed": "Téléchargement échoué : {{message}}",
     "deleteTitle": "Supprimer",

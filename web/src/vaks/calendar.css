@@ -1,0 +1,277 @@
+/* ============================================================
+   Vaks — Vue Calendrier (CalendarView)
+   ----------------------------------------------------------------
+   Classes préfixées `cal-` (uniques à ce chunk lazy — pas de partage
+   inter-composant, cf. mémoire « shared CSS in lazy chunk »). Thème-aware
+   via les variables globales de views.css (--surface, --border, --text*,
+   --weekend-bg, --holiday-bg, --accent). La teinte de chaque pastille de
+   statut est passée en variable `--chip-hue` (H OKLCH, cf. taskStatus.ts).
+   ============================================================ */
+
+.cal-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  /* Couleurs sémantiques du calendrier (légende + overlays) : overdue rouge,
+     jour férié jaune, congé violet. */
+  --cal-overdue: #e5484d;
+  --cal-holiday: #eab308;
+  --cal-timeoff: #9333ea;
+  /* Permet d'adapter la barre d'outils à la LARGEUR DU CONTENEUR (et non du
+     viewport) : indispensable quand le calendrier est embarqué dans une colonne
+     étroite du dashboard tout en gardant un viewport large. Le bloc @container
+     est en FIN DE FICHIER (après les règles de base) pour gagner la cascade. */
+  container-type: inline-size;
+}
+
+/* ---- Toolbar ---- */
+.cal-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.cal-title-block { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cal-title { font-size: 15px; font-weight: 650; color: var(--text); margin: 0; }
+.cal-sub { font-size: 12px; color: var(--text-2); }
+
+.cal-nav { display: flex; align-items: center; gap: 6px; }
+.cal-month {
+  min-width: 148px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: capitalize;
+}
+.cal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+.cal-btn:hover { background: var(--surface-2); }
+.cal-btn-icon { width: 30px; padding: 0; }
+
+.cal-spacer { flex: 1 1 auto; }
+
+/* ---- Legend ---- */
+.cal-legend { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.cal-leg { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+.cal-leg-swatch { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+.cal-leg-today { border: 2px solid var(--accent); background: transparent; }
+.cal-leg-ms { color: var(--accent); display: inline-flex; }
+.cal-leg-over { background: var(--cal-overdue); }
+.cal-leg-hol { background: var(--cal-holiday); }
+.cal-leg-off { background: var(--cal-timeoff); }
+
+.cal-loadbar { font-size: 12px; color: var(--text-2); }
+
+/* ---- Grid ---- */
+.cal-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 12px 20px 20px; }
+.cal-weekhead {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 1px;
+  margin-bottom: 6px;
+}
+.cal-wd {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding: 2px 0;
+}
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-auto-rows: minmax(104px, 1fr);
+  gap: 6px;
+}
+
+/* ---- Day cell ---- */
+.cal-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 5px 6px 6px;
+  min-height: 0;
+  overflow: hidden;
+}
+.cal-cell-out { background: var(--surface-2); opacity: 0.62; }
+/* Cases hors-mois (padding pour finir la semaine) : vides, à peine esquissées. */
+.cal-cell-blank { background: transparent; border-style: dashed; border-color: color-mix(in oklch, var(--border) 55%, transparent); }
+.cal-cell-weekend { background: var(--weekend-bg); }
+.cal-cell-hol { background: var(--holiday-bg); }
+.cal-cell-today { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+.cal-daynum-row { display: flex; align-items: center; gap: 6px; }
+.cal-daynum { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.cal-cell-today .cal-daynum { color: var(--accent); }
+.cal-daynum-row .cal-spacer { flex: 1 1 auto; }
+
+.cal-badge-hol { display: inline-flex; align-items: center; color: var(--cal-holiday); }
+.cal-alloc {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-3);
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--text-3) 14%, transparent);
+  white-space: nowrap;
+}
+
+.cal-tooff {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--cal-timeoff);
+  background: color-mix(in oklch, var(--cal-timeoff) 14%, transparent);
+  border-radius: 5px;
+  padding: 1px 5px;
+  align-self: flex-start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cal-holname {
+  font-size: 10px;
+  color: var(--cal-holiday);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cal-events { display: flex; flex-direction: column; gap: 3px; min-height: 0; }
+
+/* ---- Event chip ---- */
+.cal-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: color-mix(in oklch, oklch(0.62 0.14 var(--chip-hue, 250)) 14%, var(--surface));
+  color: var(--text);
+  padding: 2px 6px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  cursor: pointer;
+  min-width: 0;
+}
+.cal-chip:hover { background: color-mix(in oklch, oklch(0.62 0.14 var(--chip-hue, 250)) 26%, var(--surface)); }
+.cal-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: oklch(0.6 0.15 var(--chip-hue, 250));
+}
+.cal-chip-key { font-weight: 700; font-size: 10px; color: var(--text-3); flex-shrink: 0; }
+.cal-chip-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+.cal-chip-ms {
+  background: color-mix(in oklch, var(--accent) 15%, var(--surface));
+  color: var(--text);
+}
+.cal-chip-ms:hover { background: color-mix(in oklch, var(--accent) 26%, var(--surface)); }
+.cal-chip-ms svg { color: var(--accent); flex-shrink: 0; }
+.cal-chip-ms .cal-chip-title { font-weight: 600; }
+
+.cal-chip-over {
+  border-color: color-mix(in oklch, var(--cal-overdue) 60%, transparent);
+}
+.cal-chip-over .cal-dot { background: var(--cal-overdue); }
+
+.cal-more {
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  padding: 1px 4px;
+  cursor: pointer;
+  border-radius: 5px;
+}
+.cal-more:hover { background: var(--surface-2); color: var(--text); }
+
+.cal-empty {
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 2px 0;
+}
+
+/* ---- Responsive (mobile) ---- */
+@media (max-width: 640px) {
+  .cal-scroll { padding: 10px 10px 16px; }
+  .cal-grid { grid-auto-rows: minmax(78px, 1fr); gap: 4px; }
+  .cal-chip-title { display: none; }
+  .cal-chip { justify-content: center; padding: 3px; }
+  .cal-legend { display: none; }
+}
+
+/* ---- Calendrier embarqué dans le dashboard (carte à hauteur bornée, 480px) :
+   la grille remplit EXACTEMENT la hauteur de la carte à TOUTE largeur — et non
+   plus seulement sous 460px — pour que le mois entier tienne sans scroll, y
+   compris sur grand écran. La sélection `.dash-cal-card …` (spécificité 0,2,0)
+   l'emporte sur les règles de base à colonne 1fr large. Cf. demande « toujours
+   comme sur le Mac ». ---- */
+.dash-cal-card .cal-scroll {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 10px 16px 14px;
+}
+.dash-cal-card .cal-weekhead { flex: 0 0 auto; margin-bottom: 4px; }
+.dash-cal-card .cal-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 4px;
+}
+.dash-cal-card .cal-cell { border-radius: 8px; padding: 4px 5px; }
+.dash-cal-card .cal-daynum { font-size: 11px; }
+
+/* ---- Conteneur étroit (calendrier embarqué dans la colonne de droite du
+   dashboard, ~318px) : compacte la barre d'outils (mais garde le sous-titre ET
+   la légende, cf. specs) sans débordement horizontal. Placé en fin de fichier
+   pour l'emporter sur les règles de base à spécificité égale (ordre source). ---- */
+@container (max-width: 460px) {
+  .cal-toolbar { padding: 12px 12px 8px; gap: 6px 10px; }
+  .cal-title { font-size: 14px; }
+  .cal-sub { font-size: 11px; }
+  .cal-month { min-width: 0; font-size: 13px; }
+  .cal-legend { gap: 4px 10px; font-size: 11px; width: 100%; }
+  .cal-leg { font-size: 11px; gap: 5px; }
+  .cal-loadbar { display: none; }
+  .cal-scroll { padding: 8px 10px 10px; }
+  .cal-btn { height: 28px; padding: 0 8px; font-size: 12px; }
+  .cal-btn-icon { width: 28px; }
+  .cal-chip-title { font-size: 11px; }
+  /* Conteneur à hauteur bornée (carte dashboard 420px) : la zone de scroll
+     devient une colonne flex — l'en-tête des jours prend sa hauteur, la grille
+     remplit EXACTEMENT le reste (6 semaines réparties, pas de min 104px qui
+     forcerait un scroll) → cases compactes, mois entier visible d'un coup. */
+  .cal-scroll { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .cal-weekhead { flex: 0 0 auto; margin-bottom: 4px; }
+  .cal-grid { flex: 1 1 auto; min-height: 0; grid-auto-rows: minmax(0, 1fr); gap: 4px; }
+  .cal-cell { border-radius: 8px; padding: 4px 5px; }
+  .cal-daynum { font-size: 11px; }
+}

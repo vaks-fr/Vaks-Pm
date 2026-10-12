@@ -3,6 +3,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SkillsService } from './skills.service';
 import { SkillRequestsService } from '../skill-requests/skill-requests.service';
 import { getEmailQueue } from '../notifications/email-queue';
+import { TenancyService } from '../tenancy/tenancy.service';
+import { TenantConnectionService } from '../tenancy/tenant-connection.service';
+import { TenantContext } from '../tenancy/tenant-context.service';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -27,6 +30,9 @@ export class SkillsCronService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly skills: SkillsService,
     private readonly skillRequests: SkillRequestsService,
+    private readonly tenancy: TenancyService,
+    private readonly conn: TenantConnectionService,
+    private readonly tenantCtx: TenantContext,
   ) {}
 
   onModuleInit() {
@@ -56,6 +62,42 @@ export class SkillsCronService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Mode pooled : les orgs vivent dans `<db>_<slug>` — on itère chaque base
+    // tenant sous son contexte (même pattern que les autres crons), sinon decay,
+    // rappels et relances d'expiration ne tournent jamais pour les tenants.
+    if (this.tenancy.mode === 'pooled') {
+      for (const slug of await this.tenantSlugs()) {
+        try {
+          const tenantClient = this.conn.getClient({ id: slug, slug });
+          await this.tenantCtx.run({ client: tenantClient, slug }, () => this.processAllOrgs());
+        } catch (err) {
+          this.log.warn(`tick tenant=${slug} failed: ${(err as Error).message}`);
+        }
+      }
+    } else {
+      await this.processAllOrgs();
+    }
+  }
+
+  /** Slugs des tenants (mode pooled) : énumère les bases `<db>_<slug>`. */
+  private async tenantSlugs(): Promise<string[]> {
+    const base = process.env.DATABASE_URL;
+    if (!base) return [];
+    let dbName: string;
+    try {
+      dbName = new URL(base).pathname.replace(/^\//, '') || 'vakspm';
+    } catch {
+      return [];
+    }
+    // `\_` = underscore littéral (sinon `_` est un joker LIKE).
+    const rows = await this.prisma.$queryRawUnsafe<{ datname: string }[]>(
+      `SELECT datname FROM pg_database WHERE datname LIKE '${dbName}\\_%'`,
+    );
+    return rows.map((r) => r.datname.slice(dbName.length + 1)).filter(Boolean);
+  }
+
+  /** Traite toutes les orgs de la base courante (contexte tenant déjà posé). */
+  private async processAllOrgs(): Promise<void> {
     const orgs = await this.prisma.organization.findMany({ select: { id: true, name: true } });
     for (const org of orgs) {
       try {

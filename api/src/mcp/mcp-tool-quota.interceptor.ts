@@ -7,6 +7,7 @@ import {
   NestInterceptor,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { extractBearer } from '../auth/bearer.util';
 import type { Request, Response } from 'express';
 import { Observable } from 'rxjs';
 import { ModuleRef } from '@nestjs/core';
@@ -76,8 +77,9 @@ export class McpToolQuotaInterceptor implements NestInterceptor {
     // Un nom de tool inattendu ne doit pas fabriquer des clés Redis arbitraires.
     if (!/^[a-z0-9_/:-]{1,80}$/i.test(tool)) return next.handle();
 
-    const auth = req.headers['authorization'];
-    const bearer = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
+    // Même extracteur que JwtAuthGuard : un PAT via X-Api-Key (Copilot Studio)
+    // doit être compté (meter crédits) et soumis aux quotas comme les autres.
+    const bearer = extractBearer(req);
     if (!bearer) return next.handle();
     // Même dérivation d'identité que `ApiThrottlerGuard` : jamais le clair en clé.
     const tokenHash = createHash('sha256').update(bearer).digest('hex').slice(0, 32);

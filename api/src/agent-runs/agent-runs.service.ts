@@ -16,6 +16,7 @@ import {
 import { CreateAgentRunDto } from './dto/create-agent-run.dto';
 import { detectAnomaly, resolveRunSource } from './agent-run-logic';
 import { McpToolUsageService } from '../mcp/mcp-tool-usage.service';
+import { ProjectAccessService } from '../rbac/project-access.service';
 
 const toNum = (d: Prisma.Decimal | null): number | null => (d == null ? null : Number(d));
 
@@ -66,6 +67,7 @@ export class AgentRunsService {
     private readonly audit: AuditLogService,
     private readonly moduleRef: ModuleRef,
     private readonly settings: AdminSettingsService,
+    private readonly projectAccess: ProjectAccessService,
   ) {}
 
   /**
@@ -544,24 +546,24 @@ export class AgentRunsService {
   }
 
   /**
-   * Un agent n'impute un run qu'à un projet dont il est **membre** (direct ou via
-   * une équipe affectée) — garde-fou anti-injection de coût cross-projet (audit
-   * sécu 2026-08-01). Même définition d'appartenance que `DeliverablesService`.
+   * Un agent n'impute un run qu'à un projet auquel il a **accès** — garde-fou
+   * anti-injection de coût cross-projet (audit sécu 2026-08-01).
+   *
+   * Délègue à {@link ProjectAccessService.canAccessProject}, la **source unique
+   * de vérité** de l'accès projet (déjà appliquée par `@ProjectAccess` sur
+   * claim / update / submit_deliverable). Crucial : elle honore l'**héritage
+   * owner→agent** (un agent PAT accède au projet `agentsEnabled` dont son owner
+   * humain est membre, sans être matérialisé `ProjectMember`). L'ancienne
+   * vérification maison ne comptait que le membership matérialisé de l'agent →
+   * un agent qui pouvait claim + soumettre un livrable se voyait refuser
+   * `report_run`, créant une impasse avec le prérequis « run avant revue » de
+   * `submitForReview` (bug flux agent PAT, 2026-08-20). `isAdmin=false` : un
+   * agent n'est jamais admin **global** (kind=AGENT ; `isAgentAdmin` est un
+   * grant de gestion, pas le flag global). L'anti-injection tient : un agent
+   * dont l'owner n'est pas dans le projet cible n'y a pas accès → run refusé.
    */
   private async isProjectMember(orgId: string, userId: string, projectId: string): Promise<boolean> {
-    const [direct, viaTeam] = await Promise.all([
-      this.prisma.projectMember.count({
-        where: { userId, projectId, project: { organizationId: orgId, deletedAt: null } },
-      }),
-      this.prisma.projectTeam.count({
-        where: {
-          projectId,
-          project: { organizationId: orgId, deletedAt: null },
-          team: { members: { some: { userId } } },
-        },
-      }),
-    ]);
-    return direct > 0 || viaTeam > 0;
+    return this.projectAccess.canAccessProject(orgId, userId, false, projectId);
   }
 
   /**

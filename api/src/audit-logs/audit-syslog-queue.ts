@@ -54,8 +54,8 @@ export function getAuditSyslogQueue(): Queue<AuditSyslogJobData> {
     connection: {
       host: url.hostname,
       port: Number(url.port || 6379),
-      password: url.password || undefined,
-      username: url.username || undefined,
+      password: url.password ? decodeURIComponent(url.password) : undefined,
+      username: url.username ? decodeURIComponent(url.username) : undefined,
       maxRetriesPerRequest: null,
     },
     defaultJobOptions: {

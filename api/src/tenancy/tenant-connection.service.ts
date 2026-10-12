@@ -78,7 +78,16 @@ export class TenantConnectionService implements OnModuleDestroy {
     if (!base) throw new Error('DATABASE_URL manquant');
     const u = new URL(base);
     const dbName = (u.pathname.replace(/^\//, '') || 'vakspm');
-    const suffix = (tenant.slug ?? tenant.id).replace(/-/g, '_');
+    const slug = tenant.slug ?? tenant.id;
+    // Fail-closed : `new URL()` normalise `..` dans le pathname — un slug non
+    // validé pourrait donc pointer une AUTRE base (ex. la base de base). Le
+    // middleware filtre déjà (forme DNS stricte) ; on re-vérifie ici, à la
+    // source de la dérivation. `_` toléré : les crons pooled ré-injectent le
+    // slug tel que lu dans `pg_database` (`acme-corp` → base `…_acme_corp`).
+    if (!/^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$/.test(slug)) {
+      throw new Error(`Invalid tenant slug "${slug}"`);
+    }
+    const suffix = slug.replace(/-/g, '_');
     u.pathname = `/${dbName}_${suffix}`;
     return u.toString();
   }

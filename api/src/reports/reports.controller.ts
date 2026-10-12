@@ -27,6 +27,19 @@ import { renderStatusDeckPptx } from './status-deck';
 
 const h = (min: number) => Math.round((min / 60) * 100) / 100; // minutes → heures
 
+// Ordre des 8 statuts de tâche (dont les statuts agents) pour l'export stats.xlsx —
+// la somme des lignes de statut doit égaler `totalTasks`.
+const STATS_STATUS_ORDER = [
+  'TODO',
+  'CLAIMED',
+  'IN_PROGRESS',
+  'IN_REVIEW',
+  'CHANGES_REQUESTED',
+  'APPROVED',
+  'ON_HOLD',
+  'DONE',
+] as const;
+
 @ApiTags('reports')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, PermissionsGuard, ProjectAccessGuard)
@@ -292,12 +305,13 @@ export class ReportsController {
   ) {
     const t = reportT(lang);
     const s = await this.svc.projectStats(user.orgId, projectId);
+    // byStatus carries all 8 TaskStatus counters at runtime (blankStatusCounts()),
+    // but the shared DTO type only declares 4 keys — read via a loose cast so the
+    // export row-set can stay in sync with the full enum without widening the DTO.
+    const byStatus = s.byStatus as unknown as Record<string, number>;
     const rows: unknown[][] = [
       [t('stats.totalTasks'), s.totalTasks],
-      [statusLabel(lang, 'TODO'), s.byStatus.TODO],
-      [statusLabel(lang, 'IN_PROGRESS'), s.byStatus.IN_PROGRESS],
-      [statusLabel(lang, 'IN_REVIEW'), s.byStatus.IN_REVIEW],
-      [statusLabel(lang, 'DONE'), s.byStatus.DONE],
+      ...STATS_STATUS_ORDER.map((st) => [statusLabel(lang, st), byStatus[st] ?? 0]),
       [t('stats.completionPct'), s.completionPct],
       [t('overdue'), s.overdueTasks],
       [t('stats.estimatedHours'), s.totalEstimateHours],

@@ -12,8 +12,13 @@ export interface RefreshRow {
 }
 
 export type RefreshDecision =
-  /** Rotation normale : `newPrev` devient le nouveau précédent. */
-  | { action: 'rotate'; newPrev: string }
+  /**
+   * Rotation : `newPrev` devient le nouveau précédent. `graceConsumed` = la
+   * rotation a été obtenue EN présentant le précédent (grâce) : la fenêtre de
+   * grâce se ferme alors immédiatement — un 2e usage du même refresh sera un
+   * rejeu détecté (révocation de la chaîne), pas une nouvelle rotation.
+   */
+  | { action: 'rotate'; newPrev: string; graceConsumed: boolean }
   /** Ancien refresh présenté hors grâce → rejeu/vol : révoquer la chaîne. */
   | { action: 'reuse' }
   /** Refresh courant expiré (agent dormant trop longtemps). */
@@ -25,8 +30,11 @@ export type RefreshDecision =
  * Décide ce qu'il faut faire d'un refresh présenté.
  *
  * - hash == courant, non expiré → rotation (le courant devient le précédent).
- * - hash == précédent, DANS la grâce → rotation (on conserve le présenté comme
- *   précédent : grâce glissante, l'agent qui a raté le nouveau récupère).
+ * - hash == précédent, DANS la grâce → rotation UNIQUE (l'agent qui a raté la
+ *   réponse récupère) : le présenté reste le précédent mais sa grâce est
+ *   CONSOMMÉE. Avant, la grâce glissait à chaque usage → un refresh volé restait
+ *   rejouable indéfiniment et évinçait l'agent légitime sans jamais déclencher
+ *   la détection de rejeu (RFC 6819 §5.2.2.3).
  * - hash == précédent, HORS grâce → rejeu/vol.
  * - courant expiré → expired.
  */
@@ -39,13 +47,13 @@ export function classifyRefresh(row: RefreshRow, presentedHash: string, nowMs: n
   if (matchedPrev) {
     const graceOk = !!row.prevValidUntil && row.prevValidUntil.getTime() >= nowMs;
     if (!graceOk) return { action: 'reuse' };
-    // Dans la grâce : on garde le présenté comme précédent (fenêtre glissante).
-    return { action: 'rotate', newPrev: presentedHash };
+    // Dans la grâce : une seule récupération ; la grâce est consommée.
+    return { action: 'rotate', newPrev: presentedHash, graceConsumed: true };
   }
 
   if (matchedCurrent) {
     if (row.expiresAt.getTime() < nowMs) return { action: 'expired' };
-    return { action: 'rotate', newPrev: row.tokenHash };
+    return { action: 'rotate', newPrev: row.tokenHash, graceConsumed: false };
   }
 
   // Ni courant ni précédent : le service traite ça en amont (row introuvable).

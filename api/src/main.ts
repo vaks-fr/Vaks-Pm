@@ -1,3 +1,4 @@
+import './redis-env';
 import { NestFactory, Reflector, DiscoveryService } from '@nestjs/core';
 import { ValidationPipe, RequestMethod } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -58,7 +59,9 @@ async function bootstrap() {
   app.use((_req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Referrer-Policy', 'no-referrer');
+    // Même valeur que le middleware Traefik `security-headers` (infra/traefik-dynamic.yml)
+    // — une seule politique, l'applicatif ne sert que de défense en profondeur.
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     next();
   });
@@ -66,7 +69,12 @@ async function bootstrap() {
   // Derrière Traefik (X-Forwarded-For), faire confiance au premier proxy pour
   // que req.ip / req.protocol soient corrects → rate-limit et capture d'IP
   // dans les sessions reposent dessus. `1` = un seul proxy de confiance.
-  app.set('trust proxy', 1);
+  // `TRUST_PROXY_HOPS=2` pour le MCP en DMZ (box DMZ → Traefik interne → api,
+  // avec l'IP de la box en `forwardedHeaders.trustedIPs`) : sinon req.ip = IP
+  // de la box pour tous les internautes → un seul seau de throttling.
+  // Sûr aussi en co-localisé : Traefik écrase tout X-Forwarded-For non fiable.
+  const trustHops = Number.parseInt(process.env.TRUST_PROXY_HOPS ?? '', 10);
+  app.set('trust proxy', Number.isInteger(trustHops) && trustHops >= 1 && trustHops <= 5 ? trustHops : 1);
 
   // Branche l'adapter Redis pour socket.io : indispensable pour que les
   // events se propagent entre les replicas Swarm de l'API.
@@ -170,6 +178,6 @@ async function bootstrap() {
   const port = config.get<number>('port') ?? 3000;
   await app.listen(port, '0.0.0.0');
   // eslint-disable-next-line no-console
-  console.log(`API démarrée sur :${port} (docs: /api/docs)`);
+  console.log(`API listening on :${port} (docs: /api/docs)`);
 }
 bootstrap();

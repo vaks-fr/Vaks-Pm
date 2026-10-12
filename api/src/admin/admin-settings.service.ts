@@ -1265,6 +1265,17 @@ export class AdminSettingsService {
   }
 
   /**
+   * Qui peut se créer un PAT (`POST /me/api-tokens`) : `everyone` (défaut),
+   * `admins_only` ou `disabled`. Ne gouverne que la création en libre-service :
+   * clés org, jetons d'agent et émission OAuth interne ne sont pas concernés.
+   * Valeur inconnue → `everyone` (défaut historique, pas de lock-out surprise).
+   */
+  async getApiTokenSelfServicePolicy(orgId: string): Promise<'everyone' | 'admins_only' | 'disabled'> {
+    const v = await this.getValue(orgId, 'apiTokens.selfServicePolicy');
+    return v === 'admins_only' || v === 'disabled' ? v : 'everyone';
+  }
+
+  /**
    * Politique de confirmation des actions MCP destructrices.
    *
    * ⚠️ Défaut **`destructive`**, et non `off` comme les autres réglages MCP

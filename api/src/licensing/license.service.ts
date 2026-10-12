@@ -193,7 +193,7 @@ export class LicenseService {
     // (slug/seed-org réutilisable). Permissif si licenseId illisible (rollout).
     const licenseId = await this.currentLicenseId();
     if (licenseId && bound !== licenseId) {
-      this.logger.warn(`Licence épinglée à ${bound} ≠ licenseId courant ${licenseId} → invalide.`);
+      this.logger.warn(`License bound to ${bound} does not match current licenseId ${licenseId} -> invalid.`);
       return { ...base, status: 'invalid', features: [] };
     }
     return base;
@@ -323,7 +323,7 @@ export class LicenseService {
         return { ...base, status: 'suspended', features: [] };
       }
     } catch (err) {
-      this.logger.warn(`Lecture connectivité licence impossible: ${(err as Error).message}`);
+      this.logger.warn(`Unable to read license connectivity state: ${(err as Error).message}`);
     }
     return base;
   }
@@ -351,7 +351,7 @@ export class LicenseService {
       }
     }
     if (payload?.iss !== EXPECTED_ISSUER) {
-      this.logger.warn(`Licence à émetteur inattendu: ${payload?.iss}`);
+      this.logger.warn(`License has an unexpected issuer: ${payload?.iss}`);
       return { ...EMPTY, status: 'invalid' };
     }
     const expiresAt = payload.expiresAt ? new Date(payload.expiresAt) : null;

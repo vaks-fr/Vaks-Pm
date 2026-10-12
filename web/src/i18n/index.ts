@@ -16,6 +16,7 @@ import enAuth from './resources/en/auth.json';
 import enValidation from './resources/en/validation.json';
 import enTasks from './resources/en/tasks.json';
 import enTimeline from './resources/en/timeline.json';
+import enCalendar from './resources/en/calendar.json';
 import enWorkload from './resources/en/workload.json';
 import enFinances from './resources/en/finances.json';
 import enReports from './resources/en/reports.json';
@@ -27,12 +28,14 @@ import enIntegrations from './resources/en/integrations.json';
 import enProjects from './resources/en/projects.json';
 import enCustomFields from './resources/en/customfields.json';
 import enCustomStatuses from './resources/en/customstatuses.json';
+import enRisks from './resources/en/risks.json';
 
 import frCommon from './resources/fr/common.json';
 import frAuth from './resources/fr/auth.json';
 import frValidation from './resources/fr/validation.json';
 import frTasks from './resources/fr/tasks.json';
 import frTimeline from './resources/fr/timeline.json';
+import frCalendar from './resources/fr/calendar.json';
 import frWorkload from './resources/fr/workload.json';
 import frFinances from './resources/fr/finances.json';
 import frReports from './resources/fr/reports.json';
@@ -44,12 +47,14 @@ import frIntegrations from './resources/fr/integrations.json';
 import frProjects from './resources/fr/projects.json';
 import frCustomFields from './resources/fr/customfields.json';
 import frCustomStatuses from './resources/fr/customstatuses.json';
+import frRisks from './resources/fr/risks.json';
 
 import itCommon from './resources/it/common.json';
 import itAuth from './resources/it/auth.json';
 import itValidation from './resources/it/validation.json';
 import itTasks from './resources/it/tasks.json';
 import itTimeline from './resources/it/timeline.json';
+import itCalendar from './resources/it/calendar.json';
 import itWorkload from './resources/it/workload.json';
 import itFinances from './resources/it/finances.json';
 import itReports from './resources/it/reports.json';
@@ -61,12 +66,14 @@ import itIntegrations from './resources/it/integrations.json';
 import itProjects from './resources/it/projects.json';
 import itCustomFields from './resources/it/customfields.json';
 import itCustomStatuses from './resources/it/customstatuses.json';
+import itRisks from './resources/it/risks.json';
 
 import deCommon from './resources/de/common.json';
 import deAuth from './resources/de/auth.json';
 import deValidation from './resources/de/validation.json';
 import deTasks from './resources/de/tasks.json';
 import deTimeline from './resources/de/timeline.json';
+import deCalendar from './resources/de/calendar.json';
 import deWorkload from './resources/de/workload.json';
 import deFinances from './resources/de/finances.json';
 import deReports from './resources/de/reports.json';
@@ -78,6 +85,7 @@ import deIntegrations from './resources/de/integrations.json';
 import deProjects from './resources/de/projects.json';
 import deCustomFields from './resources/de/customfields.json';
 import deCustomStatuses from './resources/de/customstatuses.json';
+import deRisks from './resources/de/risks.json';
 
 export const NAMESPACES = [
   'common',
@@ -85,6 +93,7 @@ export const NAMESPACES = [
   'validation',
   'tasks',
   'timeline',
+  'calendar',
   'workload',
   'finances',
   'reports',
@@ -96,6 +105,7 @@ export const NAMESPACES = [
   'projects',
   'customfields',
   'customstatuses',
+  'risks',
 ] as const;
 
 export const resources = {
@@ -105,6 +115,7 @@ export const resources = {
     validation: enValidation,
     tasks: enTasks,
     timeline: enTimeline,
+    calendar: enCalendar,
     workload: enWorkload,
     finances: enFinances,
     reports: enReports,
@@ -116,6 +127,7 @@ export const resources = {
     projects: enProjects,
     customfields: enCustomFields,
     customstatuses: enCustomStatuses,
+    risks: enRisks,
   },
   fr: {
     common: frCommon,
@@ -123,6 +135,7 @@ export const resources = {
     validation: frValidation,
     tasks: frTasks,
     timeline: frTimeline,
+    calendar: frCalendar,
     workload: frWorkload,
     finances: frFinances,
     reports: frReports,
@@ -134,6 +147,7 @@ export const resources = {
     projects: frProjects,
     customfields: frCustomFields,
     customstatuses: frCustomStatuses,
+    risks: frRisks,
   },
   it: {
     common: itCommon,
@@ -141,6 +155,7 @@ export const resources = {
     validation: itValidation,
     tasks: itTasks,
     timeline: itTimeline,
+    calendar: itCalendar,
     workload: itWorkload,
     finances: itFinances,
     reports: itReports,
@@ -152,6 +167,7 @@ export const resources = {
     projects: itProjects,
     customfields: itCustomFields,
     customstatuses: itCustomStatuses,
+    risks: itRisks,
   },
   de: {
     common: deCommon,
@@ -159,6 +175,7 @@ export const resources = {
     validation: deValidation,
     tasks: deTasks,
     timeline: deTimeline,
+    calendar: deCalendar,
     workload: deWorkload,
     finances: deFinances,
     reports: deReports,
@@ -170,6 +187,7 @@ export const resources = {
     projects: deProjects,
     customfields: deCustomFields,
     customstatuses: deCustomStatuses,
+    risks: deRisks,
   },
 };
 

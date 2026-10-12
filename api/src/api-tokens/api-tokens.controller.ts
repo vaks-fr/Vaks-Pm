@@ -1,9 +1,10 @@
-import { Body, Controller, Delete, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../rbac/permissions.guard';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
+import { AdminSettingsService } from '../admin/admin-settings.service';
 import { ApiTokensService } from './api-tokens.service';
 import { CreateApiTokenDto } from './dto/create-api-token.dto';
 
@@ -17,7 +18,10 @@ import { CreateApiTokenDto } from './dto/create-api-token.dto';
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller('me/api-tokens')
 export class MyApiTokensController {
-  constructor(private readonly svc: ApiTokensService) {}
+  constructor(
+    private readonly svc: ApiTokensService,
+    private readonly settings: AdminSettingsService,
+  ) {}
 
   @Get('scopes')
   scopes() {
@@ -31,7 +35,15 @@ export class MyApiTokensController {
   }
 
   @Post()
-  create(@CurrentUser() user: AuthUser, @Body() dto: CreateApiTokenDto) {
+  async create(@CurrentUser() user: AuthUser, @Body() dto: CreateApiTokenDto) {
+    // Politique org `apiTokens.selfServicePolicy` (Admin → API). Un PAT est une
+    // des portes du connecteur IA : l'admin doit pouvoir la fermer.
+    const policy = await this.settings.getApiTokenSelfServicePolicy(user.orgId);
+    if (policy === 'disabled' || (policy === 'admins_only' && !user.isAdmin)) {
+      throw new ForbiddenException(
+        "La création de jetons d'API personnels est désactivée par votre organisation.",
+      );
+    }
     return this.svc.create(user.orgId, 'USER', {
       userId: user.userId,
       createdById: user.userId,

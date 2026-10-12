@@ -1,0 +1,31 @@
+{
+  "personalTitle": "Il mio calendario",
+  "personalSub": "Le tue scadenze su tutti i progetti",
+  "projectTitle": "Calendario",
+  "projectSub": "Scadenze e milestone di questo progetto",
+  "loading": "Caricamento del calendario…",
+  "empty": "Niente in programma questo mese",
+  "prevMonth": "Mese precedente",
+  "nextMonth": "Mese successivo",
+  "thisMonth": "Questo mese",
+  "today": "Oggi",
+  "more": "+{{count}} altri",
+  "eventCount_one": "{{count}} elemento",
+  "eventCount_other": "{{count}} elementi",
+  "legend": {
+    "today": "Oggi",
+    "milestone": "Milestone",
+    "overdue": "In ritardo",
+    "holiday": "Festività",
+    "timeOff": "Assenza"
+  },
+  "allocated": "{{hours}} h",
+  "tt": {
+    "due": "{{title}} · scadenza {{date}}",
+    "milestone": "{{title}} · milestone {{date}}",
+    "overdue": "{{title}} · in ritardo dal {{date}}",
+    "holiday": "{{name}} · {{date}}",
+    "timeOff": "{{type}} · {{start}} → {{end}}",
+    "allocated": "{{hours}} h allocate il {{date}}"
+  }
+}

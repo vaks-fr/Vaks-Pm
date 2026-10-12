@@ -4,10 +4,11 @@ import { ApiClient, VaksApiError, withCallContext } from './api-client.js';
 import { CONFIRM_TOOL_ACTIONS } from './confirm-tools.js';
 
 /**
- * Tools MCP de l'incrément 1 — **lecture seule**. Chacun n'est qu'un appel à un
- * endpoint `@PublicApi` existant de l'API, exécuté avec le jeton de l'utilisateur
- * (donc borné à son périmètre RBAC). Aucune écriture pour l'instant : l'IA
- * « observe et suggère », l'humain agit dans l'app.
+ * Tools MCP. Chacun n'est qu'un appel à un endpoint `@PublicApi` existant de
+ * l'API, exécuté avec le jeton de l'utilisateur (donc borné à son périmètre
+ * RBAC). Les tools d'écriture ne sont enregistrés que si le jeton porte des
+ * scopes d'écriture (`allowWrite`, dérivé de `me/mcp-context`), et la surface
+ * est filtrée par nature d'acteur (humain / agent).
  */
 
 /**
@@ -1427,8 +1428,14 @@ export function registerTools(
         description: z.string().optional().describe('Description — optional.'),
         color: z.string().optional().describe('Hex color (e.g. #3b82f6) — optional.'),
         aliases: z.array(z.string()).optional().describe('Aliases — `update` only.'),
+        // Segment de chemin d'une ÉCRITURE : format strict (ids de packs =
+        // noms de fichiers `api/prisma/skill-packs/*.json`), sinon `../` dans
+        // l'argument réécrirait la cible du POST. (Les autres segments libres —
+        // jobId, source/itemId — ne servent qu'à des GET, déjà bornés par le
+        // jeton de l'utilisateur.)
         packId: z
           .string()
+          .regex(/^[a-z0-9_-]{1,64}$/)
           .optional()
           .describe('Pack id (e.g. aws, backend, methodology…) — required for `apply_pack`.'),
         force: z
@@ -1446,7 +1453,7 @@ export function registerTools(
         }
         if (action === 'apply_pack') {
           need(packId, '`apply_pack` requires `packId`.');
-          return api.post(`skills/packs/${packId}/apply${force ? '?force=1' : ''}`, {});
+          return api.post(`skills/packs/${encodeURIComponent(String(packId))}/apply${force ? '?force=1' : ''}`, {});
         }
         need(skillId, `\`${action}\` requires \`skillId\`.`);
         if (action === 'update')
@@ -1519,9 +1526,9 @@ export function registerTools(
       inputSchema: {
         taskId: z.string().uuid().describe('Task id (UUID).'),
         status: z
-          .enum(['TODO', 'IN_PROGRESS', 'DONE', 'ON_HOLD'])
+          .enum(['TODO', 'IN_PROGRESS', 'IN_REVIEW', 'DONE', 'ON_HOLD'])
           .optional()
-          .describe('New status — optional.'),
+          .describe('New status — optional (base statuses, as accepted by PATCH /tasks).'),
         statusReason: z.string().optional().describe('Reason (useful for ON_HOLD) — optional.'),
         title: z.string().optional().describe('New title — optional.'),
         description: z.string().optional().describe('New description — optional.'),

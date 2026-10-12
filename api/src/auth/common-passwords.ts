@@ -102,6 +102,3 @@ export function isCommonPassword(password: string): boolean {
   if (!password) return false;
   return COMMON_PASSWORDS.has(password.toLowerCase());
 }
-
-/** Nombre d'entrées dans la blocklist (pour info/debug). */
-export const COMMON_PASSWORDS_SIZE = COMMON_PASSWORDS.size;

@@ -242,7 +242,9 @@ export class AgentSelfAuthService {
       data: {
         tokenHash: nextHash,
         prevTokenHash: newPrev,
-        prevValidUntil: new Date(now + GRACE_MS),
+        // Grâce consommée (rotation obtenue via le précédent) → fermée tout de
+        // suite : tout nouvel usage de ce refresh = rejeu → chaîne révoquée.
+        prevValidUntil: new Date(decision.graceConsumed ? now - 1 : now + GRACE_MS),
         expiresAt: new Date(now + REFRESH_TTL_MS),
         rotationCount: { increment: 1 },
         lastUsedAt: new Date(),

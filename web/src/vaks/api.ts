@@ -14,6 +14,7 @@ import type {
   RecurringTaskDto,
   UpsertRecurrenceDto,
   CustomFieldValueDto,
+  CustomFieldDefinitionDto,
   CreateLabelDto,
   DeliverableDto,
   CreateDeliverableDto,
@@ -34,10 +35,13 @@ import type {
   DashboardDto,
   UpdateTaskDto as ApiUpdateTaskDto,
   UserDto,
+  RiskDto,
+  CreateRiskInput,
+  UpdateRiskInput,
 } from '@vaks-pm/shared';
 import { TaskStatus } from '@vaks-pm/shared';
 import { statusColKey } from './taskStatus';
-import { api } from '../api/client';
+import { api, downloadFile } from '../api/client';
 
 // Re-export shared DTOs used by vaks views.
 export type {
@@ -54,6 +58,12 @@ export type {
   DashboardDto,
   DashboardTaskDto,
   DashboardActivityDto,
+  RiskDto,
+  RiskCategory,
+  RiskStatus,
+  RiskSource,
+  CreateRiskInput,
+  UpdateRiskInput,
 } from '@vaks-pm/shared';
 import {
   setVaksData,
@@ -91,33 +101,13 @@ function projectKeyOf(projectId: string | null | undefined): string | undefined 
 
 // ---------- Helpers ----------------------------------------------
 
-/** Hash UUID -> 0..359 pour dériver une teinte stable. */
-export function hueFromId(id: string): number {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
-  return ((h % 360) + 360) % 360;
-}
-
-/**
- * Teinte dérivée du *key* visible du projet (2-3 caractères), pour que la
- * pastille colorée soit identique partout : panneau Projects, dropdown du
- * workspace, breadcrumb, etc. **Doit rester identique** à `colorFromKey` de
- * `ProjectsPanel.tsx` — si tu changes la formule, change les deux.
- */
-export function hueFromProjectKey(key: string): number {
-  let h = 0;
-  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 360;
-  return h;
-}
-
-export function initialsOf(name: string | null | undefined): string {
-  const safe = (name ?? '').trim();
-  if (!safe) return '?';
-  const parts = safe.split(/\s+/);
-  const first = parts[0]?.[0] ?? '?';
-  const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
-  return (first + last).toUpperCase();
-}
+// hueFromId / hueFromProjectKey / initialsOf / thisMondayUTC : extraits vers
+// `./pure` (helpers purs, sans dépendance) pour être testables sans tirer le
+// graphe api.ts (client HTTP + socket.io). Importés PUIS réexportés (pas un
+// simple `export … from` : ce fichier les appelle aussi lui-même plus bas) —
+// les vues qui importent depuis '../vaks/api' ne changent pas.
+import { hueFromId, hueFromProjectKey, initialsOf, thisMondayUTC } from './pure';
+export { hueFromId, hueFromProjectKey, initialsOf, thisMondayUTC };
 
 function shortNameOf(name: string | null | undefined): string {
   const safe = (name ?? '').trim();
@@ -158,15 +148,6 @@ const PRIO_MAP_REV: Record<Priority, string> = {
   high: 'HIGH',
   urgent: 'URGENT',
 };
-
-/** Lundi 00:00 UTC de la semaine en cours. */
-export function thisMondayUTC(now = new Date()): Date {
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  // 0=dimanche ; on veut lundi=0
-  const dow = (d.getUTCDay() + 6) % 7;
-  d.setUTCDate(d.getUTCDate() - dow);
-  return d;
-}
 
 function daysFromMonday(iso: string | null, monday: Date): number | null {
   if (!iso) return null;
@@ -344,6 +325,29 @@ export function clearVaksApiCache(): void {
   projectSnapshots.clear();
 }
 
+/**
+ * Liste blanche finale des assignees d'un projet, avec **héritage owner→agent**.
+ * `memberIds` = membres directs + membres d'équipe affectée. Sur un projet
+ * `agentsEnabled`, on y ajoute tout agent (`kind=AGENT`) dont l'`ownerId` est
+ * déjà dans la liste : son owner étant membre, l'agent est assignable sans ajout
+ * explicite (le serveur applique exactement la même règle). `null` si aucun
+ * périmètre n'est défini → le picker retombe sur l'annuaire complet.
+ */
+function expandInheritedAgents(
+  memberIds: Set<string>,
+  orgUsers: ReadonlyArray<{ id: string; kind?: string; ownerId?: string | null }>,
+  agentsEnabled: boolean | undefined,
+): string[] | null {
+  if (memberIds.size === 0) return null;
+  const ids = new Set(memberIds);
+  if (agentsEnabled) {
+    for (const u of orgUsers) {
+      if (u.kind === 'AGENT' && u.ownerId && ids.has(u.ownerId)) ids.add(u.id);
+    }
+  }
+  return Array.from(ids);
+}
+
 /** Invalide le snapshot d'un projet (à appeler après une mutation structurelle). */
 export function invalidateProjectSnapshot(projectId: string): void {
   projectSnapshots.delete(projectId);
@@ -419,14 +423,14 @@ export async function loadVaksFromApi(
     api.listProjectMembers(proj.id).catch(() => []),
   ]);
 
-  // Liste blanche des assignees autorisés sur ce projet.
+  // Liste blanche des assignees autorisés sur ce projet (membres directs +
+  // membres des équipes affectées). Étendue plus bas avec les agents hérités
+  // (héritage owner→agent), une fois l'annuaire org chargé.
   const allowedSet = new Set<string>();
   for (const pt of projectTeamsApi) {
     for (const m of pt.team.members) allowedSet.add(m.userId);
   }
   for (const pm of projectMembersApi) allowedSet.add(pm.userId);
-  const availableAssigneeIds: string[] | null =
-    allowedSet.size === 0 ? null : Array.from(allowedSet);
 
   // Time entries du projet, semaine en cours
   const fromIso = monday.toISOString().slice(0, 10);
@@ -463,6 +467,16 @@ export async function loadVaksFromApi(
       }
     }
   }
+
+  // Héritage owner→agent : sur un projet `agentsEnabled`, un agent dont l'owner
+  // est déjà dans la liste blanche devient assignable sans ajout membre explicite
+  // (le serveur applique la même règle). On ne l'ajoute que si un périmètre existe
+  // déjà (sinon `null` = tout l'annuaire, agents compris via le fallback).
+  const availableAssigneeIds = expandInheritedAgents(
+    allowedSet,
+    orgUsers ?? [],
+    proj.agentsEnabled,
+  );
 
   // Labels en map id->VLabel
   const labelsMap: Record<string, VLabel> = {};
@@ -522,8 +536,10 @@ export async function refreshProjectAssignees(projectId: string): Promise<void> 
     for (const m of pt.team.members) allowed.add(m.userId);
   }
   for (const pm of projectMembersApi) allowed.add(pm.userId);
+  // Même héritage owner→agent que loadProject (cf. expandInheritedAgents).
+  const agentsEnabled = PROJECTS_STORE.find((p) => p.id === projectId)?.agentsEnabled;
   setVaksData({
-    availableAssigneeIds: allowed.size === 0 ? null : Array.from(allowed),
+    availableAssigneeIds: expandInheritedAgents(allowed, cachedOrgUsers ?? [], agentsEnabled),
   });
 }
 
@@ -728,6 +744,13 @@ export async function apiGetTaskCustomFields(taskId: string): Promise<CustomFiel
   return api.getTaskCustomFields(taskId);
 }
 
+/** Catalogue org des définitions de champs personnalisés « tâche » (pour les
+ *  en-têtes de colonnes de la vue Table — les valeurs par tâche passent par
+ *  `apiGetTaskCustomFields`). */
+export async function apiListTaskCustomFieldDefs(): Promise<CustomFieldDefinitionDto[]> {
+  return api.listCustomFields('task');
+}
+
 export async function apiSetTaskCustomFields(
   taskId: string,
   values: Array<{ fieldId: string; value: string }>,
@@ -744,6 +767,32 @@ export async function apiSetProjectCustomFields(
   values: Array<{ fieldId: string; value: string }>,
 ): Promise<CustomFieldValueDto[]> {
   return api.setProjectCustomFields(projectId, { values });
+}
+
+// ---- Registre de risques (RAID, MVP=RISK) ----
+
+export async function apiListRisks(projectId: string): Promise<RiskDto[]> {
+  return api.listRisks(projectId);
+}
+
+export async function apiCreateRisk(projectId: string, dto: CreateRiskInput): Promise<RiskDto> {
+  return api.createRisk(projectId, dto);
+}
+
+export async function apiUpdateRisk(
+  projectId: string,
+  riskId: string,
+  dto: UpdateRiskInput,
+): Promise<RiskDto> {
+  return api.updateRisk(projectId, riskId, dto);
+}
+
+export async function apiResolveRisk(projectId: string, riskId: string): Promise<RiskDto> {
+  return api.resolveRisk(projectId, riskId);
+}
+
+export async function apiDeleteRisk(projectId: string, riskId: string): Promise<void> {
+  await api.deleteRisk(projectId, riskId);
 }
 
 export async function apiListProjectWatchers(projectId: string): Promise<WatcherDto[]> {
@@ -815,6 +864,9 @@ export const apiUploadAttachment = (taskId: string, file: File): Promise<Attachm
 export const apiDeleteAttachment = (id: string) => api.deleteAttachment(id);
 export const apiDownloadAttachment = (att: AttachmentDto): Promise<void> =>
   api.downloadAttachment(att);
+/** Récupère le blob d'une PJ (aperçu in-app) sans déclencher de téléchargement. */
+export const apiFetchAttachmentBlob = (attId: string, filename: string): Promise<Blob> =>
+  downloadFile(`/attachments/${attId}/download`, filename).then((r) => r.blob);
 
 // ---- deliverables (chantier 2c) ----
 export const apiListDeliverables = (taskId: string): Promise<DeliverableDto[]> =>

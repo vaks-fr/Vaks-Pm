@@ -41,15 +41,25 @@ export class AuthController {
     private readonly tenancy: TenancyService,
   ) {}
 
-  /** Extrait UA + IP de la requête. IP : X-Forwarded-For (premier hop) en
-   *  priorité car derrière Traefik, sinon req.ip. */
+  /** Extrait UA + IP de la requête. `trust proxy` est activé (main.ts) donc
+   *  `req.ip` reflète déjà le premier hop X-Forwarded-For derrière Traefik. */
   private clientMeta(req: Request): { userAgent: string; ipAddress: string } {
-    const xff = req.headers['x-forwarded-for'];
-    const ipFromXff = Array.isArray(xff) ? xff[0] : (xff ?? '').split(',')[0]?.trim();
     return {
       userAgent: String(req.headers['user-agent'] ?? ''),
-      ipAddress: ipFromXff || req.ip || '',
+      ipAddress: req.ip || '',
     };
+  }
+
+  /** Multi-tenant : en mode `pooled`, le middleware a déjà lié la connexion à
+   *  la base du tenant (résolu depuis le Host) → les routes publiques ici
+   *  refusent juste un Host sans tenant. En `dedicated`, no-op (comportement
+   *  on-premise inchangé, global). */
+  private async requireResolvedTenant(req: Request): Promise<void> {
+    if (this.tenancy.mode !== 'pooled') return;
+    const tenant = await this.tenancy.resolveFromHost(req.headers.host);
+    if (!tenant) {
+      throw new UnauthorizedException('Organisation introuvable pour ce domaine');
+    }
   }
 
   /** Policy de mot de passe org-courante (longueur, complexité, history).
@@ -68,16 +78,7 @@ export class AuthController {
   @Throttle({ default: { ttl: 60_000, limit: 10 } })
   @HttpCode(200)
   async login(@Body() dto: LoginDto, @Req() req: Request) {
-    // Multi-tenant : en mode `pooled`, le middleware a déjà lié la connexion à
-    // la base du tenant (résolu depuis le Host) → le login y est scopé via la
-    // connexion. On refuse juste un Host sans tenant. En `dedicated`, login
-    // global (comportement on-premise inchangé).
-    if (this.tenancy.mode === 'pooled') {
-      const tenant = await this.tenancy.resolveFromHost(req.headers.host);
-      if (!tenant) {
-        throw new UnauthorizedException('Organisation introuvable pour ce domaine');
-      }
-    }
+    await this.requireResolvedTenant(req);
     return this.auth.login(dto.email, dto.password, this.clientMeta(req));
   }
 
@@ -112,10 +113,7 @@ export class AuthController {
     @Query('token') token: string,
     @Req() req: Request,
   ) {
-    if (this.tenancy.mode === 'pooled') {
-      const tenant = await this.tenancy.resolveFromHost(req.headers.host);
-      if (!tenant) throw new UnauthorizedException('Organisation introuvable pour ce domaine');
-    }
+    await this.requireResolvedTenant(req);
     return this.auth.validatePasswordResetToken(token ?? '');
   }
 
@@ -127,10 +125,7 @@ export class AuthController {
     @Body() dto: { token?: string; newPassword?: string },
     @Req() req: Request,
   ) {
-    if (this.tenancy.mode === 'pooled') {
-      const tenant = await this.tenancy.resolveFromHost(req.headers.host);
-      if (!tenant) throw new UnauthorizedException('Organisation introuvable pour ce domaine');
-    }
+    await this.requireResolvedTenant(req);
     if (!dto?.token || !dto?.newPassword) {
       throw new BadRequestException('token et newPassword requis');
     }

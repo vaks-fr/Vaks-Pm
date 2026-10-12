@@ -684,6 +684,13 @@ model User {
   defaultCostRate Decimal? @db.Decimal(12, 2)
   /// Taux facturé client / h par défaut. Même gouvernance que defaultCostRate.
   defaultBillRate Decimal? @db.Decimal(12, 2)
+  /// Jeton opaque du flux ICS personnel (`GET /calendar/:token.ics`, route
+  /// PUBLIQUE non-JWT — cf. `documentation/project_calendar_view.md` slice C).
+  /// null = abonnement désactivé. Régénéré/révoqué par l'user lui-même via
+  /// `/me/calendar-feed`. Ne JAMAIS logger cette valeur (équivalent credential
+  /// d'URL) ; le flux qu'il déverrouille reste strictement self-only (tâches +
+  /// allocations DU propriétaire du token, jamais d'autrui).
+  icsToken       String?    @unique
 
   // ---------- Agents IA (kind = AGENT ; cf. AGENTS_ARCHITECTURE.md) ----------
   /// HUMAN (défaut) ou AGENT. Un agent : email synthétique `@agents.invalid`,
@@ -755,6 +762,7 @@ model User {
   agentProjectRates AgentProjectRate[] @relation("AgentRateAgent")
   projectDocUploads ProjectDocument[] @relation("ProjectDocUploader")
   projectExpenses ProjectExpense[] @relation("ProjectExpenseCreator")
+  ownedRisks     Risk[] @relation("RiskOwner")
 
   @@unique([organizationId, email])
   @@unique([organizationId, employeeId])
@@ -967,6 +975,7 @@ model Project {
   customFieldValues   ProjectCustomFieldValue[]
   customFieldProjects CustomFieldProject[]
   customStatusProjects CustomStatusProject[]
+  risks        Risk[]
 
   /// Le `key` (trigramme) n'est qu'une pastille visuelle (badge + préfixe
   /// de fichier export). Les tâches référencent le projet par UUID, jamais
@@ -1141,6 +1150,83 @@ model ProjectDocumentFolder {
   @@index([projectId, parentId])
 }
 
+/// Catégorie RAID (Risks/Assumptions/Issues/Dependencies). MVP = RISK
+/// uniquement (registre de risques) ; les 3 autres sont prévues pour
+/// l'extension RAID complète, pas encore alimentées par l'UI/l'auto-feed.
+enum RiskCategory {
+  RISK
+  ASSUMPTION
+  ISSUE
+  DEPENDENCY
+}
+
+/// Cycle de vie d'un risque. OPEN = identifié, non traité. MITIGATING = plan
+/// de mitigation en cours. RESOLVED = traité (fermé). ACCEPTED = risque
+/// assumé sciemment sans mitigation (décision documentée dans `mitigation`).
+enum RiskStatus {
+  OPEN
+  MITIGATING
+  RESOLVED
+  ACCEPTED
+}
+
+/// Origine d'un risque. MANUAL = saisi par un humain. AUTO = dérivé par le
+/// moteur d'automatisations (`RiskAutoService.reconcileFromAlert`) — porte
+/// alors une `idempotencyKey` non-null.
+enum RiskSource {
+  MANUAL
+  AUTO
+}
+
+/// Registre de risques (RAID, MVP=RISK) par projet. Alimenté MANUELLEMENT
+/// (formulaire) ET AUTOMATIQUEMENT depuis le chokepoint `emit` des
+/// automatisations (jalon à risque / dérive budgétaire / dépassement de
+/// prévisionnel) — voir `RiskAutoService`. `score` est dénormalisé
+/// (probability × impact) pour trier/filtrer sans recalcul côté requête.
+///
+/// Idempotence AUTO (le piège central de ce modèle) : `idempotencyKey` est
+/// déterministe (`auto:<kind>:<projectId>:<entityId>`) et **unique**. La
+/// règle qui se redéclenche fait un UPSERT dont la clause `update` NE TOUCHE
+/// JAMAIS `status`/`mitigation`/`ownerId`/`resolvedAt` — un risque AUTO
+/// résolu ou édité par un humain n'est donc ni ré-ouvert ni écrasé. Postgres
+/// traite les NULL comme distincts sur une contrainte `@unique`, donc les
+/// risques MANUAL (idempotencyKey = null) ne collisionnent jamais entre eux.
+model Risk {
+  id             String       @id @default(uuid())
+  organizationId String
+  projectId      String
+  title          String
+  description    String?
+  /// 1 (très improbable) à 5 (quasi certain).
+  probability    Int
+  /// 1 (négligeable) à 5 (critique).
+  impact         Int
+  /// Dénormalisé = probability * impact. Recalculé par le service à chaque
+  /// écriture qui touche l'un des deux facteurs.
+  score          Int
+  category       RiskCategory @default(RISK)
+  mitigation     String?
+  ownerId        String?
+  status         RiskStatus   @default(OPEN)
+  source         RiskSource   @default(MANUAL)
+  /// AutomationKind d'origine (ex. "milestone_at_risk") quand source=AUTO.
+  /// Purement informatif (affiché en tooltip du badge AUTO) — null en MANUAL.
+  autoRuleKind   String?
+  /// Déterministe pour AUTO (`auto:<kind>:<projectId>:<entityId>`), null pour
+  /// MANUAL. Voir commentaire de modèle : c'est la clé d'upsert idempotent.
+  idempotencyKey String?      @unique
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  resolvedAt     DateTime?
+  deletedAt      DateTime?
+
+  project      Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  owner        User?   @relation("RiskOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, projectId, deletedAt])
+  @@index([projectId, status])
+}
+
 /// Type d'événement dans l'historique de l'étape « offre » d'un projet.
 enum ProjectOfferEventKind {
   SENT      // offre envoyée au client (manuel ou par email)
@@ -1260,6 +1346,7 @@ model ProjectMember {
   /// un niveau de droits : il ne confère aucune permission.
   isSponsor Boolean  @default(false)
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now())
 
   project Project @relation(fields: [projectId], references: [id])
   user    User    @relation(fields: [userId], references: [id])
@@ -1277,6 +1364,7 @@ model Board {
   projectId String
   name      String   @default("Board")
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now())
 
   project Project       @relation(fields: [projectId], references: [id])
   columns BoardColumn[]
@@ -1518,6 +1606,7 @@ model Deliverable {
   validatorVerdict        String?
   validatorNote           String?
   createdAt      DateTime                @default(now())
+  updatedAt DateTime @updatedAt @default(now())
   deletedAt      DateTime?
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
@@ -1723,6 +1812,7 @@ model Label {
   name      String
   color     String   @default("#6b7280") // hex (#rrggbb)
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now())
 
   project Project     @relation(fields: [projectId], references: [id])
   tasks   TaskLabel[]
@@ -1897,6 +1987,7 @@ model ProjectTeam {
   teamId    String
   roleId    String?
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now())
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   team    Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
@@ -1912,6 +2003,7 @@ model TeamMember {
   userId    String
   isLead    Boolean  @default(false)
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now())
 
   team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
   user User @relation(fields: [userId], references: [id])
@@ -2463,6 +2555,7 @@ model Notification {
   /// alimente la pastille. Dismiss = suppression de la ligne.
   readAt         DateTime?
   createdAt      DateTime  @default(now())
+  updatedAt DateTime @updatedAt @default(now())
 
   @@index([organizationId, userId, createdAt])
   @@index([organizationId, userId, readAt])
@@ -2545,6 +2638,7 @@ model TeamSkill {
   teamId    String
   skillId   String
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now())
 
   team  Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
   skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
@@ -2607,6 +2701,7 @@ model ProjectSkill {
   projectId String
   skillId   String
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now())
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   skill   Skill   @relation(fields: [skillId], references: [id], onDelete: Cascade)
@@ -2873,6 +2968,7 @@ model Announcement {
   taskId         String?
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now())
 
   @@index([organizationId, projectId, createdAt])
 }

@@ -1,7 +1,7 @@
 import { ExecutionContext, Injectable, Logger } from '@nestjs/common';
 import { ThrottlerException, ThrottlerGuard, ThrottlerRequest } from '@nestjs/throttler';
-import { createHash } from 'crypto';
 import type { Request } from 'express';
+import { extractBearer, isApiToken, tokenIdentity } from '../auth/bearer.util';
 
 const int = (v: string | undefined, def: number): number => {
   const n = parseInt(v ?? '', 10);
@@ -31,13 +31,17 @@ interface BearerToken {
   isOrg: boolean;
 }
 
-/** Extrait le jeton `vaks_…` du header Authorization, sans lookup DB. */
-function bearerToken(req: Request): BearerToken | null {
-  const auth = req.headers['authorization'];
-  const raw = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
-  if (!raw || !raw.startsWith('vaks_')) return null;
+/**
+ * Extrait le jeton `vaks_…` de la requête, sans lookup DB. Même extracteur que
+ * `JwtAuthGuard` (`Authorization` PUIS repli `X-Api-Key`) : un PAT transporté
+ * par `X-Api-Key` (Power Platform / Copilot) est authentifié, il doit donc être
+ * rate-limité au même budget — sinon il n'aurait que le palier IP par route.
+ */
+export function bearerToken(req: Pick<Request, 'headers'>): BearerToken | null {
+  const raw = extractBearer(req);
+  if (!isApiToken(raw)) return null;
   // On bucket par hash du secret : identité stable du jeton, jamais le clair en clé Redis.
-  return { hash: createHash('sha256').update(raw).digest('hex').slice(0, 32), isOrg: raw.startsWith('vaks_org_') };
+  return { hash: tokenIdentity(raw), isOrg: raw.startsWith('vaks_org_') };
 }
 
 /**

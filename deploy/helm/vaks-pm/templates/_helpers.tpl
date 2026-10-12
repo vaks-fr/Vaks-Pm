@@ -170,11 +170,58 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
-{{- define "vakspm.redisUrl" -}}
-{{- if .Values.redis.enabled -}}
-{{- printf "redis://%s:6379" (include "vakspm.redis.fullname" .) -}}
+{{- /*
+  In-cluster Redis password (requirepass). Explicit value, else read back from
+  the chart Secret (stable across upgrades), else a fresh random. Alphanumeric
+  only: it is embedded as-is in REDIS_URL. Like the other generators it re-rolls
+  on every call — compute it ONCE (secret.yaml) and reuse.
+*/ -}}
+{{- define "vakspm.redisPassword" -}}
+{{- if .Values.redis.auth.password -}}
+{{- .Values.redis.auth.password -}}
 {{- else -}}
-{{- .Values.externalRedis.url -}}
+{{- $secretName := printf "%s-secret" (include "vakspm.fullname" .) -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- if and $existing $existing.data (hasKey $existing.data "REDIS_PASSWORD") -}}
+{{- index $existing.data "REDIS_PASSWORD" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 32 -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* Deterministic checksum of the values that shape the Secret / Redis auth. */ -}}
+{{- define "vakspm.secretInputsChecksum" -}}
+{{- list .Values.secrets .Values.redis.enabled .Values.redis.auth .Values.externalRedis | toJson | sha256sum -}}
+{{- end -}}
+
+{{- /*
+  With secrets.existingSecret + in-cluster Redis auth, the user's Secret MUST
+  carry REDIS_PASSWORD (and a REDIS_URL embedding it). Checked at render time
+  when the cluster is reachable (helm install/upgrade): fail with a clear
+  message instead of a Redis pod stuck in CreateContainerConfigError after the
+  old one was already recreated away.
+*/ -}}
+{{- define "vakspm.assertRedisAuthSecret" -}}
+{{- if and .Values.redis.enabled .Values.redis.auth.enabled .Values.secrets.existingSecret -}}
+{{- $s := lookup "v1" "Secret" .Release.Namespace .Values.secrets.existingSecret -}}
+{{- if and $s (not (hasKey (default (dict) $s.data) "REDIS_PASSWORD")) -}}
+{{- fail (printf "redis.auth.enabled=true but Secret %q has no REDIS_PASSWORD key. Add REDIS_PASSWORD (alphanumeric) and embed it in REDIS_URL (redis://:<pw>@<host>:6379), or set redis.auth.enabled=false." .Values.secrets.existingSecret) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* REDIS_URL. Call with (dict "root" . "password" $pw) — $pw computed once. */ -}}
+{{- define "vakspm.redisUrl" -}}
+{{- $root := .root -}}
+{{- if $root.Values.redis.enabled -}}
+{{- if and $root.Values.redis.auth.enabled .password -}}
+{{- printf "redis://:%s@%s:6379" .password (include "vakspm.redis.fullname" $root) -}}
+{{- else -}}
+{{- printf "redis://%s:6379" (include "vakspm.redis.fullname" $root) -}}
+{{- end -}}
+{{- else -}}
+{{- $root.Values.externalRedis.url -}}
 {{- end -}}
 {{- end -}}
 

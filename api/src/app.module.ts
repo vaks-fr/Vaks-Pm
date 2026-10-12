@@ -18,12 +18,14 @@ import { CommentsModule } from './comments/comments.module';
 import { ReportsModule } from './reports/reports.module';
 import { DependenciesModule } from './dependencies/dependencies.module';
 import { WorkloadModule } from './workload/workload.module';
+import { CalendarModule } from './calendar/calendar.module';
 import { FinanceModule } from './finance/finance.module';
 import { TimesheetModule } from './timesheet/timesheet.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { ExternalTasksModule } from './external-tasks/external-tasks.module';
 import { TeamsModule } from './teams/teams.module';
 import { HealthModule } from './health/health.module';
+import { MetricsModule } from './metrics/metrics.module';
 import { AdminModule } from './admin/admin.module';
 import { ClientsModule } from './clients/clients.module';
 import { StorageModule } from './storage/storage.module';
@@ -55,6 +57,7 @@ import { AutomationsModule } from './automations/automations.module';
 import { AnnouncementsModule } from './announcements/announcements.module';
 import { CustomFieldsModule } from './custom-fields/custom-fields.module';
 import { CustomStatusesModule } from './custom-statuses/custom-statuses.module';
+import { RisksModule } from './risks/risks.module';
 import { OAuthModule } from './oauth/oauth.module';
 import { AgentSelfAuthModule } from './agents/self-auth/agent-self-auth.module';
 import { McpModule } from './mcp/mcp.module';
@@ -124,12 +127,14 @@ import { APP_GUARD, DiscoveryModule } from '@nestjs/core';
     ReportsModule,
     DependenciesModule,
     WorkloadModule,
+    CalendarModule,
     FinanceModule,
     TimesheetModule,
     DashboardModule,
     ExternalTasksModule,
     TeamsModule,
     HealthModule,
+    MetricsModule,
     AdminModule,
     ClientsModule,
     AttachmentsModule,
@@ -160,6 +165,7 @@ import { APP_GUARD, DiscoveryModule } from '@nestjs/core';
     AnnouncementsModule,
     CustomFieldsModule,
     CustomStatusesModule,
+    RisksModule,
     OAuthModule,
     AgentSelfAuthModule,
     McpModule,

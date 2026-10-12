@@ -303,13 +303,15 @@ const secretExports = [
   'export WORKER_API_TOKEN=$$(cat /run/secrets/worker_api_token)',
   'export SSO_OIDC_CLIENT_SECRET=$$(cat /run/secrets/sso_oidc_secret)',
 ];
-const appSecrets = ['jwt_access_secret', 'jwt_refresh_secret', 'database_url', 's3_secret_key', 'mfa_encryption_key', 'worker_api_token', 'sso_oidc_secret'];
+const appSecrets = ['jwt_access_secret', 'jwt_refresh_secret', 'database_url', 's3_secret_key', 'mfa_encryption_key', 'worker_api_token', 'sso_oidc_secret', 'redis_password'];
 
 function appEnv(extra = {}) {
   const base = {
     NODE_ENV: 'production',
     API_PORT: '"3000"',
     REDIS_URL: 'redis://redis:6379',
+    // Mot de passe Redis injecté dans REDIS_URL au démarrage (api/src/redis-env.ts).
+    REDIS_PASSWORD_FILE: '/run/secrets/redis_password',
     S3_ENDPOINT: s3.endpoint,
     S3_PORT: `"${s3.port}"`,
     S3_ACCESS_KEY: s3.accessKey || '""',
@@ -362,14 +364,16 @@ function appCommand(withDbPush) {
 // passer par ce helper pour tout service applicatif.
 // `healthcheck` / `stopGrace` sont des clés de SERVICE (pas de `deploy:`), donc
 // deployBlock() ne peut pas les porter.
-function service(name, { env, secrets, command, deploy, configs, image, healthcheck, stopGrace }) {
+function service(name, { env, secrets, command, deploy, configs, image, healthcheck, stopGrace, networks = ['vakspm'], extra }) {
   const parts = [`  ${name}:`, `    image: ${image || img('api')}`, '    environment:', env];
   if (secrets) parts.push('    secrets:\n' + secrets.map((s) => `      - ${s}`).join('\n'));
   if (configs && configs.length) parts.push('    configs:\n' + configs.map((c) => `      - source: ${c.source}\n        target: ${c.target}`).join('\n'));
   if (command) parts.push(command);
   if (healthcheck) parts.push(healthcheck);
   if (stopGrace) parts.push(`    stop_grace_period: ${stopGrace}`);
-  parts.push('    networks: [vakspm]', deploy);
+  parts.push(`    networks: [${networks.join(', ')}]`);
+  if (extra) parts.push(extra);
+  parts.push(deploy);
   return parts.join('\n');
 }
 
@@ -416,6 +420,8 @@ services.push(
     env: appEnv({ SERVICE_ROLE: 'data-plane' }),
     secrets: appSecrets,
     command: appCommand(true),
+    // `mcp-api` : le serveur MCP joint l'API (http://api:3000) par ce seul réseau.
+    networks: ['vakspm', 'mcp-api'],
     deploy: deployBlock({ replicas: ha ? 2 : 1, constraint: appConstraint, spread: ha }),
     configs: pgCaMount,
   }),
@@ -423,7 +429,7 @@ services.push(
 
 // worker
 {
-  const wenv = ['      NODE_ENV: production', '      REDIS_URL: redis://redis:6379', '      INTERNAL_API_URL: http://api:3000'].join('\n');
+  const wenv = ['      NODE_ENV: production', '      REDIS_URL: redis://redis:6379', '      REDIS_PASSWORD_FILE: /run/secrets/redis_password', '      INTERNAL_API_URL: http://api:3000'].join('\n');
   const wcmd = ['    command: >', '      sh -c "export SMTP_PASSWORD=$$(cat /run/secrets/smtp_password) &&', '             export WORKER_API_TOKEN=$$(cat /run/secrets/worker_api_token) &&', '             node dist/main.js"'].join('\n');
   services.push(
     [
@@ -431,7 +437,7 @@ services.push(
       `    image: ${img('worker')}`,
       '    environment:',
       wenv,
-      '    secrets:\n      - smtp_password\n      - worker_api_token\n      - syslog_client_key',
+      '    secrets:\n      - smtp_password\n      - worker_api_token\n      - syslog_client_key\n      - redis_password',
       wcmd,
       '    networks: [vakspm]',
       deployBlock({ replicas: ha ? 2 : 1, constraint: appConstraint, spread: false, startFirst: false }),
@@ -453,7 +459,7 @@ for (const t of dedicated) {
       configs: pgCaMount,
     }),
   );
-  const wenv = ['      NODE_ENV: production', '      REDIS_URL: redis://redis:6379', `      INTERNAL_API_URL: http://api-${t.slug}:3000`].join('\n');
+  const wenv = ['      NODE_ENV: production', '      REDIS_URL: redis://redis:6379', '      REDIS_PASSWORD_FILE: /run/secrets/redis_password', `      INTERNAL_API_URL: http://api-${t.slug}:3000`].join('\n');
   const wcmd = ['    command: >', '      sh -c "export SMTP_PASSWORD=$$(cat /run/secrets/smtp_password) &&', '             export WORKER_API_TOKEN=$$(cat /run/secrets/worker_api_token) &&', '             node dist/main.js"'].join('\n');
   services.push(
     [
@@ -461,7 +467,7 @@ for (const t of dedicated) {
       `    image: ${img('worker')}`,
       '    environment:',
       wenv,
-      '    secrets:\n      - smtp_password\n      - worker_api_token\n      - syslog_client_key',
+      '    secrets:\n      - smtp_password\n      - worker_api_token\n      - syslog_client_key\n      - redis_password',
       wcmd,
       '    networks: [vakspm]',
       deployBlock({ replicas: reps, constraint, spread: t.ha, startFirst: false }),
@@ -498,6 +504,10 @@ for (const t of dedicated) {
       // légitime peut occuper 20 s, une grâce plus courte couperait exactement
       // les appels lents qu'on cherche à protéger.
       stopGrace: '30s',
+      // Isolé : ni Redis, ni Garage, ni worker (cf. déclaration réseau `mcp-api`).
+      networks: ['mcp-api'],
+      // Durcissement (pièce exposée à Internet ; image déjà non-root).
+      extra: ['    read_only: true', '    cap_drop: [ALL]', '    volumes:', '      - type: tmpfs', '        target: /tmp'].join('\n'),
       deploy: deployBlock({ replicas: ha ? 2 : 1, constraint: appConstraint, spread: ha }),
     }),
   );
@@ -522,6 +532,9 @@ services.push(
   [
     '  redis:',
     '    image: redis:7-alpine',
+    // requirepass depuis le secret ; exec → Redis PID 1 (arrêt propre), user `redis`.
+    '    secrets:\n      - redis_password',
+    '    command: ["sh", "-c", "exec docker-entrypoint.sh redis-server --requirepass \\"$$(cat /run/secrets/redis_password)\\""]',
     '    volumes: [redisdata:/data]',
     '    networks: [vakspm]',
     deployBlock({ replicas: 1, constraint: redisNode, spread: false, startFirst: false }),
@@ -625,7 +638,7 @@ if (garageMulti) {
     : ha
       ? ['    deploy:', '      mode: global', '      placement:', `        constraints: [${cpConstraint}]`].join('\n')
       : deployBlock({ replicas: 1, constraint: null, spread: false, startFirst: false });
-  services.push(['  traefik:', '    image: traefik:v3.6.24', cmd, cfgs, ...(tvols ? [tvols] : []), ports, '    networks: [vakspm]', tdeploy].join('\n'));
+  services.push(['  traefik:', '    image: traefik:v3.6.24', cmd, cfgs, ...(tvols ? [tvols] : []), ports, '    networks: [vakspm, mcp-api]', tdeploy].join('\n'));
 }
 // postgres (single uniquement)
 if (!ha) {
@@ -653,6 +666,8 @@ const stackSecrets = [
   'mfa_encryption_key',
   'smtp_password',
   'worker_api_token',
+  // Mot de passe Redis (requirepass) — HEX (inséré dans REDIS_URL).
+  'redis_password',
   // Clé privée mTLS du forward syslog (audit) — placeholder 'none' si inutilisée.
   'syslog_client_key',
   'sso_oidc_secret',
@@ -676,6 +691,13 @@ networks:
     # ce flag (stack rm + deploy), cf. DORA_COMPLIANCE.md §D + infra/crypto/enable-overlay-ipsec.sh.
 ${encOverlay ? `    driver_opts:
       encrypted: "true"` : `    # overlay IPsec DÉSACTIVÉ (encryption.overlay=false) — activable day-2 via infra/crypto/enable-overlay-ipsec.sh`}
+  # Réseau DÉDIÉ au serveur MCP (exposé à Internet) : seuls api + traefik y sont.
+  # Une RCE dans mcp ne voit ni Redis (clés oauth:refresh:* = forge d'un PAT
+  # admin), ni Garage, ni le worker. Non attachable.
+  mcp-api:
+    driver: overlay${encOverlay ? `
+    driver_opts:
+      encrypted: "true"` : ''}
 
 volumes:
 ${volumes.map((v) => `  ${v}`).join('\n')}
@@ -745,6 +767,18 @@ http:
         sourceRange:
           - "192.0.2.1/32"
 
+    # Anti-DoS au bord sur /mcp (par IP source) : chaque POST /mcp coûte un
+    # aller-retour API. Seuils larges (connecteurs cloud = pool d'IP partagé) ;
+    # le budget fin reste le throttler par jeton de l'API.
+    mcp-ratelimit:
+      rateLimit:
+        average: 600
+        period: 1m
+        burst: 300
+    mcp-inflight:
+      inFlightReq:
+        amount: 200
+
   routers:
     # Garde-fou bord : bloque /api/v1/internal AVANT tout autre router (priorité
     # 200). Le trafic worker→api passe par le DNS overlay api:3000, pas Traefik.
@@ -776,7 +810,7 @@ ${celluleRouters ? celluleRouters + '\n' : ''}    # --- Serveur MCP (connecteur 
       entryPoints: [web, websecure]
       service: mcp
       priority: 150
-      middlewares: [security-headers]
+      middlewares: [security-headers, mcp-ratelimit, mcp-inflight]
       tls: {}
     mcp-meta:
       rule: "PathPrefix(\`/.well-known/oauth-protected-resource\`)"
@@ -884,6 +918,7 @@ printf 'SMTP_PASS' | docker secret create smtp_password -
 # Interne — REQUIS par la stack même si la feature n'est pas utilisée
 # (secrets external: le déploiement échoue s'il en manque un)
 openssl rand -hex 32 | docker secret create worker_api_token -
+openssl rand -hex 32 | docker secret create redis_password -
 openssl rand -hex 16 | docker secret create sso_oidc_secret -
 printf 'none' | docker secret create syslog_client_key -
 
@@ -1104,6 +1139,7 @@ mk_secret postgres_password "\$PGPASS"
 mk_secret database_url "postgresql://vakspm:\$PGPASS@postgres:5432/${m.dbName}?schema=public"
 mk_secret mfa_encryption_key "\$(openssl rand -base64 32)"
 mk_secret worker_api_token "\$(openssl rand -hex 32)"
+mk_secret redis_password "\$(openssl rand -hex 32)"
 # Secret SSO OIDC global (fallback ; les secrets clients per-tenant vivent chiffrés en DB).
 # Doit exister même vide, sinon le stack deploy échoue (service api/controlplane le monte).
 mk_secret sso_oidc_secret "\$(openssl rand -hex 16)"
@@ -1290,6 +1326,7 @@ mk_secret jwt_refresh_secret "\${JWT_REFRESH_SECRET:?}"
 mk_secret database_url "postgresql://\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@\${MANAGER_IP}:5000/\${POSTGRES_DB}?schema=public"
 mk_secret mfa_encryption_key "\$(openssl rand -base64 32)"
 mk_secret worker_api_token "\$(openssl rand -hex 32)"
+mk_secret redis_password "\$(openssl rand -hex 32)"
 # Secret SSO OIDC global (fallback ; les secrets clients per-tenant vivent chiffrés en DB).
 # Doit exister même vide, sinon le stack deploy échoue (service api/controlplane le monte).
 mk_secret sso_oidc_secret "\$(openssl rand -hex 16)"
@@ -1486,6 +1523,7 @@ MkSecret $NodeIp 'postgres_password' $PGPASS
 MkSecret $NodeIp 'database_url' ('postgresql://vakspm:' + $PGPASS + '@postgres:5432/${m.dbName}?schema=public')
 MkSecret $NodeIp 'mfa_encryption_key' (RandB64 32)
 MkSecret $NodeIp 'worker_api_token' (RandHex 32)
+MkSecret $NodeIp 'redis_password' (RandHex 32)
 MkSecret $NodeIp 'sso_oidc_secret' (RandHex 16)
 MkSecret $NodeIp 'smtp_password' $smtp
 MkSecret $NodeIp 'syslog_client_key' 'none'
@@ -1610,6 +1648,7 @@ MkSecret $MgrIp 'jwt_refresh_secret' (Req 'JWT_REFRESH_SECRET')
 MkSecret $MgrIp 'database_url' ('postgresql://' + $pgUser + ':' + $pgPass + '@' + $MgrIp + ':5000/' + $pgDb + '?schema=public')
 MkSecret $MgrIp 'mfa_encryption_key' (RandB64 32)
 MkSecret $MgrIp 'worker_api_token' (RandHex 32)
+MkSecret $MgrIp 'redis_password' (RandHex 32)
 MkSecret $MgrIp 'sso_oidc_secret' (RandHex 16)
 MkSecret $MgrIp 'smtp_password' $smtp
 MkSecret $MgrIp 'syslog_client_key' 'none'

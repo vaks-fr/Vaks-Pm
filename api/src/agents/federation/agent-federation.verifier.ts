@@ -75,6 +75,8 @@ interface CachedKeySet {
 const MAX_TOKEN_BYTES = 16 * 1024;
 /** Tolérance d'horloge entre l'émetteur et nous. */
 const CLOCK_TOLERANCE_SEC = 60;
+/** Âge max d'un subject_token fédéré (depuis `iat`). */
+const MAX_TOKEN_AGE = '24h';
 /** Durée de vie d'un JWKS distant en cache. */
 const JWKS_TTL_MS = 60 * 60 * 1000;
 /** Anti-martèlement : délai minimal entre deux récupérations d'un même JWKS. */
@@ -137,6 +139,12 @@ export class AgentFederationVerifier {
         audience: issuer.audience,
         algorithms: allowed,
         clockTolerance: CLOCK_TOLERANCE_SEC,
+        // jose ne valide `exp` QUE s'il est présent : sans `requiredClaims`, un
+        // JWT perpétuel signé par l'émetteur vaudrait credential à vie.
+        // `maxTokenAge` (exige `iat`) borne en plus l'âge : 24 h couvre les
+        // jetons de plateforme les plus longs (identités managées Azure).
+        requiredClaims: ['exp', 'iat'],
+        maxTokenAge: MAX_TOKEN_AGE,
       });
       payload = res.payload;
     } catch (e) {
@@ -167,10 +175,8 @@ export class AgentFederationVerifier {
     return {
       subject: subject.trim(),
       jti,
-      // `exp` est garanti présent : jose rejette un jeton sans expiration dès
-      // lors qu'on ne passe pas `maxTokenAge`, et un jeton perpétuel n'a de
-      // toute façon pas sa place ici.
-      expSec: typeof payload.exp === 'number' ? payload.exp : Math.floor(Date.now() / 1000),
+      // `exp` est garanti présent : exigé via `requiredClaims` ci-dessus.
+      expSec: payload.exp as number,
       claims: payload,
     };
   }
@@ -217,6 +223,12 @@ export class AgentFederationVerifier {
       }
       if (claim === 'nbf') {
         return new FederationVerifyError('token_not_yet_valid', 'Jeton pas encore valide.');
+      }
+      if (claim === 'exp' || claim === 'iat') {
+        return new FederationVerifyError(
+          'token_malformed',
+          'Le jeton doit porter les claims `exp` et `iat` (jeton sans expiration refusé).',
+        );
       }
     }
     return new FederationVerifyError('signature_invalid', 'Signature ou format du jeton invalide.');

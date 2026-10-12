@@ -6,6 +6,11 @@
 import React, { useState, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
+/** Marge gauche (px) qui loge le plus long libellé d'axe Y (police 9px, ~5.6px/car.) + 10px d'écart.
+ *  Une marge fixe rogne les montants monétaires longs (« 40 000,00 € »). */
+export const axisLabelPad = (labels: string[], min: number) =>
+  Math.max(min, Math.ceil(Math.max(0, ...labels.map((s) => s.length)) * 5.6) + 10);
+
 export function useChartTooltip() {
   const [tip, setTip] = useState<{ x: number; y: number; content: ReactNode } | null>(null);
 

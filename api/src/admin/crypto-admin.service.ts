@@ -96,7 +96,7 @@ export class CryptoAdminService {
           processed += 1;
         } catch (e) {
           failed += 1;
-          this.logger.warn(`re-enc ${model}.${column} ${row.id as string} échoué: ${(e as Error).message}`);
+          this.logger.warn(`re-enc ${model}.${column} ${row.id as string} failed: ${(e as Error).message}`);
         }
       }
     }
@@ -115,7 +115,7 @@ export class CryptoAdminService {
         processed += 1;
       } catch (e) {
         failed += 1;
-        this.logger.warn(`re-enc orgSetting ${s.key} échoué: ${(e as Error).message}`);
+        this.logger.warn(`re-enc orgSetting ${s.key} failed: ${(e as Error).message}`);
       }
     }
 

@@ -15,6 +15,7 @@ import { MONTHS, type Priority } from './data';
 import { useAuth } from '../auth/AuthContext';
 import { Icon, PriorityDot } from './primitives';
 import { useChartTooltip } from './chart-tooltip';
+import { CalendarView } from './CalendarView';
 
 const MS_PER_DAY = 86_400_000;
 
@@ -212,9 +213,9 @@ export function DashboardView({ onOpen }: { onOpen: (id: string) => void }) {
       )}
 
       {!loading && !error && data && (
-        <div className="dash-grid">
-          {/* ---- Bandeau de stats ---- */}
-          <div className="dash-card dash-span3">
+        <div className="dash-body">
+          {/* ---- Bandeau de stats (pleine largeur) ---- */}
+          <div className="dash-card">
             <div className="dash-stat-row">
               <Stat
                 value={`${hours.weekH}h`}
@@ -243,8 +244,11 @@ export function DashboardView({ onOpen }: { onOpen: (id: string) => void }) {
             </div>
           </div>
 
+          {/* Deux colonnes : contenu principal à gauche, pile de widgets à droite. */}
+          <div className="dash-2col">
+          <div className="dash-main">
           {/* ---- Mes tâches ---- */}
-          <div className="dash-card dash-span2">
+          <div className="dash-card">
             <div className="dash-ch">
               <span className="dash-nm">{t('dashboard.myTasks')}</span>
             </div>
@@ -285,52 +289,6 @@ export function DashboardView({ onOpen }: { onOpen: (id: string) => void }) {
                 })}
               </div>
             )}
-          </div>
-
-          {/* ---- Répartition (donut) ---- */}
-          <div className="dash-card">
-            <div className="dash-ch">
-              <span className="dash-nm">{t('dashboard.breakdown')}</span>
-            </div>
-            <div className="dash-donut-row">
-              <div
-                className="dash-donut"
-                style={{
-                  background: `conic-gradient(var(--good) 0 ${donut.p1}%, var(--accent) ${donut.p1}% ${donut.p2}%, var(--surface-3) ${donut.p2}% 100%)`,
-                }}
-              >
-                <div className="dash-donut-hole">
-                  <div className="dash-donut-v">{donut.pct}%</div>
-                  <div className="dash-donut-l">{t('dashboard.complete')}</div>
-                </div>
-              </div>
-              <div className="dash-legend">
-                {(
-                  [
-                    { color: 'var(--good)', label: t('dashboard.legend.done'), value: donut.done },
-                    { color: 'var(--accent)', label: t('dashboard.legend.doing'), value: donut.doing },
-                    { color: 'var(--surface-3)', label: t('dashboard.legend.todo'), value: donut.todo },
-                  ] as const
-                ).map((s) => {
-                  const pct = donut.total ? Math.round((s.value / donut.total) * 100) : 0;
-                  return (
-                    <LegendRow
-                      key={s.label}
-                      color={s.color}
-                      label={s.label}
-                      value={s.value}
-                      tip={bind(
-                        <>
-                          <b>{s.label}</b>
-                          <br />
-                          {s.value} {t('dashboard.tip.tasks')} · {pct}%
-                        </>,
-                      )}
-                    />
-                  );
-                })}
-              </div>
-            </div>
           </div>
 
           {/* ---- Heures 7 jours ---- */}
@@ -380,7 +338,7 @@ export function DashboardView({ onOpen }: { onOpen: (id: string) => void }) {
           </div>
 
           {/* ---- Activité de l'équipe ---- */}
-          <div className="dash-card">
+          <div className="dash-card dash-col3">
             <div className="dash-ch">
               <span className="dash-nm">{t('dashboard.activity')}</span>
             </div>
@@ -423,6 +381,63 @@ export function DashboardView({ onOpen }: { onOpen: (id: string) => void }) {
               </div>
             </div>
           )}
+          </div>
+
+
+          <div className="dash-side">
+            {/* ---- Mon calendrier — mes échéances à travers tous mes projets ;
+                 congés & jours fériés en overlay. ---- */}
+            <div className="dash-card dash-cal-card">
+              <CalendarView onOpen={onOpen} />
+            </div>
+
+            {/* ---- Avancement de mes tâches (donut) ---- */}
+            <div className="dash-card">
+              <div className="dash-ch">
+                <span className="dash-nm">{t('dashboard.breakdown')}</span>
+              </div>
+              <div className="dash-donut-row">
+                <div
+                  className="dash-donut"
+                  style={{
+                    background: `conic-gradient(var(--good) 0 ${donut.p1}%, var(--accent) ${donut.p1}% ${donut.p2}%, var(--surface-3) ${donut.p2}% 100%)`,
+                  }}
+                >
+                  <div className="dash-donut-hole">
+                    <div className="dash-donut-v">{donut.pct}%</div>
+                    <div className="dash-donut-l">{t('dashboard.complete')}</div>
+                  </div>
+                </div>
+                <div className="dash-legend">
+                  {(
+                    [
+                      { color: 'var(--good)', label: t('dashboard.legend.done'), value: donut.done },
+                      { color: 'var(--accent)', label: t('dashboard.legend.doing'), value: donut.doing },
+                      { color: 'var(--surface-3)', label: t('dashboard.legend.todo'), value: donut.todo },
+                    ] as const
+                  ).map((s) => {
+                    const pct = donut.total ? Math.round((s.value / donut.total) * 100) : 0;
+                    return (
+                      <LegendRow
+                        key={s.label}
+                        color={s.color}
+                        label={s.label}
+                        value={s.value}
+                        tip={bind(
+                          <>
+                            <b>{s.label}</b>
+                            <br />
+                            {s.value} {t('dashboard.tip.tasks')} · {pct}%
+                          </>,
+                        )}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+          </div>
         </div>
       )}
     </div>

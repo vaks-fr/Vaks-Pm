@@ -306,7 +306,7 @@ export function FinancePanel({ onOpenProjectFinance }: Props) {
         } : undefined}
       >
         <div className="fin-scroll">
-          <div className="finp-table" style={{ minWidth: 760 }}>
+          <div className="finp-table" style={{ minWidth: 940 }}>
             <div className="finp-row finp-head">
               <span>{filtered ? t('finances:portfolio.table.project') : t('finances:portfolio.table.client')}</span>
               <span className="ar">{filtered ? '' : t('finances:portfolio.table.projects')}</span>

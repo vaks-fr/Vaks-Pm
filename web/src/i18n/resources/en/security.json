@@ -343,5 +343,21 @@
     "expiryRequired": "Expiry date required (max 2 years).",
     "revoked": "Token revoked",
     "revokeConfirm": "Revoke this token? Calls with this key will stop immediately."
+  },
+  "calendarFeed": {
+    "title": "Calendar feed (ICS)",
+    "desc": "Subscribe your calendar app (Outlook, Google Calendar, Apple Calendar…) to your task due dates and allocations. The URL is personal and secret — anyone who has it can read your calendar.",
+    "urlLabel": "Subscription URL",
+    "copy": "Copy",
+    "copied": "URL copied",
+    "howto": "In your calendar app, use \"Subscribe from URL\" (or \"Add calendar > From URL\") and paste this link.",
+    "inactive": "No active subscription.",
+    "generate": "Generate URL",
+    "generated": "URL generated",
+    "regenerate": "Regenerate",
+    "regenerateConfirm": "Regenerating invalidates the old URL — any existing subscription in a calendar app will stop updating. Continue?",
+    "revoke": "Revoke",
+    "revokeConfirm": "Revoke the calendar subscription? The current URL will stop working immediately.",
+    "revoked": "Subscription revoked"
   }
 }

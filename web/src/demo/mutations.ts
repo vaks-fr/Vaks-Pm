@@ -14,6 +14,9 @@ import {
   type CommentDto,
   type TimeEntryDto,
   type BoardColumnDto,
+  type RiskDto,
+  type RiskCategory,
+  type RiskStatus,
 } from '@vaks-pm/shared';
 import { getState, persist, nextId, currentUser } from './store';
 import { DemoHttpError } from './routes-shared';
@@ -21,6 +24,12 @@ import { DemoHttpError } from './routes-shared';
 /* ---------- Helpers ---------- */
 function iso(): string {
   return new Date().toISOString();
+}
+/** Borne une valeur de probabilité/impact dans 1..5 (fallback si absente/NaN). */
+function clamp15(v: unknown, fallback: number): number {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(5, Math.max(1, n));
 }
 function findTask(id: string): TaskDto {
   const t = getState().tasks.find((x) => x.id === id);
@@ -296,6 +305,89 @@ export function watchTask(taskId: string, on: boolean): { watching: boolean } {
   persist();
   return { watching: on };
 }
+/* ---------- Risks (RAID) ---------- */
+function riskOwner(ownerId: string | null): { id: string; name: string; email: string } | null {
+  if (!ownerId) return null;
+  const u = getState().users.find((x) => x.id === ownerId);
+  return u ? { id: u.id, name: u.name, email: u.email } : null;
+}
+function findRisk(projectId: string, riskId: string): RiskDto {
+  const r = getState().risks.find((x) => x.id === riskId && x.projectId === projectId);
+  if (!r) throw new DemoHttpError(404, 'Risque introuvable');
+  return r;
+}
+export function createRisk(projectId: string, dto: Record<string, unknown>): RiskDto {
+  const s = getState();
+  if (!s.projects.some((p) => p.id === projectId)) throw new DemoHttpError(404, 'Projet introuvable');
+  const probability = clamp15(dto.probability, 3);
+  const impact = clamp15(dto.impact, 3);
+  const ownerId = (dto.ownerId as string | null) ?? null;
+  const now = iso();
+  const r: RiskDto = {
+    id: nextId('risk'),
+    projectId,
+    title: ((dto.title as string) ?? '').trim() || 'Nouveau risque',
+    description: (dto.description as string | null) ?? null,
+    probability,
+    impact,
+    score: probability * impact,
+    category: (dto.category as RiskCategory) ?? 'RISK',
+    mitigation: (dto.mitigation as string | null) ?? null,
+    ownerId,
+    owner: riskOwner(ownerId),
+    status: (dto.status as RiskStatus) ?? 'OPEN',
+    source: 'MANUAL',
+    autoRuleKind: null,
+    createdAt: now,
+    updatedAt: now,
+    resolvedAt: null,
+  };
+  s.risks.unshift(r);
+  persist();
+  return r;
+}
+export function updateRisk(
+  projectId: string,
+  riskId: string,
+  dto: Record<string, unknown>,
+): RiskDto {
+  const r = findRisk(projectId, riskId);
+  if (dto.title !== undefined) r.title = ((dto.title as string) ?? '').trim() || r.title;
+  if (dto.description !== undefined) r.description = (dto.description as string | null) ?? null;
+  if (dto.probability !== undefined) r.probability = clamp15(dto.probability, r.probability);
+  if (dto.impact !== undefined) r.impact = clamp15(dto.impact, r.impact);
+  r.score = r.probability * r.impact;
+  if (dto.category !== undefined) r.category = dto.category as RiskCategory;
+  if (dto.mitigation !== undefined) r.mitigation = (dto.mitigation as string | null) ?? null;
+  if (dto.ownerId !== undefined) {
+    r.ownerId = (dto.ownerId as string | null) ?? null;
+    r.owner = riskOwner(r.ownerId);
+  }
+  if (dto.status !== undefined) {
+    r.status = dto.status as RiskStatus;
+    r.resolvedAt = r.status === 'RESOLVED' ? (r.resolvedAt ?? iso()) : null;
+  }
+  r.updatedAt = iso();
+  persist();
+  return r;
+}
+export function resolveRisk(projectId: string, riskId: string): RiskDto {
+  const r = findRisk(projectId, riskId);
+  r.status = 'RESOLVED';
+  r.resolvedAt = iso();
+  r.updatedAt = iso();
+  persist();
+  return r;
+}
+export function deleteRisk(projectId: string, riskId: string): { removed: true } {
+  const s = getState();
+  const before = s.risks.length;
+  s.risks = s.risks.filter((x) => !(x.id === riskId && x.projectId === projectId));
+  if (s.risks.length === before) throw new DemoHttpError(404, 'Risque introuvable');
+  persist();
+  return { removed: true };
+}
+
 export function watchProject(projectId: string, on: boolean): { watching: boolean } {
   const s = getState();
   const p = s.projects.find((x) => x.id === projectId);

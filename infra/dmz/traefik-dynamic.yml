@@ -11,7 +11,11 @@
 #
 # ⚠️  ALLOW-LIST stricte : seules les routes ci-dessous traversent vers l'interne.
 #     Tout le reste de l'app (SPA hors login, /admin/*, /internal/*, /ops/*) reste
-#     INJOIGNABLE via la DMZ. Si ta build web sert ses assets sous d'autres chemins
+#     INJOIGNABLE via la DMZ. Et tout ce qui est relayé porte `X-Vaks-Edge: dmz`
+#     (middleware `dmz-edge`) : l'API refuse alors toute SESSION (JWT) hors
+#     /api/v1/auth/* — un humain ne fait que s'authentifier via la DMZ, il ne
+#     consomme jamais l'API (JwtAuthGuard.enforceDmzEdge). Seuls les jetons
+#     d'API `vaks_…` (agents, MCP) atteignent la surface REST ci-dessous. Si ta build web sert ses assets sous d'autres chemins
 #     que /assets, ajoute-les ici (et seulement eux).
 #
 #     Trois familles traversent :
@@ -41,6 +45,35 @@ http:
         referrerPolicy: "strict-origin-when-cross-origin"
         permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
 
+    # Marqueur de provenance DMZ, ÉCRASE toute valeur entrante. Posé sur toutes
+    # les routes relayées vers l'API interne (cf. en-tête de fichier).
+    dmz-edge:
+      headers:
+        customRequestHeaders:
+          X-Vaks-Edge: "dmz"
+
+    # Anti-DoS au bord (par IP source). Chaque POST /mcp coûte un aller-retour
+    # API (me/mcp-context) : on borne avant d'atteindre l'interne. Seuils
+    # larges : les connecteurs cloud (claude.ai, Copilot Studio, ChatGPT)
+    # sortent d'un petit pool d'IP partagé ; le budget fin reste le throttler
+    # `token` de l'API (par jeton).
+    mcp-ratelimit:
+      rateLimit:
+        average: 600
+        period: 1m
+        burst: 300
+    mcp-inflight:
+      inFlightReq:
+        amount: 200
+    # Couvre aussi les refresh OAuth (/api/v1/auth/oauth/token) des connecteurs
+    # cloud, qui sortent d'un pool d'IP partagé : seuil large. L'anti-brute-force
+    # fin de /auth/login reste le @Throttle applicatif (par IP réelle).
+    auth-ratelimit:
+      rateLimit:
+        average: 300
+        period: 1m
+        burst: 100
+
   routers:
     # ── 1. MCP (servi localement) ────────────────────────────────────────────
     # POST /mcp + les métadonnées RFC 9728 (oauth-protected-resource).
@@ -49,7 +82,7 @@ http:
       entryPoints: [web, websecure]
       service: mcp
       priority: 100
-      middlewares: [security-headers]
+      middlewares: [security-headers, mcp-ratelimit, mcp-inflight]
       tls: {}
 
     # ── 2. Surface d'auth (forward vers l'API interne) ───────────────────────
@@ -59,7 +92,7 @@ http:
       entryPoints: [web, websecure]
       service: internal
       priority: 90
-      middlewares: [security-headers]
+      middlewares: [security-headers, dmz-edge]
       tls: {}
     # Endpoints OAuth + auth (authorize / token / register, et login/mfa/refresh).
     # `/api/v1/auth` couvre les deux familles (cf. oauth.controller : routes sous
@@ -69,7 +102,7 @@ http:
       entryPoints: [web, websecure]
       service: internal
       priority: 90
-      middlewares: [security-headers]
+      middlewares: [security-headers, dmz-edge, auth-ratelimit]
       tls: {}
     # Pages interactives de la SPA (login + écran de consentement) + assets Vite.
     auth-ui:
@@ -77,7 +110,7 @@ http:
       entryPoints: [web, websecure]
       service: internal
       priority: 80
-      middlewares: [security-headers]
+      middlewares: [security-headers, dmz-edge]
       tls: {}
 
     # ── 3. Surface REST agent (forward vers l'API interne) ───────────────────
@@ -109,7 +142,7 @@ http:
       entryPoints: [web, websecure]
       service: internal
       priority: 70
-      middlewares: [security-headers]
+      middlewares: [security-headers, dmz-edge, mcp-ratelimit]
       tls: {}
 
   services:
@@ -126,15 +159,20 @@ http:
         servers:
           # ⚠️  À ÉDITER : nom (pas IP, à cause du SNI) de l'edge interne joignable
           #     depuis la DMZ, résolu en split-horizon vers le Traefik on-prem.
+          #     Changer AUSSI `serversTransports.internal-tls.serverName` (plus bas)
+          #     sinon la vérification TLS du hop échoue (fail-closed).
           - url: "https://internal.vaks-pm.com"
 
   serversTransports:
     internal-tls:
-      # Edge interne en cert self-signed on-prem → on saute la vérif sur ce hop
-      # CONTRÔLÉ (la défense est le firewall, pas ce TLS). Avec un cert public
-      # (LE) sur l'edge interne : supprimer `insecureSkipVerify` et fournir
-      # `rootCAs` + `serverName` à la place.
-      insecureSkipVerify: true
+      # Ce hop transporte mots de passe (/auth/login), codes OAuth et bearers :
+      # vérification TLS OBLIGATOIRE. Edge interne en cert self-signed on-prem →
+      # monter sa CA (même fichier que `NODE_EXTRA_CA_CERTS` du conteneur mcp).
+      # Avec un cert public (LE) sur l'edge interne : retirer `rootCAs`.
+      # ⛔ Ne JAMAIS revenir à `insecureSkipVerify: true` (MITM sur le hop).
+      rootCAs:
+        - /certs/internal-ca.crt
+      serverName: internal.vaks-pm.com
 
 # TLS public : wildcard *.mcp.vaks-pm.com (couvre tous les tenants).
 tls:

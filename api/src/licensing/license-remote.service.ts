@@ -102,15 +102,15 @@ export class LicenseRemoteService implements OnModuleInit, OnModuleDestroy {
         });
         if (n.count > 0) {
           this.licenses.invalidate();
-          this.logger.warn('Licence révoquée par le serveur → désactivée localement.');
+          this.logger.warn('License revoked by the license server -> disabled locally.');
         }
         return;
       }
       await this.onReachable();
     } catch (e) {
-      this.logger.warn(`Validation licence échouée : ${(e as Error).message}`);
+      this.logger.warn(`License validation failed: ${(e as Error).message}`);
       await this.onUnreachable(evaluated, active.createdAt).catch((err) =>
-        this.logger.warn(`Suivi connectivité licence échoué : ${(err as Error).message}`),
+        this.logger.warn(`License connectivity tracking failed: ${(err as Error).message}`),
       );
     }
   }
@@ -204,7 +204,7 @@ export class LicenseRemoteService implements OnModuleInit, OnModuleDestroy {
         data: { emailStage: 'entry', lastEmailAt: new Date(now) },
       });
       if (moved.count === 1) {
-        this.logger.warn('Serveur de licences injoignable → entrée en grâce hors-ligne.');
+        this.logger.warn('License server unreachable -> entering offline grace period.');
         await this.sendConnectivityEmail('entry', active, baseline);
       }
       return;
@@ -238,7 +238,7 @@ export class LicenseRemoteService implements OnModuleInit, OnModuleDestroy {
     try {
       orgs = await this.prisma.organization.findMany({ select: { id: true } });
     } catch (err) {
-      this.logger.warn(`Email connectivité — orgs illisibles : ${(err as Error).message}`);
+      this.logger.warn(`Connectivity email: unable to list orgs: ${(err as Error).message}`);
       return;
     }
     const graceDays = Math.round((active.maxOfflineDays ?? DEFAULT_OFFLINE_DAYS));
@@ -265,7 +265,7 @@ export class LicenseRemoteService implements OnModuleInit, OnModuleDestroy {
           await this.notifications.enqueue(org.id, a.email, 'license_offline', mail, prefs);
         }
       } catch (err) {
-        this.logger.warn(`Email connectivité org=${org.id} échoué : ${(err as Error).message}`);
+        this.logger.warn(`Connectivity email failed for org=${org.id}: ${(err as Error).message}`);
       }
     }
   }

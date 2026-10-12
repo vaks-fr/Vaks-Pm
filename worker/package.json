@@ -5,19 +5,21 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
-    "start:dev": "ts-node-dev --respawn src/main.ts"
+    "start:dev": "tsx watch src/main.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@vaks-pm/shared": "*",
     "bullmq": "^5.7.0",
     "ioredis": "^5.4.1",
-    "nodemailer": "^9.0.1",
-    "undici": "^7.28.0"
+    "nodemailer": "^10.0.12",
+    "undici": "^7.29.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^8.0.0",
-    "ts-node-dev": "^2.0.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.11",
+    "tsx": "^4.23.15"
   }
 }

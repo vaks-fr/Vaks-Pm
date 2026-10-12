@@ -1,0 +1,31 @@
+{
+  "personalTitle": "My calendar",
+  "personalSub": "Your deadlines across every project",
+  "projectTitle": "Calendar",
+  "projectSub": "Deadlines and milestones for this project",
+  "loading": "Loading calendar…",
+  "empty": "Nothing scheduled this month",
+  "prevMonth": "Previous month",
+  "nextMonth": "Next month",
+  "thisMonth": "This month",
+  "today": "Today",
+  "more": "+{{count}} more",
+  "eventCount_one": "{{count}} item",
+  "eventCount_other": "{{count}} items",
+  "legend": {
+    "today": "Today",
+    "milestone": "Milestone",
+    "overdue": "Overdue",
+    "holiday": "Holiday",
+    "timeOff": "Time off"
+  },
+  "allocated": "{{hours}} h",
+  "tt": {
+    "due": "{{title}} · due {{date}}",
+    "milestone": "{{title}} · milestone {{date}}",
+    "overdue": "{{title}} · overdue since {{date}}",
+    "holiday": "{{name}} · {{date}}",
+    "timeOff": "{{type}} · {{start}} → {{end}}",
+    "allocated": "{{hours}} h allocated on {{date}}"
+  }
+}

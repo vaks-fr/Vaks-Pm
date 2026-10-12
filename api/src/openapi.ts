@@ -16,8 +16,8 @@ Les requêtes sont authentifiées par **jeton Bearer** dans l'en-tête \`Authori
 Authorization: Bearer <token>
 \`\`\`
 
-- **Aujourd'hui** : jeton d'accès **JWT** obtenu via \`POST /api/v1/auth/login\` (court, ~15 min, renouvelable via \`/auth/refresh\`).
-- **À venir (Phase 9)** : **jetons d'API personnels (PAT)** à **scopes** (\`tasks:write\`, \`webhooks:write\`, …) + rate-limit par token — destinés aux intégrations tierces (clé longue durée, pas un login utilisateur).
+- **Jeton d'accès JWT** obtenu via \`POST /api/v1/auth/login\` (court, ~15 min, renouvelable via \`/auth/refresh\`) — session utilisateur.
+- **Jetons d'API personnels (PAT)** à **scopes** (\`tasks:write\`, \`webhooks:write\`, …) + rate-limit par token — pour les intégrations tierces (clé longue durée, pas un login utilisateur).
 
 Toutes les routes appliquent le **RBAC côté serveur** : un token n'agit que dans les limites des permissions de son porteur.
 

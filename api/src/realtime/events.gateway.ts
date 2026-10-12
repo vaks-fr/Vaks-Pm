@@ -34,9 +34,8 @@ interface SocketUser {
  *
  * Auth : à la connexion, on lit le JWT depuis `handshake.auth.token` (envoyé
  * par socket.io-client) ou un header `Authorization: Bearer …`. Connexion
- * refusée si le token est absent / invalide / expiré.
- *
- * NOTE: en prod multi-instances, brancher l'adapter Redis (voir main.ts).
+ * refusée si le token est absent / invalide / expiré. L'adapter Redis
+ * (propagation entre réplicas) est branché dans `main.ts`.
  */
 @WebSocketGateway({ cors: true, namespace: '/ws' })
 export class EventsGateway implements OnGatewayConnection {
@@ -58,7 +57,13 @@ export class EventsGateway implements OnGatewayConnection {
       const token = this.extractToken(client);
       if (!token) throw new Error('missing token');
       const secret = this.config.get('jwt').accessSecret;
-      const payload = this.jwt.verify<JwtPayload>(token, { secret });
+      const payload = this.jwt.verify<JwtPayload & { scope?: string }>(token, { secret });
+      // SÉCURITÉ — miroir de JwtStrategy.validate() (jwt.strategy.ts:60) côté WS.
+      // Un token de session n'a JAMAIS de claim `scope`. Les tokens intermédiaires
+      // `mfa-challenge` / `mfa-enroll` (émis après le mot de passe, AVANT le 2ᵉ
+      // facteur) sont signés avec le même secret ; sans ce rejet ils ouvriraient un
+      // socket et rejoindraient user:<id>/org:<id> → contournement total de la MFA.
+      if (payload.scope) throw new Error('pre-MFA token (scope claim) rejected at WS handshake');
       const user: SocketUser = {
         userId: payload.sub,
         orgId: payload.orgId,

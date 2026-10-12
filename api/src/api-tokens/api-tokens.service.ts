@@ -41,6 +41,15 @@ export interface CreateTokenInput {
 
 const VALID_PERMS = new Set<string>(PERMISSIONS as readonly string[]);
 
+/**
+ * Scopes réservés aux **clés organisation** — jamais frappables sur un PAT
+ * utilisateur. `scim:provision` : la surface SCIM n'a pas de RBAC par-dessus
+ * (`ScimAuthGuard` seul) ; un PAT le portant donnerait à n'importe quel membre
+ * le contrôle de tous les comptes de l'org. La clé org, elle, exige `org:manage`
+ * pour être créée. Double verrou avec `ScimAuthGuard` (qui refuse aussi les PAT).
+ */
+export const ORG_ONLY_SCOPES: ReadonlySet<string> = new Set(['scim:provision']);
+
 /** Durée de vie maximale d'un jeton (jamais permanent) : 2 ans. */
 const MAX_TTL_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 
@@ -55,10 +64,18 @@ export class ApiTokensService {
     return createHash('sha256').update(s).digest('hex');
   }
 
-  private sanitizeScopes(scopes?: string[]): string[] {
+  private sanitizeScopes(scopes: string[] | undefined, type: ApiTokenType): string[] {
     if (!scopes) return [];
     const bad = scopes.filter((s) => !VALID_PERMS.has(s));
     if (bad.length) throw new BadRequestException(`Scope(s) invalide(s) : ${bad.join(', ')}`);
+    if (type === 'USER') {
+      const reserved = scopes.filter((s) => ORG_ONLY_SCOPES.has(s));
+      if (reserved.length) {
+        throw new BadRequestException(
+          `Scope(s) réservé(s) aux clés organisation : ${reserved.join(', ')}`,
+        );
+      }
+    }
     return Array.from(new Set(scopes));
   }
 
@@ -101,7 +118,7 @@ export class ApiTokensService {
   ): Promise<{ id: string; token: string; prefix: string }> {
     const name = opts.dto.name?.trim();
     if (!name) throw new BadRequestException('Nom requis');
-    const scopes = this.sanitizeScopes(opts.dto.scopes);
+    const scopes = this.sanitizeScopes(opts.dto.scopes, type);
     if (type === 'ORG' && scopes.length === 0) {
       throw new BadRequestException("Une clé organisation doit avoir au moins un scope.");
     }
@@ -175,7 +192,7 @@ export class ApiTokensService {
     const user = await this.prisma.user.findFirst({
       where: { id: row.userId, organizationId: row.organizationId, deletedAt: null, status: 'ACTIVE' },
       select: {
-        id: true, email: true, isAdmin: true,
+        id: true, email: true, isAdmin: true, licensed: true,
         kind: true, trustLevel: true, ownerId: true, capabilities: true,
       },
     });
@@ -210,6 +227,13 @@ export class ApiTokensService {
         capabilities: user.capabilities ?? [],
       };
     }
+
+    // Frontière de siège : un humain sans siège (`licensed=false`, parqué ou
+    // admin-only) n'a pas accès à l'API publique — sinon retirer le siège
+    // laissait ses PAT (2 ans) et ses connexions IA fonctionner. Pendant de
+    // `JwtAuthGuard.enforceSeat` pour les sessions. Les agents naissent
+    // `licensed=false` (quota distinct) : non concernés, gérés plus haut.
+    if (!user.licensed) return null;
 
     return {
       userId: user.id,
@@ -310,9 +334,9 @@ export class ApiTokensService {
     return this.revoke(orgId, id, { type: 'ORG', actorId });
   }
 
-  /** Catalogue des scopes possibles (= permissions) pour l'UI (PAT user). */
+  /** Catalogue des scopes possibles pour l'UI (PAT user) — sans les scopes réservés org. */
   listScopeCatalog(): string[] {
-    return [...PERMISSIONS];
+    return PERMISSIONS.filter((p) => !ORG_ONLY_SCOPES.has(p));
   }
 
   /** Scopes proposables pour une clé ORG (toutes les permissions). */

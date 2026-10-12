@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -15,6 +16,15 @@ import { renderAutomationAlert, TemplateContext } from '../notifications/email-t
 import { AutomationKind, COOLDOWN_TTL_S } from './automation-rules';
 import { automationMessage, AutomationMessageParams } from './automations-i18n';
 import { WatchersService } from './watchers.service';
+// `import type` : RisksModule ne dépend JAMAIS d'AutomationsModule (sens
+// unique automations → risks), donc RiskAutoService est résolu en LAZY par
+// token de classe (ModuleRef, `strict:false`) — même patron que
+// `automations-hooks.service.ts` pour TasksService/AgentRunsService. Un
+// import de valeur créerait une dépendance de module inutile (RisksModule
+// n'a aucune raison d'être importé ici) sans même risquer de cycle réel,
+// mais on garde le même filet fail-open que le reste du chokepoint `emit`.
+import type { RiskAutoService } from '../risks/risk-auto.service';
+import { LAZY_RISK_AUTO } from '../risks/risk-auto.tokens';
 
 /** Destinataire résolu (voir AutomationRecipientsService). */
 export interface AutomationRecipient {
@@ -80,7 +90,17 @@ export class AutomationActionsService {
     private readonly audit: AuditLogService,
     private readonly watchers: WatchersService,
     private readonly tenantUrl: TenantUrlService,
+    private readonly moduleRef: ModuleRef,
   ) {}
+
+  /** `RiskAutoService` en lazy (cf. commentaire d'import : sens de dépendance). */
+  private riskAuto(): RiskAutoService | null {
+    try {
+      return this.moduleRef.get<RiskAutoService>(LAZY_RISK_AUTO, { strict: false });
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * Watchers de la tâche / du projet visé, en destinataires additionnels.
@@ -110,6 +130,14 @@ export class AutomationActionsService {
   }
 
   async emit(orgId: string, alert: AutomationAlert): Promise<EmitOutcome> {
+    // Auto-feed du registre de risques (RisksModule) — AVANT le early-return
+    // quiet hours/cooldown ci-dessous, pour que la condition persistante
+    // rafraîchisse le registre à CHAQUE évaluation qui la retrouve vraie,
+    // même quand l'email/webhook est en cooldown ou en heures calmes. Upsert
+    // idempotent (cf. RiskAutoService) : coût DB négligeable, aucun doublon.
+    // Fail-open (try/catch interne au service), ne bloque jamais l'émission.
+    void this.riskAuto()?.reconcileFromAlert(orgId, alert);
+
     try {
       const prefs = readNotificationsSettings(await this.settings.getAll(orgId));
 

@@ -4,7 +4,7 @@
    ============================================================ */
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useChartTooltip } from './chart-tooltip';
+import { useChartTooltip, axisLabelPad } from './chart-tooltip';
 // Les légendes de ces graphes utilisent `.finc-dot`/`.finc-dual-legend` (pastilles
 // de couleur + espacement). Ces classes vivent dans finances.css : sans cet import,
 // une vue hôte qui ne charge pas finances.css (ex. ReportsView) rend une légende
@@ -68,12 +68,14 @@ export function PvAcLine({
     return () => ro.disconnect();
   }, []);
   const H = 184;
-  const pad = { top: 12, right: 14, bottom: 26, left: 52 };
+  const maxV = Math.max(1, ...data.flatMap((d) => [d.pv ?? 0, d.ac, d.ev]));
+  // Marge gauche dimensionnée sur le libellé d'axe le plus long : un montant
+  // monétaire (« 40 000,00 € ») déborde d'une marge fixe et se fait rogner.
+  const pad = { top: 12, right: 14, bottom: 26, left: axisLabelPad([0, 0.5, 1].map((g) => fmt(maxV * g)), 52) };
   const n = Math.max(1, data.length);
   const W = cw;
   const innerW = W - pad.left - pad.right;
   const innerH = H - pad.top - pad.bottom;
-  const maxV = Math.max(1, ...data.flatMap((d) => [d.pv ?? 0, d.ac, d.ev]));
   const x = (i: number) => pad.left + (innerW * i) / Math.max(1, n - 1);
   const y = (v: number) => pad.top + innerH - (v / maxV) * innerH;
   const monthLbl = (m: string) => {

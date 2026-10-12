@@ -12,6 +12,12 @@ networks:
   vakspm:
     driver: overlay
     attachable: true
+  # Réseau DÉDIÉ au serveur MCP (pièce exposée à Internet) : il n'y joint que
+  # l'API et Traefik. Le MCP n'est PAS sur `vakspm` → une RCE dans le conteneur
+  # mcp ne voit ni Redis (clés `oauth:refresh:*` = forge d'un PAT admin), ni
+  # Garage, ni le worker. Non attachable : aucun conteneur ad hoc n'y entre.
+  mcp-api:
+    driver: overlay
 
 volumes:
   redisdata:
@@ -19,6 +25,15 @@ volumes:
 
 secrets:
   jwt_access_secret:
+    external: true
+  # Mot de passe Redis (`requirepass`). HEX uniquement (inséré dans REDIS_URL).
+  # Créer une fois : `openssl rand -hex 32 | docker secret create redis_password -`
+  # (fait par infra/bootstrap/50-deploy.sh). ⚠️ Exige des images api/worker qui
+  # contiennent `src/redis-env.ts` (≥ 2026-09-29) : avec une image plus ancienne
+  # (VAKS_TAG épinglé), tous les clients Redis tomberaient en NOAUTH.
+  # Lu par redis (--requirepass) et par api/controlplane/worker via
+  # REDIS_PASSWORD_FILE (cf. api/src/redis-env.ts) — jamais en variable d'env.
+  redis_password:
     external: true
   jwt_refresh_secret:
     external: true
@@ -76,7 +91,7 @@ secrets:
 configs:
   # Bumper le suffixe v2/v3/… à chaque modification de traefik-dynamic.yml
   # (les configs Swarm sont immutables, seul un nom différent force le redéploiement).
-  traefik_dynamic_v10:
+  traefik_dynamic_v11:
     file: ./infra/traefik-dynamic.yml
   # Idem pour garage.toml : bumper le suffixe à chaque modif de la config.
   garage_config_v1:
@@ -96,6 +111,11 @@ services:
       - --providers.file.watch=true
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
+      # MCP en DMZ (infra/dmz/) : déclarer l'IP de la box DMZ comme proxy de
+      # confiance, sinon l'API voit SON IP pour tous les internautes (throttling
+      # anti-brute-force de /auth/login mutualisé). Sans DMZ : laisser commenté
+      # (Traefik écrase alors tout X-Forwarded-For entrant non fiable).
+      # - --entrypoints.websecure.forwardedHeaders.trustedIPs=<IP_BOX_DMZ>/32
       # Redirige tout le HTTP (:80) vers HTTPS (:443) — les routers servent en TLS.
       - --entrypoints.web.http.redirections.entrypoint.to=websecure
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
@@ -110,7 +130,7 @@ services:
       - --accesslog.fields.headers.names.User-Agent=keep
       - --accesslog.fields.headers.names.X-Forwarded-For=keep
     configs:
-      - source: traefik_dynamic_v10
+      - source: traefik_dynamic_v11
         target: /etc/traefik/dynamic.yml
       - source: tls_cert_v1
         target: /certs/wildcard.crt
@@ -124,7 +144,8 @@ services:
       - target: 443
         published: 443
         mode: host
-    networks: [vakspm]
+    # `mcp-api` : Traefik route /mcp vers le service mcp (isolé, cf. networks).
+    networks: [vakspm, mcp-api]
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -161,9 +182,12 @@ services:
       # enforcement de la frontière de confiance (JWT.tenant == Host résolu).
       SERVICE_ROLE: data-plane
       REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       S3_ENDPOINT: garage
       S3_PORT: "3900"
-      S3_ACCESS_KEY: GKc93ae5b3a492f39f7c1b778d
+      # ID de clé d'accès Garage (login, PAS un secret — le secret vit dans le
+      # Swarm secret `s3_secret_key`). Substituable via env, défaut = valeur actuelle.
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-GKc93ae5b3a492f39f7c1b778d}
       S3_REGION: garage
       # Isolation S3 par tenant : chaque clé d'objet est préfixée par le slug du
       # tenant (`<slug>/<clé>`). Read-fallback ON tant que S3_TENANT_PREFIX_STRICT
@@ -198,6 +222,7 @@ services:
       - s3_secret_key
       - mfa_encryption_key
       - worker_api_token
+      - redis_password
       - sso_oidc_secret
     # Lit les secrets montés en fichiers (/run/secrets/...) via un entrypoint.
     # Phase 1-2 : `prisma db push` synchronise le schéma sans historique
@@ -212,7 +237,8 @@ services:
              export WORKER_API_TOKEN=$$(cat /run/secrets/worker_api_token) &&
              export SSO_OIDC_CLIENT_SECRET=$$(cat /run/secrets/sso_oidc_secret) &&
              npx prisma db push --accept-data-loss && node dist/main.js"
-    networks: [vakspm]
+    # `mcp-api` : le serveur MCP joint l'API (http://api:3000) par ce seul réseau.
+    networks: [vakspm, mcp-api]
     deploy:
       replicas: 2
       resources:
@@ -237,9 +263,12 @@ services:
       NODE_OPTIONS: "--max-old-space-size=320"
       SERVICE_ROLE: control-plane
       REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       S3_ENDPOINT: garage
       S3_PORT: "3900"
-      S3_ACCESS_KEY: GKc93ae5b3a492f39f7c1b778d
+      # ID de clé d'accès Garage (login, PAS un secret — le secret vit dans le
+      # Swarm secret `s3_secret_key`). Substituable via env, défaut = valeur actuelle.
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-GKc93ae5b3a492f39f7c1b778d}
       S3_REGION: garage
       # Cohérence avec `api` (le control-plane ne sert pas de route S3, mais on
       # garde le flag identique en cas d'évolution du routage).
@@ -269,6 +298,7 @@ services:
       - s3_secret_key
       - mfa_encryption_key
       - worker_api_token
+      - redis_password
       - sso_oidc_secret
     command: >
       sh -c "export JWT_ACCESS_SECRET=$$(cat /run/secrets/jwt_access_secret) &&
@@ -325,7 +355,17 @@ services:
     # légitime peut occuper 20 s, une grâce plus courte couperait exactement les
     # appels lents qu'on cherche à protéger.
     stop_grace_period: 30s
-    networks: [vakspm]
+    # Isolé : ni Redis, ni Garage, ni worker (cf. déclaration `mcp-api`).
+    # ⛔ Ne JAMAIS publier le port 8080 : le MCP fait confiance à UN proxy
+    # (`trust proxy 1`) — joint en direct, un client forgerait son IP via
+    # X-Forwarded-For (throttling par IP contourné, IP d'audit falsifiée).
+    networks: [mcp-api]
+    # Durcissement (pièce exposée à Internet ; image déjà non-root `USER node`).
+    read_only: true
+    cap_drop: [ALL]
+    volumes:
+      - type: tmpfs
+        target: /tmp
     deploy:
       replicas: 2
       resources:
@@ -339,6 +379,7 @@ services:
     environment:
       NODE_ENV: production
       REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       # URL interne de l'API (overlay Swarm) pour lire la conf SMTP et reporter
       # le statut des envois. JAMAIS routé via Traefik.
       INTERNAL_API_URL: http://api:3000
@@ -346,6 +387,7 @@ services:
     secrets:
       - smtp_password
       - worker_api_token
+      - redis_password
       # mTLS syslog : lu paresseusement par le processor (placeholder 'none' = absent).
       - syslog_client_key
     # Exporte SMTP_PASSWORD (utilisé quand `smtp.authMode = password`).
@@ -363,6 +405,13 @@ services:
 
   redis:
     image: redis:7-alpine
+    # `requirepass` depuis le secret : sans lui, tout conteneur de l'overlay lisait
+    # et écrivait Redis (dont `oauth:refresh:*` → forge d'un PAT). `exec` +
+    # docker-entrypoint.sh : Redis reste PID 1 (arrêt propre, RDB sauvé) et tourne
+    # sous l'utilisateur `redis`.
+    secrets:
+      - redis_password
+    command: ["sh", "-c", "exec docker-entrypoint.sh redis-server --requirepass \"$$(cat /run/secrets/redis_password)\""]
     volumes:
       - redisdata:/data
     networks: [vakspm]

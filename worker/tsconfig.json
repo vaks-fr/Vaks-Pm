@@ -4,5 +4,7 @@
     "outDir": "dist",
     "rootDir": "src"
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  // Les specs vitest ne font pas partie du build (découverte propre à vitest).
+  "exclude": ["src/**/__tests__/**", "src/**/*.spec.ts"]
 }

@@ -26,6 +26,7 @@ import {
   CHARTER_TEMPLATE_KEYS,
 } from '../projects/charter-docx';
 import { CLIENT_STATUS_TEMPLATE_KEYS, validateStatusDeckTemplate } from '../reports/status-deck';
+import { contentDisposition } from '../common/content-disposition.util';
 
 const TEMPLATE_MAX_BYTES = 5 * 1024 * 1024;
 const TEMPLATE_KINDS = ['CHARTER', 'CLIENT_STATUS_PPTX'] as const;
@@ -157,7 +158,7 @@ export class DocumentTemplatesController {
     if (!row) throw new NotFoundException('Aucun template uploadé');
     const buffer = await this.s3.getObjectBuffer(this.s3.buckets.templates, row.storageKey);
     res.setHeader('Content-Type', row.mimeType);
-    res.setHeader('Content-Disposition', `attachment; filename="${row.filename}"`);
+    res.setHeader('Content-Disposition', contentDisposition(row.filename));
     res.setHeader('Content-Length', String(buffer.length));
     res.send(buffer);
   }

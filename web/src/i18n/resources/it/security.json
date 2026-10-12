@@ -343,5 +343,21 @@
     "expiryRequired": "Data di scadenza richiesta (max 2 anni).",
     "revoked": "Token revocato",
     "revokeConfirm": "Revocare questo token? Le chiamate con questa chiave cesseranno immediatamente."
+  },
+  "calendarFeed": {
+    "title": "Flusso calendario (ICS)",
+    "desc": "Abboni il tuo calendario (Outlook, Google Calendar, Apple Calendar…) alle scadenze delle tue attività e alle tue allocazioni. L'URL è personale e segreto — chiunque lo possieda può leggere il tuo calendario.",
+    "urlLabel": "URL di abbonamento",
+    "copy": "Copia",
+    "copied": "URL copiato",
+    "howto": "Nella tua app calendario, usa \"Abbonati tramite URL\" (o \"Aggiungi calendario > Da URL\") e incolla questo link.",
+    "inactive": "Nessun abbonamento attivo.",
+    "generate": "Genera URL",
+    "generated": "URL generato",
+    "regenerate": "Rigenera",
+    "regenerateConfirm": "Rigenerare invalida il vecchio URL — ogni abbonamento esistente in un calendario smetterà di aggiornarsi. Continuare?",
+    "revoke": "Revoca",
+    "revokeConfirm": "Revocare l'abbonamento al calendario? L'URL attuale smetterà immediatamente di funzionare.",
+    "revoked": "Abbonamento revocato"
   }
 }

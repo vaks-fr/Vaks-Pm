@@ -20,6 +20,10 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # Rolls the pod when Redis auth / secret inputs change (e.g. enabling
+        # redis.auth on upgrade rewrites REDIS_URL in the Secret: pods must
+        # restart to read it, or they keep the password-less URL → NOAUTH).
+        checksum/secret-inputs: {{ include "vakspm.secretInputsChecksum" . }}
       labels:
         {{- include "vakspm.selectorLabels" (dict "root" . "component" "controlplane") | nindent 8 }}
     spec:

@@ -1,3 +1,4 @@
+import './redis-env';
 import { Worker, Job, ConnectionOptions } from 'bullmq';
 import { URL } from 'url';
 import { QUEUES, EmailJob, WebhookJob, AgentNudgeJob, AuditSyslogJob, TeamsJob, ExportJob } from './queues';
@@ -12,8 +13,8 @@ const redisUrl = new URL(process.env.REDIS_URL ?? 'redis://redis:6379');
 const connection: ConnectionOptions = {
   host: redisUrl.hostname,
   port: Number(redisUrl.port || 6379),
-  password: redisUrl.password || undefined,
-  username: redisUrl.username || undefined,
+  password: redisUrl.password ? decodeURIComponent(redisUrl.password) : undefined,
+  username: redisUrl.username ? decodeURIComponent(redisUrl.username) : undefined,
   maxRetriesPerRequest: null,
 };
 
@@ -83,7 +84,7 @@ for (const w of [emailWorker, webhookWorker, agentNudgeWorker, auditSyslogWorker
   w.on('failed', (job, err) => console.error(`[${w.name}] job ${job?.id} KO: ${err.message}`));
 }
 
-console.log('Worker BullMQ démarré (files: email, webhook, agent-nudge, audit-syslog, teams, export).');
+console.log('BullMQ worker started (queues: email, webhook, agent-nudge, audit-syslog, teams, export).');
 
 async function shutdown() {
   await Promise.all([

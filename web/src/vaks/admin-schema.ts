@@ -393,6 +393,21 @@ export const ADMIN_GROUPS: AdminGroup[] = [
             ],
           },
           {
+            title: 'Personal token policy',
+            blurb: 'Who in your organization may create personal API tokens (PATs) for themselves.',
+            settings: [
+              {
+                id: 'apiTokens.selfServicePolicy',
+                label: 'Who can create personal API tokens',
+                desc: "A personal token (vaks_pat_…) carries its holder's full permissions and stays valid for up to two years — it is also one of the three doors to the AI connector (MCP). 'Everyone' (default) = any signed-in user can mint their own; 'Admins only' = reserved to Org Admins; 'Nobody' = self-service is off (org keys and internal agent/OAuth issuance are unaffected). This governs creation only — tokens already issued keep working until they expire or are revoked.",
+                type: 'select',
+                options: ['everyone', 'admins_only', 'disabled'],
+                optionLabels: ['Everyone', 'Admins only', 'Nobody (disabled)'],
+                value: 'everyone',
+              },
+            ],
+          },
+          {
             title: 'Organization keys',
             kind: 'orgapikeys',
             blurb: 'Service-identity keys for server-to-server access. The secret is shown only once.',

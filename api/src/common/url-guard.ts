@@ -1,15 +1,28 @@
-import { isIP } from 'node:net';
+import { BlockList, isIP } from 'node:net';
 import { lookup as dnsLookup } from 'node:dns/promises';
 
 /**
- * Garde anti-SSRF partagée — refuse les hôtes loopback / privés / link-local /
- * internes. Même logique que `WebhooksService.isBlockedHost` (extraite ici pour
- * réutilisation par les connecteurs externes de ticketing). Ne fait PAS de
- * résolution DNS : la frontière réseau Swarm + l'allowlist de domaine couvrent
- * le reste.
+ * Garde anti-SSRF — implémentation UNIQUE côté API (WebhooksService délègue
+ * ici ; `worker/src/safe-fetch.ts` en est la copie pour le package worker).
+ * Refuse les hôtes loopback / privés / link-local / internes. Ne fait PAS de
+ * résolution DNS dans `isBlockedHost` (voir `assertSafeExternalUrlResolved`).
+ *
+ * Pièges couverts (cf. audits 2026-08 / 2026-09) :
+ *  - `new URL().hostname` renvoie un littéral IPv6 AVEC crochets (`[::1]`) →
+ *    `isIP` = 0 → laissé passer comme un hostname. On strip les crochets.
+ *  - `new URL()` NORMALISE l'IPv4-mapped pointée (`::ffff:127.0.0.1`) en hexa
+ *    (`::ffff:7f00:1`), qui échappait à la regex décimale. On décode les deux.
+ *  - `allowInternal` (mode on-prem, nudge agents) ré-autorise une IP privée
+ *    matchant un CIDR approuvé — JAMAIS loopback (127/8, ::1) ni metadata
+ *    (169.254/16).
  */
 
-function isPrivateV4(ip: string): boolean {
+/** Retire les crochets d'un littéral IPv6 tel que renvoyé par `URL.hostname`. */
+export function stripBrackets(host: string): string {
+  return host.replace(/^\[|\]$/g, '');
+}
+
+export function isPrivateV4(ip: string): boolean {
   const p = ip.split('.').map((n) => parseInt(n, 10));
   if (p.length !== 4 || p.some((n) => !Number.isFinite(n))) return true;
   const [a, b] = p;
@@ -23,25 +36,89 @@ function isPrivateV4(ip: string): boolean {
   return false;
 }
 
-function isPrivateV6(ip: string): boolean {
-  const x = ip.toLowerCase();
+/** Toujours bloqué, même dans un CIDR approuvé : loopback 127/8 + metadata 169.254/16. */
+export function alwaysBlockedV4(ip: string): boolean {
+  const [a, b] = ip.split('.').map((n) => parseInt(n, 10));
+  return a === 127 || (a === 169 && b === 254);
+}
+
+/**
+ * Extrait l'IPv4 d'une adresse IPv6 IPv4-mapped (`::ffff:x`), en forme pointée
+ * (`::ffff:127.0.0.1`) ou hexa (compressée `::ffff:7f00:1` ou non). `null` si
+ * ce n'est pas une IPv4-mapped.
+ */
+export function ipv4Mapped(ip6: string): string | null {
+  const x = ip6.toLowerCase().trim();
+  const dotted = x.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (dotted) return dotted[1];
+  if (!x.includes('ffff')) return null;
+  const halves = x.split('::');
+  if (halves.length > 2) return null;
+  const headParts = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  let hextets: string[];
+  if (halves.length === 2) {
+    const fill = 8 - headParts.length - tail.length;
+    if (fill < 0) return null;
+    hextets = [...headParts, ...Array(fill).fill('0'), ...tail];
+  } else {
+    hextets = headParts;
+  }
+  if (hextets.length !== 8) return null;
+  const h = hextets.map((v) => parseInt(v || '0', 16));
+  if (h.some((n) => Number.isNaN(n) || n < 0 || n > 0xffff)) return null;
+  if (h[0] || h[1] || h[2] || h[3] || h[4] || h[5] !== 0xffff) return null;
+  return `${(h[6] >> 8) & 255}.${h[6] & 255}.${(h[7] >> 8) & 255}.${h[7] & 255}`;
+}
+
+export function isPrivateV6(ip: string): boolean {
+  const x = stripBrackets(ip.toLowerCase());
   if (x === '::1' || x === '::') return true;
   if (x.startsWith('fe80')) return true; // link-local
   if (x.startsWith('fc') || x.startsWith('fd')) return true; // ULA fc00::/7
-  const m = x.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/); // IPv4-mapped
-  if (m) return isPrivateV4(m[1]);
+  const mapped = ipv4Mapped(x); // IPv4-mapped (pointée OU hexa)
+  if (mapped !== null) return isPrivateV4(mapped);
   return false;
 }
 
-/** Vrai si l'hôte est loopback / privé / link-local / interne (SSRF). */
-export function isBlockedHost(host: string): boolean {
+/**
+ * Une IP littérale (v4/v6, crochets tolérés) est-elle interdite ?
+ * `allowInternal` ré-autorise les privées matchantes — jamais loopback/metadata.
+ * Forme non reconnue → bloquée par prudence.
+ */
+export function ipBlocked(ipRaw: string, allowInternal: BlockList | null = null): boolean {
+  const ip = stripBrackets(ipRaw);
+  const v = isIP(ip);
+  if (v === 4) {
+    if (alwaysBlockedV4(ip)) return true;
+    if (isPrivateV4(ip)) return allowInternal && allowInternal.check(ip, 'ipv4') ? false : true;
+    return false;
+  }
+  if (v === 6) {
+    const x = ip.toLowerCase();
+    if (x === '::1' || x === '::') return true;
+    const mapped = ipv4Mapped(x);
+    if (mapped !== null) return ipBlocked(mapped, allowInternal);
+    if (isPrivateV6(x)) return allowInternal && allowInternal.check(x, 'ipv6') ? false : true;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Vrai si l'hôte est loopback / privé / link-local / interne (SSRF). Accepte le
+ * `hostname` brut de `new URL()` (crochets IPv6 inclus). Hostname non-IP :
+ * laissé passer (la variante `Resolved` le re-valide après DNS).
+ */
+export function isBlockedHost(hostRaw: string, allowInternal: BlockList | null = null): boolean {
+  if (!hostRaw) return true;
+  const host = stripBrackets(hostRaw.toLowerCase());
   if (!host) return true;
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
   if (host.endsWith('.local') || host.endsWith('.internal')) return true;
   const v = isIP(host);
-  if (v === 4) return isPrivateV4(host);
-  if (v === 6) return isPrivateV6(host);
-  return false; // hostname non-IP : laissé passer (cf. en-tête).
+  if (v === 4 || v === 6) return ipBlocked(host, allowInternal);
+  return false;
 }
 
 /**
@@ -68,10 +145,7 @@ export function assertSafeExternalUrl(raw: string, opts: { httpsOnly?: boolean }
 
 /** Vrai si une IP (v4 ou v6) résolue est interne/privée/loopback/link-local. */
 export function isPrivateIp(ip: string): boolean {
-  const v = isIP(ip);
-  if (v === 4) return isPrivateV4(ip);
-  if (v === 6) return isPrivateV6(ip);
-  return true; // forme inconnue → bloque par prudence
+  return ipBlocked(ip, null);
 }
 
 /**
@@ -86,7 +160,7 @@ export async function assertSafeExternalUrlResolved(
   opts: { httpsOnly?: boolean } = {},
 ): Promise<URL> {
   const u = assertSafeExternalUrl(raw, opts);
-  if (isIP(u.hostname) === 0) {
+  if (isIP(stripBrackets(u.hostname)) === 0) {
     let addrs: { address: string }[];
     try {
       addrs = await dnsLookup(u.hostname, { all: true });

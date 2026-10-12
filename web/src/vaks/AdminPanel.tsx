@@ -94,6 +94,7 @@ const SETTING_KEY: Record<string, string> = {
   'smtp.test': 'smtpTest',
   apiVersion: 'apiVersion',
   apiTokens: 'apiTokens',
+  'apiTokens.selfServicePolicy': 'apiTokenSelfServicePolicy',
   'webhooks.managePolicy': 'webhooksManagePolicy',
   'webhooks.domainAllowlist': 'webhooksDomainAllowlist',
   'webhooks.entraTenantAllowlist': 'webhooksEntraTenantAllowlist',
@@ -251,6 +252,7 @@ const SECTION_KEY: Record<string, string> = {
   Webhooks: 'webhooks',
   'Collaboration spaces': 'collabSpaces',
   'Clés API organisation': 'orgApiKeys',
+  'Personal token policy': 'personalTokenPolicy',
   'Organization keys': 'orgKeys',
   Authentication: 'authentication',
   'Sign-in & sessions': 'signInSessions',
@@ -4243,8 +4245,14 @@ export function AdminPanel({ onExit, lockedNoSeat, agentAdminOnly }: AdminPanelP
   }, [q, flat, settingLabel, settingDesc, groupLabel]);
 
   function goGroup(id: string) {
+    const g = GROUPS.find((x) => x.id === id);
+    // Un groupe dont toutes les sections sont des sous-items de nav (aucune
+    // section d'atterrissage `!nav`) rendrait un corps vide. Dans ce cas on
+    // ouvre d'office sa première sous-section plutôt que d'afficher du vide.
+    const hasLanding = g ? g.sections.some((s) => !s.nav) : true;
+    const firstNav = g?.sections.find((s) => s.nav) ?? null;
     setActive(id);
-    setActiveSection(null);
+    setActiveSection(hasLanding || !firstNav ? null : firstNav.title);
     setQuery('');
     setDrawer(false);
   }

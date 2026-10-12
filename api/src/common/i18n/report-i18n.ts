@@ -45,8 +45,11 @@ const D: Record<string, [string, string, string, string]> = {
 
   // -- task statuses --
   'st.TODO': ['To do', 'À faire', 'Da fare', 'Zu erledigen'],
+  'st.CLAIMED': ['Claimed', 'Réclamée', 'Presa in carico', 'Übernommen'],
   'st.IN_PROGRESS': ['In progress', 'En cours', 'In corso', 'In Arbeit'],
   'st.IN_REVIEW': ['In review', 'En revue', 'In revisione', 'In Prüfung'],
+  'st.CHANGES_REQUESTED': ['Changes requested', 'Modifs demandées', 'Modifiche richieste', 'Änderungen angefordert'],
+  'st.APPROVED': ['Approved', 'Approuvée', 'Approvata', 'Genehmigt'],
   'st.ON_HOLD': ['On hold', 'En pause', 'In attesa', 'Wartet'],
   'st.DONE': ['Done', 'Terminé', 'Completato', 'Erledigt'],
 

@@ -46,6 +46,7 @@ import {
   apiUploadAttachment,
   apiDeleteAttachment,
   apiDownloadAttachment,
+  apiFetchAttachmentBlob,
   apiListDeliverables,
   apiSubmitForReview,
   apiReviewDeliverable,
@@ -65,6 +66,7 @@ import {
 import type { WatcherDto, RecurringTaskDto, UpsertRecurrenceDto, RecurrenceFrequency } from '@vaks-pm/shared';
 import { DEMO } from '../demo/config';
 import { CustomFieldValuesSection } from './CustomFieldValuesSection';
+import { DocumentViewerModal, isViewableDoc } from './projects/DocumentViewerModal';
 import type { AcceptanceCriterion } from '@vaks-pm/shared';
 import {
   getOrgDefaultCountry,
@@ -1070,6 +1072,7 @@ export function TaskDetail({
   } | null>(null);
 
   const [attachments, setAttachments] = useState<AttachmentDto[]>([]);
+  const [attView, setAttView] = useState<AttachmentDto | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -2782,11 +2785,15 @@ export function TaskDetail({
               <div className="td-attachments">
                 {attachments.map((a) => (
                   <div className="td-att" key={a.id}>
-                    <Icon name="paperclip" size={16} />
+                    <Icon name={isViewableDoc(a) ? 'eye' : 'paperclip'} size={16} />
                     <button
                       className="td-att-name grow truncate"
-                      onClick={() => apiDownloadAttachment(a)}
-                      title={t('detail.downloadFile', { filename: a.filename })}
+                      onClick={() => (isViewableDoc(a) ? setAttView(a) : apiDownloadAttachment(a))}
+                      title={
+                        isViewableDoc(a)
+                          ? t('deliverables.preview', { defaultValue: 'Preview' })
+                          : t('detail.downloadFile', { filename: a.filename })
+                      }
                     >
                       {a.filename}
                     </button>
@@ -2806,6 +2813,14 @@ export function TaskDetail({
                   </div>
                 ))}
               </div>
+            )}
+            {attView && (
+              <DocumentViewerModal
+                target={attView}
+                fetchBlob={() => apiFetchAttachmentBlob(attView.id, attView.filename)}
+                onClose={() => setAttView(null)}
+                onDownload={() => apiDownloadAttachment(attView)}
+              />
             )}
           </div>
           )}
@@ -3528,6 +3543,7 @@ function DeliverablesSection({
   const { t } = useTranslation('tasks');
   const fmtDate = useFormat();
   const [rows, setRows] = useState<DeliverableDto[]>([]);
+  const [view, setView] = useState<{ id: string; filename: string; sizeBytes: number } | null>(null);
   const [rawStatus, setRawStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -3771,12 +3787,21 @@ function DeliverablesSection({
               {d.attachment && (
                 <button
                   className="btn btn-line"
-                  style={{ alignSelf: 'flex-start', fontSize: 12 }}
-                  onClick={() => apiDownloadDeliverable(d.attachment!.id, d.attachment!.filename)}
-                  title={t('deliverables.download')}
+                  style={{ alignSelf: 'flex-start', fontSize: 12, maxWidth: '100%', minWidth: 0 }}
+                  onClick={() =>
+                    isViewableDoc(d.attachment!)
+                      ? setView(d.attachment!)
+                      : apiDownloadDeliverable(d.attachment!.id, d.attachment!.filename)
+                  }
+                  title={
+                    (isViewableDoc(d.attachment) ? t('deliverables.preview') : t('deliverables.download')) +
+                    ' — ' +
+                    d.attachment.filename
+                  }
                 >
-                  <Icon name="download" size={13} /> {d.attachment.filename}
-                  <span className="mono" style={{ marginLeft: 6, color: 'var(--text-3)' }}>
+                  <Icon name={isViewableDoc(d.attachment) ? 'eye' : 'download'} size={13} style={{ flexShrink: 0 }} />
+                  <span className="truncate" style={{ minWidth: 0 }}>{d.attachment.filename}</span>
+                  <span className="mono" style={{ color: 'var(--text-3)', flexShrink: 0 }}>
                     {fmtBytes(d.attachment.sizeBytes)}
                   </span>
                 </button>
@@ -3813,6 +3838,14 @@ function DeliverablesSection({
         </div>
       )}
       </div>
+      {view && (
+        <DocumentViewerModal
+          target={view}
+          fetchBlob={() => apiFetchAttachmentBlob(view.id, view.filename)}
+          onClose={() => setView(null)}
+          onDownload={() => apiDownloadDeliverable(view.id, view.filename)}
+        />
+      )}
     </>
   );
 }

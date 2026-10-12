@@ -59,7 +59,9 @@
 }
 .fin-kpi-budget { background: var(--accent-soft); border-color: var(--accent-line); }
 .fin-kpi-cap {
-  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  /* Peut passer à la ligne : un libellé long (« Conflits de ressources ») en
+     nowrap débordait de la carte étroite. */
+  display: inline-flex; align-items: center; gap: 6px; white-space: normal; min-width: 0;
   font-size: 11.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
   color: var(--text-3);
 }
@@ -191,7 +193,10 @@
 .finp-table { display: flex; flex-direction: column; }
 .finp-row {
   display: grid;
-  grid-template-columns: 1.6fr 64px 120px 120px 120px 130px 72px;
+  /* minmax : les colonnes fixes + gaps + padding (~740px) mangeaient toute la
+     largeur → la colonne client tombait à ~22px (nom invisible, raison sociale
+     débordant sur la ligne suivante). */
+  grid-template-columns: minmax(180px, 1.6fr) 64px 120px 120px 120px 130px 72px;
   align-items: center; gap: var(--s3); padding: 9px var(--s5);
   border-top: 1px solid var(--border);
 }

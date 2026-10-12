@@ -1,5 +1,7 @@
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { withCallContext, type ApiClient } from './api-client.js';
+import type { Lang } from './i18n.js';
+import { msg } from './i18n-messages.js';
 
 /**
  * Resources MCP — la 3ᵉ primitive du protocole, jusqu'ici inutilisée.
@@ -54,7 +56,7 @@ function asTasks(v: unknown): Record<string, unknown>[] {
 /** Encode un segment d'URI (les `itemId` SharePoint contiennent des `!`, `:`…). */
 const seg = (v: string) => encodeURIComponent(v);
 
-export function registerResources(server: McpServer, api: ApiClient): void {
+export function registerResources(server: McpServer, api: ApiClient, lang: Lang = 'en'): void {
   // ── Contexte de travail d'une tâche (listable) ────────────────────────────
   server.registerResource(
     'task-context',
@@ -86,10 +88,8 @@ export function registerResources(server: McpServer, api: ApiClient): void {
       },
     }),
     {
-      title: 'Contexte de tâche',
-      description:
-        "Critères d'acceptation, journal vivant du projet et sources de documents disponibles " +
-        'pour une tâche.',
+      title: msg(lang, 'resTaskContextTitle'),
+      description: msg(lang, 'resTaskContextDesc'),
       mimeType: 'application/json',
     },
     async (uri, { taskId }) =>
@@ -129,10 +129,8 @@ export function registerResources(server: McpServer, api: ApiClient): void {
       list: undefined,
     }),
     {
-      title: 'Document rattaché à une tâche',
-      description:
-        'Contenu texte extrait d\'un document de la source externe (SharePoint, Google Drive). ' +
-        'Proxy live : rien n\'est copié côté Vaks-PM.',
+      title: msg(lang, 'resTaskFileTitle'),
+      description: msg(lang, 'resTaskFileDesc'),
     },
     async (uri, { taskId, source, itemId }) =>
       withCallContext({ tool: 'resources/read:task-file' }, async () => {

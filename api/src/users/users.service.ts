@@ -132,6 +132,10 @@ export class UsersService {
       },
       select: {
         ...PICKER_SELECT,
+        // Owner d'un agent : alimente l'héritage owner→agent dans le picker
+        // d'affectation (un agent assignable si son owner est membre du projet).
+        // null pour les humains — aucune info sensible.
+        ownerId: true,
         memberships: {
           where: { organizationId: orgId },
           select: { role: { select: { key: true, name: true } } },
@@ -714,6 +718,12 @@ export class UsersService {
       where: { id },
       data: { deletedAt: new Date(), status: UserStatus.SUSPENDED, licensed: false },
       select: PUBLIC_SELECT,
+    });
+    // Couper les sessions : un compte supprimé ne doit plus pouvoir rafraîchir
+    // (même règle que le retrait de siège / SCIM / SeatService).
+    await this.prisma.refreshToken.updateMany({
+      where: { userId: id, revokedAt: null },
+      data: { revokedAt: new Date() },
     });
     this.auditUser(orgId, AUDIT_ACTIONS.USER_DELETED, { isAdmin: true, id: actorId }, target);
     return deleted;

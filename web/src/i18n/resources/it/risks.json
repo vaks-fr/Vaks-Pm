@@ -1,0 +1,107 @@
+{
+  "title": "Registro dei rischi",
+  "tab": "Rischi",
+  "empty": "Nessun rischio registrato per ora.",
+  "emptyHint": "Registra un rischio manualmente, oppure lascia che le regole di automazione (milestone a rischio, soglia di budget, previsione in sforamento) alimentino automaticamente questo registro.",
+  "loading": "Caricamento…",
+  "newRisk": "Nuovo rischio",
+  "editTitle": "Modifica rischio",
+  "createTitle": "Nuovo rischio",
+  "field": {
+    "title": "Titolo",
+    "description": "Descrizione",
+    "probability": "Probabilità",
+    "impact": "Impatto",
+    "score": "Punteggio",
+    "category": "Categoria",
+    "mitigation": "Mitigazione",
+    "owner": "Responsabile",
+    "status": "Stato",
+    "source": "Origine"
+  },
+  "noOwner": "Nessun responsabile",
+  "titleRequired": "Il titolo è obbligatorio.",
+  "category": {
+    "RISK": "Rischio",
+    "ASSUMPTION": "Ipotesi",
+    "ISSUE": "Problema",
+    "DEPENDENCY": "Dipendenza"
+  },
+  "status": {
+    "OPEN": "Aperto",
+    "MITIGATING": "In mitigazione",
+    "RESOLVED": "Risolto",
+    "ACCEPTED": "Accettato"
+  },
+  "source": {
+    "MANUAL": "Manuale",
+    "AUTO": "Automatico"
+  },
+  "matrix": {
+    "title": "Matrice probabilità × impatto",
+    "probability": "Probabilità",
+    "impact": "Impatto",
+    "low": "Basso",
+    "medium": "Medio",
+    "high": "Alto",
+    "clear": "azzera",
+    "activeCount_one": "{{count}} attivo · clicca una cella per filtrare",
+    "activeCount_other": "{{count}} attivi · clicca una cella per filtrare",
+    "cellCount_one": "{{count}} rischio",
+    "cellCount_other": "{{count}} rischi",
+    "probScale": { "1": "Raro", "2": "Improbabile", "3": "Possibile", "4": "Probabile", "5": "Quasi certo" },
+    "impactScale": { "1": "Insignificante", "2": "Minore", "3": "Moderato", "4": "Grave", "5": "Severo" },
+    "range": { "low": "1–4", "medium": "5–9", "high": "10–14", "critical": "15–25" }
+  },
+  "sev": {
+    "low": "Basso",
+    "medium": "Medio",
+    "high": "Alto",
+    "critical": "Critico"
+  },
+  "exposure": {
+    "title": "Esposizione al rischio"
+  },
+  "automation": {
+    "header": "Regole di automazione che alimentano questo registro",
+    "raised_one": "{{count}} rischio segnalato",
+    "raised_other": "{{count}} rischi segnalati",
+    "idle": "Nessun rischio segnalato",
+    "active": "Attiva",
+    "off": "Inattiva",
+    "rule": {
+      "milestone_at_risk": "Milestone a rischio",
+      "budget_threshold": "Soglia di budget",
+      "forecast_overrun": "Sforamento previsione"
+    }
+  },
+  "seg": {
+    "all": "Tutti",
+    "open": "Aperti",
+    "mitigating": "In mitigazione",
+    "closed": "Chiusi"
+  },
+  "action": {
+    "create": "Crea",
+    "edit": "Modifica",
+    "resolve": "Risolvi",
+    "delete": "Elimina",
+    "save": "Salva",
+    "cancel": "Annulla"
+  },
+  "autoBadgeHint": "Rilevato automaticamente dalla regola «{{rule}}» — modificarlo o risolverlo non viene mai sovrascritto finché la condizione persiste.",
+  "confirmDelete": "Eliminare questo rischio? Azione irreversibile.",
+  "confirmDeleteTitle": "Elimina rischio",
+  "created": "Rischio creato.",
+  "saved": "Rischio salvato.",
+  "resolved": "Rischio risolto.",
+  "deleted": "Rischio eliminato.",
+  "readOnlyHint": "Puoi consultare il registro dei rischi. Solo i project manager possono modificarlo.",
+  "col": {
+    "risk": "Rischio",
+    "score": "Punteggio",
+    "owner": "Responsabile",
+    "status": "Stato",
+    "probImpact": "Prob × Impatto"
+  }
+}

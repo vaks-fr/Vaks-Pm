@@ -47,7 +47,22 @@ export class GraphService {
       scope: 'https://graph.microsoft.com/.default',
       grant_type: 'client_credentials',
     });
-    await applyCredentialToForm(form, cred);
+    try {
+      // Construction de l'assertion client (private_key_jwt) : `importPKCS8` et
+      // `thumbprintToX5t` jettent une Error NUE si la clé privée PEM est malformée
+      // (pas du PKCS#8) ou si l'empreinte n'est pas de l'hex valide. Sans ce catch,
+      // l'erreur remonte en 500 — que le worker interprète comme une panne serveur
+      // TRANSITOIRE et retente en boucle (symptôme `context HTTP 500` en retry). Or
+      // une credential certificat invalide est une erreur de config PERMANENTE →
+      // 400, échec terminal côté worker (pas de retry, alerte admin unique), au même
+      // titre que la config incomplète ci-dessus.
+      await applyCredentialToForm(form, cred);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new BadRequestException(
+        `Credential Graph invalide (clé privée / empreinte de certificat): ${msg}`,
+      );
+    }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 15_000);
     let res: Response;

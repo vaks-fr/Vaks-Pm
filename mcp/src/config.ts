@@ -28,11 +28,18 @@ export interface McpConfig {
    *   - `self` (défaut) : l'AS = **CE serveur MCP** (host entrant). Convient au
    *     déploiement **DMZ** où la box forwarde `/oauth`, `/login`, le discovery…
    *     vers l'API on-premise — l'API interne n'est jamais exposée directement.
-   *   - `tenant` : l'AS = le **host tenant** (label `mcp` retiré). Convient au
-   *     déploiement co-localisé où le domaine tenant est lui-même joignable par
-   *     le client IA.
+   *   - `tenant` : l'AS = le host tenant. Depuis le pass-through du Host (plus
+   *     de retrait du label `mcp`), il vaut le Host entrant — donc **équivalent
+   *     à `self`**, sauf avec `VAKS_TENANT_HOST` (mono-tenant) où il annonce le
+   *     host épinglé. Option conservée pour compatibilité des déploiements.
    */
   authServerMode: AuthServerMode;
+  /**
+   * Suffixes de domaine publics acceptés dans le Host entrant (env
+   * `VAKS_PUBLIC_HOST_SUFFIXES`, séparés par des virgules, ex.
+   * `vaks-pm.com,mcp.exemple.fr`). Vide = contrôle syntaxique seul.
+   */
+  publicHostSuffixes: string[];
 }
 
 function intEnv(name: string, def: number): number {
@@ -50,7 +57,33 @@ export function loadConfig(): McpConfig {
     forcedTenantHost: process.env.VAKS_TENANT_HOST?.trim() || null,
     apiTimeoutMs: intEnv('VAKS_API_TIMEOUT_MS', 20000),
     authServerMode: process.env.VAKS_AUTH_SERVER_MODE === 'tenant' ? 'tenant' : 'self',
+    publicHostSuffixes: (process.env.VAKS_PUBLIC_HOST_SUFFIXES ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase().replace(/^\.+/, ''))
+      .filter(Boolean),
   };
+}
+
+const HOST_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)*(?::\d{1,5})?$/;
+/** Littéral IPv6 entre crochets (ex. `[::1]:8080`) — tests locaux / accès par IP. */
+const IPV6_HOST_RE = /^\[[0-9a-f:.]{2,45}\](?::\d{1,5})?$/;
+
+/**
+ * Host entrant **validé**, ou `undefined`. Le Host alimente des URLs renvoyées
+ * au client (redirection `GET /mcp`, `resource_metadata`, issuer OAuth) : sans
+ * contrôle, un Host forgé produisait une redirection ouverte et injectait du
+ * texte arbitraire dans `WWW-Authenticate`. Syntaxe DNS stricte + allow-list
+ * de suffixes optionnelle (`cfg.publicHostSuffixes`).
+ */
+export function validHost(cfg: Pick<McpConfig, 'publicHostSuffixes'>, incomingHost?: string): string | undefined {
+  const host = (incomingHost ?? '').trim().toLowerCase();
+  if (!host || host.length > 253 || !(HOST_RE.test(host) || IPV6_HOST_RE.test(host))) return undefined;
+  if (cfg.publicHostSuffixes.length) {
+    const name = host.split(':')[0];
+    const ok = cfg.publicHostSuffixes.some((sfx) => name === sfx || name.endsWith(`.${sfx}`));
+    if (!ok) return undefined;
+  }
+  return host;
 }
 
 /**

@@ -447,6 +447,16 @@ export class AuthService {
     // Ceinture : un agent n'a jamais de refresh token (login déjà bloqué),
     // mais un compte humain converti en agent ne doit pas garder sa session.
     if (user.kind === 'AGENT') throw new UnauthorizedException('Refresh token invalide');
+    // Compte supprimé (soft-delete) ou non actif : la session ne se renouvelle
+    // plus, on révoque le refresh présenté. Sans ça, un compte supprimé gardait
+    // un accès renouvelable sur les routes @SeatExempt (via le sliding 30 j).
+    if (user.deletedAt || user.status !== 'ACTIVE') {
+      await this.prisma.refreshToken.update({
+        where: { id: stored.id },
+        data: { revokedAt: new Date() },
+      });
+      throw new UnauthorizedException('Refresh token invalide');
+    }
     const idleMin = await this.settings.getSessionIdleTimeoutMinutes(user.organizationId);
     if (idleMin > 0) {
       const idleMs = Date.now() - stored.lastActivityAt.getTime();

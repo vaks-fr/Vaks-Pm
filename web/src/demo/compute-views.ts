@@ -234,12 +234,20 @@ export function computeStats(projectId: string): ProjectStatsDto {
     startDate: p?.startDate ?? null,
     dueDate: p?.dueDate ?? null,
     totalTasks: tasks.length,
-    byStatus: {
+    // ProjectStatsDto.byStatus ne déclare que 4 clés côté type partagé, mais l'API
+    // porte les 8 statuts de l'enum (dont les statuts agents) à l'exécution — on
+    // aligne la démo dessus et on referme le littéral par cast pour rester compatible
+    // avec le type partagé sans le modifier (hors périmètre de cette slice).
+    byStatus: ({
       TODO: count(TaskStatus.TODO),
+      CLAIMED: count(TaskStatus.CLAIMED),
       IN_PROGRESS: count(TaskStatus.IN_PROGRESS),
       IN_REVIEW: count(TaskStatus.IN_REVIEW),
+      CHANGES_REQUESTED: count(TaskStatus.CHANGES_REQUESTED),
+      APPROVED: count(TaskStatus.APPROVED),
+      ON_HOLD: count(TaskStatus.ON_HOLD),
       DONE: done,
-    },
+    }) as ProjectStatsDto['byStatus'],
     completionPct: tasks.length ? Math.round((done / tasks.length) * 100) : 0,
     overdueTasks: tasks.filter((t) => t.status !== TaskStatus.DONE && t.dueDate != null && t.dueDate < today).length,
     totalEstimateHours: totalEstimate,

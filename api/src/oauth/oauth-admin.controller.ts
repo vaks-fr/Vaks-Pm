@@ -68,7 +68,7 @@ export class OAuthAdminConnectionsController {
 
   @Delete(':connId')
   @RequirePermissions('org:manage')
-  revoke(@Param('connId') connId: string) {
-    return this.oauth.adminRevokeConnection(connId);
+  revoke(@CurrentUser() user: AuthUser, @Param('connId') connId: string) {
+    return this.oauth.adminRevokeConnection(user.orgId, connId);
   }
 }

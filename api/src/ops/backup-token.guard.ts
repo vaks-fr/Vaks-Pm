@@ -1,5 +1,6 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Request } from 'express';
+import { constantTimeEqual } from '../common/constant-time-eq.util';
 
 /**
  * Guard des endpoints `/ops/*` appelés par les scripts d'infrastructure côté
@@ -28,7 +29,7 @@ export class BackupTokenGuard implements CanActivate {
     const req = ctx.switchToHttp().getRequest<Request>();
     const got = req.headers['x-backup-token'];
     const value = Array.isArray(got) ? got[0] : got;
-    if (value !== expected) throw new UnauthorizedException('Invalid backup token');
+    if (!constantTimeEqual(value, expected)) throw new UnauthorizedException('Invalid backup token');
     return true;
   }
 }

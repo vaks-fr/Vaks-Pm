@@ -264,6 +264,7 @@
     "emptyHintManage": "Verwenden Sie „Hinzufügen“, um eines hochzuladen.",
     "added": "Dokument hinzugefügt · {{name}}",
     "uploadFailed": "Hochladen fehlgeschlagen: {{message}}",
+    "viewTitle": "Vorschau",
     "downloadTitle": "Herunterladen",
     "downloadFailed": "Download fehlgeschlagen: {{message}}",
     "deleteTitle": "Löschen",

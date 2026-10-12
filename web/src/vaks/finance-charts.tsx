@@ -4,7 +4,7 @@
    ============================================================ */
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useChartTooltip } from './chart-tooltip';
+import { useChartTooltip, axisLabelPad } from './chart-tooltip';
 
 const PALETTE_HUES = [285, 215, 25, 155, 330, 195, 60, 240, 120, 0, 175, 300];
 export function palette(i: number): string {
@@ -171,17 +171,19 @@ export function MonthlyChart({
 }) {
   const { t } = useTranslation('finances');
   const H = 220;
-  const pad = { top: 16, right: 14, bottom: 26, left: 56 };
+  const margins = data.map((d) => d.revenue - d.cost);
+  // Domain includes negative margins so the line can dip below the zero axis.
+  const maxV = Math.max(1, ...data.flatMap((d) => [d.cost, d.revenue]), ...margins);
+  const minV = Math.min(0, ...margins);
+  // y-axis ticks: max, 0, and min (when negative)
+  const ticks = Array.from(new Set([maxV, 0, ...(minV < 0 ? [minV] : [])]));
+  const pad = { top: 16, right: 14, bottom: 26, left: axisLabelPad(ticks.map(fmt), 56) };
   const n = Math.max(1, data.length);
   // Width fills the container: a viewBox scaled to 100% width keeps column
   // sizing constant across periods (3 vs 12 months just adds/removes columns).
   const W = pad.left + pad.right + n * 64;
   const innerW = W - pad.left - pad.right;
   const innerH = H - pad.top - pad.bottom;
-  const margins = data.map((d) => d.revenue - d.cost);
-  // Domain includes negative margins so the line can dip below the zero axis.
-  const maxV = Math.max(1, ...data.flatMap((d) => [d.cost, d.revenue]), ...margins);
-  const minV = Math.min(0, ...margins);
   const range = maxV - minV || 1;
   const slot = innerW / n;
   const barW = Math.min(18, slot / 3);
@@ -191,8 +193,6 @@ export function MonthlyChart({
     const mm = Number(m.slice(5, 7));
     return mm >= 1 && mm <= 12 ? t('finances:charts.month.' + mm) : m;
   };
-  // y-axis ticks: max, 0, and min (when negative)
-  const ticks = Array.from(new Set([maxV, 0, ...(minV < 0 ? [minV] : [])]));
   const pts = data.map((d, i) => {
     const cx = pad.left + slot * i + slot / 2;
     return { cx, cy: y(d.revenue - d.cost), m: d.revenue - d.cost };

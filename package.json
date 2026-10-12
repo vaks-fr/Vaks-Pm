@@ -25,17 +25,28 @@
   "overrides": {
     "rxjs": "7.8.2",
     "ws": "^8.21.0",
-    "js-yaml": "^4.3.1",
-    "undici": "^7.28.0",
-    "multer": "^2.2.0",
+    "js-yaml": "^4.3.2",
+    "undici": "^7.29.1",
+    "multer": "^2.4.0",
     "uuid": "^11.1.1",
     "@hono/node-server": "^2.0.12",
     "body-parser": "^1.20.6",
-    "brace-expansion": "2.1.4",
     "esbuild": "^0.28.1",
-    "fast-uri": "^3.1.5",
+    "fast-uri": "^3.1.8",
     "postcss": "^8.5.25",
     "valibot": "^1.4.2",
-    "hono": "^4.12.34"
+    "hono": "^4.13.7",
+    "image-size": "^2.0.4",
+    "qs": "^6.16.0",
+    "proxy-addr": "^2.0.8",
+    "engine.io": "^6.6.10",
+    "source-map-js": "^1.2.2",
+    "moment": "^2.31.0",
+    "ip-address": "^10.7.1",
+    "mysql2": "^3.24.5",
+    "deepmerge-ts": "^8.0.2",
+    "mammoth": {
+      "argparse": "^2.0.1"
+    }
   }
 }

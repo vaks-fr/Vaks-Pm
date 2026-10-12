@@ -146,8 +146,9 @@ export interface EmailJob {
    * Conf SMTP de transport résolue par tenant côté API (host/port/encryption/
    * authMode/user + mot de passe déchiffré). Quand fournie (host non vide), le
    * worker l'utilise telle quelle au lieu de sa conf globale. Le mot de passe
-   * peut venir d'ici (saisi dans l'admin, chiffré at-rest) ; à défaut, fallback
-   * sur l'env `SMTP_PASSWORD` (Swarm secret).
+   * n'est PLUS transporté par le job (secret hors Redis) : le worker le lit via
+   * la route interne `/internal/notifications/smtp` (chiffré at-rest côté API) ;
+   * à défaut, fallback sur l'env `SMTP_PASSWORD` (Swarm secret).
    */
   smtp?: {
     host: string;

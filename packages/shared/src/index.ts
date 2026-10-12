@@ -56,6 +56,12 @@ export const PERMISSIONS = [
   // Pensé pour les clés ORG (pull SIEM / archivage externe) ; un PAT ne
   // fonctionne que si le user sous-jacent a la permission (admins).
   'audit:read',
+  // Export de métriques applicatives via l'API publique (`GET /monitoring/metrics`,
+  // format Prometheus text exposition). Même patron qu'`audit:read` : pensé
+  // pour une clé ORG (scrape Prometheus externe) ; un PAT ne fonctionne que si
+  // le user sous-jacent a la permission (admins). Compteurs métier org-scopés
+  // uniquement — jamais de topologie d'infra (cf. `api/src/metrics/`).
+  'monitoring:read',
   // Provisioning SCIM 2.0 (phase 10 lot 2). Porté par une **clé organisation**
   // que l'IdP (Entra) utilise comme bearer sur `/scim/v2/*`. N'ouvre QUE la
   // surface SCIM (pas l'app privée ni l'API publique).
@@ -91,6 +97,11 @@ export const PERMISSIONS = [
   // tâches contrairement à `task:view`). Si elle fuite, elle n'expose aucune
   // donnée. Pas dans les rôles : réservé aux clés org générées par la feature.
   'nudge:manage',
+  // Registre de risques projet (RAID, MVP=RISK). Écriture (create/update/
+  // resolve/delete) ; la lecture reste sous `project:view`. Jamais mappé en
+  // capability agent (cf. AGENT_FORBIDDEN_PERMISSIONS) : un risque engage un
+  // jugement de gestion de projet, réservé aux rôles managers humains.
+  'risk:manage',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -113,11 +124,13 @@ export type AgentTrustLevel = (typeof AGENT_TRUST_LEVELS)[number];
 export const AGENT_FORBIDDEN_PERMISSIONS: readonly Permission[] = [
   'org:manage', 'org:settings', 'member:manage', 'role:manage',
   'finance:view', 'finance:manage', 'client:view', 'client:manage',
-  'time:log', 'timeoff:write', 'crypto:manage', 'audit:read', 'scim:provision',
+  'time:log', 'timeoff:write', 'crypto:manage', 'audit:read', 'monitoring:read', 'scim:provision',
   'agent:manage', 'collab:link', 'webhook:manage', 'team:create', 'team:delete',
   'team:manage_members', 'project:delete', 'project:assign_managers',
   // Anti auto-approbation (chantier 2c) : un agent ne review jamais un livrable.
   'task:review',
+  // Registre de risques : jugement de gestion de projet, réservé aux humains.
+  'risk:manage',
 ] as const;
 
 /**
@@ -477,7 +490,7 @@ export const SYSTEM_ROLES: Record<string, RoleDefinition> = {
       'task:create', 'task:view', 'task:update', 'task:delete', 'task:review',
       'comment:create', 'attachment:manage', 'time:log', 'allocation:manage', 'timeoff:write',
       'report:view', 'report:view_all', 'finance:view', 'finance:manage',
-      'client:view', 'client:manage',
+      'client:view', 'client:manage', 'risk:manage',
     ],
   },
   GLOBAL_REPORT_VIEWER: {
@@ -509,7 +522,7 @@ export const SYSTEM_ROLES: Record<string, RoleDefinition> = {
       'project:update', 'project:archive', 'project:assign_managers',
       'task:create', 'task:view', 'task:update', 'task:delete', 'task:review',
       'comment:create', 'attachment:manage', 'time:log', 'allocation:manage', 'timeoff:write',
-      'report:view',
+      'report:view', 'risk:manage',
     ],
   },
   ORG_MEMBER: {
@@ -550,7 +563,7 @@ export const SYSTEM_ROLES: Record<string, RoleDefinition> = {
       'project:assign_managers',
       'task:create', 'task:view', 'task:update', 'task:delete', 'task:review',
       'comment:create', 'attachment:manage', 'time:log', 'allocation:manage', 'timeoff:write',
-      'report:view',
+      'report:view', 'risk:manage',
     ],
   },
   CONTRIBUTOR: {
@@ -559,7 +572,7 @@ export const SYSTEM_ROLES: Record<string, RoleDefinition> = {
     scope: RoleScope.PROJECT,
     permissions: [
       'project:view', 'task:create', 'task:view', 'task:update',
-      'comment:create', 'attachment:manage', 'time:log',
+      'comment:create', 'attachment:manage', 'time:log', 'risk:manage',
     ],
   },
   VIEWER: {
@@ -1021,6 +1034,10 @@ export interface UserDto {
   name: string;
   /** HUMAN (défaut) ou AGENT — présent pour badger les agents dans les pickers d'affectation. */
   kind?: ActorKind;
+  /** Owner humain d'un agent (kind=AGENT). Exposé dans le picker d'affectation
+   *  pour l'héritage owner→agent : un agent devient assignable sur un projet
+   *  agentsEnabled dès que son owner en est membre. null pour les humains. */
+  ownerId?: string | null;
   isAdmin: boolean;
   /** Siège de licence : `true` = consomme un siège + accès dashboard ; `false` =
    *  sans siège (admin-only ou parqué, pas d'accès dashboard). */
@@ -3819,6 +3836,66 @@ export interface UpsertRecurrenceDto {
   active?: boolean;
 }
 
+// ============================================================
+// Risques (RAID, MVP=RISK) — registre de risques par projet
+// ============================================================
+
+export const RISK_CATEGORIES = ['RISK', 'ASSUMPTION', 'ISSUE', 'DEPENDENCY'] as const;
+export type RiskCategory = (typeof RISK_CATEGORIES)[number];
+
+export const RISK_STATUSES = ['OPEN', 'MITIGATING', 'RESOLVED', 'ACCEPTED'] as const;
+export type RiskStatus = (typeof RISK_STATUSES)[number];
+
+export const RISK_SOURCES = ['MANUAL', 'AUTO'] as const;
+export type RiskSource = (typeof RISK_SOURCES)[number];
+
+/** Un risque du registre (`GET /projects/:id/risks`). */
+export interface RiskDto {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string | null;
+  /** 1-5. */
+  probability: number;
+  /** 1-5. */
+  impact: number;
+  /** Dénormalisé = probability * impact (1-25). */
+  score: number;
+  category: RiskCategory;
+  mitigation: string | null;
+  ownerId: string | null;
+  owner: { id: string; name: string; email: string } | null;
+  status: RiskStatus;
+  source: RiskSource;
+  /** AutomationKind d'origine quand source='AUTO' (ex. "milestone_at_risk"), sinon null. */
+  autoRuleKind: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+}
+
+export interface CreateRiskInput {
+  title: string;
+  description?: string | null;
+  probability: number;
+  impact: number;
+  category?: RiskCategory;
+  mitigation?: string | null;
+  ownerId?: string | null;
+  status?: RiskStatus;
+}
+
+export interface UpdateRiskInput {
+  title?: string;
+  description?: string | null;
+  probability?: number;
+  impact?: number;
+  category?: RiskCategory;
+  mitigation?: string | null;
+  ownerId?: string | null;
+  status?: RiskStatus;
+}
+
 /** Une ligne de « ce que je suis » (`GET /me/watching`). */
 export interface WatchingEntryDto {
   id: string;
@@ -4365,7 +4442,7 @@ export interface ProjectTeamDto {
 // Webhooks sortants (Phase 7)
 // ============================================================
 export type WebhookScopeType = 'ORG' | 'PROJECT' | 'TEAM';
-export type WebhookFormat = 'raw' | 'teams';
+export type WebhookFormat = 'raw' | 'teams' | 'slack';
 
 export interface WebhookDto {
   id: string;
@@ -4378,7 +4455,7 @@ export interface WebhookDto {
   scopeType: WebhookScopeType;
   /** projectId/teamId selon scopeType ; null si ORG. */
   scopeId: string | null;
-  /** Format du payload : 'raw' (enveloppe Vaks) ou 'teams' (Adaptive Card). */
+  /** Format du payload : 'raw' (enveloppe Vaks), 'teams' (Adaptive Card) ou 'slack' (Block Kit). */
   format: WebhookFormat;
   /** Posé si le webhook a été désactivé automatiquement (échecs répétés). */
   autoDisabledAt?: string | null;

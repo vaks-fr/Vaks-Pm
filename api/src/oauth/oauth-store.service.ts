@@ -26,6 +26,13 @@ export class OAuthStoreService implements OnModuleDestroy {
   private static readonly CODE_TTL = 60; // 1 min entre /consent et /token
   private static readonly REFRESH_TTL = 30 * 24 * 3600; // 30 jours
   private static readonly CLIENT_TTL = 90 * 24 * 3600; // 90 jours (DCR)
+  /**
+   * TTL d'un client DCR JAMAIS utilisé (aucun code échangé). La route
+   * d'enregistrement est publique : sans ce TTL court, des enregistrements
+   * jetables occupaient le plafond par tenant pendant 90 j (verrouillage du
+   * DCR pour tous). Promu au TTL plein au premier échange de code.
+   */
+  private static readonly UNUSED_CLIENT_TTL = 3600; // 1 h
 
   constructor(config: ConfigService) {
     this.redis = new Redis(config.get<string>('redisUrl') ?? 'redis://redis:6379', {
@@ -47,6 +54,44 @@ export class OAuthStoreService implements OnModuleDestroy {
   }
 
   // ---------- Clients (DCR) ----------
+
+  /**
+   * Enregistre un client DCR **dans la limite de `max` clients vivants par
+   * tenant**. Route publique (RFC 7591, relayée par la DMZ) : sans plafond,
+   * chaque appel posait une clé Redis de 90 j sur le Redis partagé → croissance
+   * mémoire illimitée. Index = sorted set (score = expiration), purgé des
+   * entrées expirées à chaque enregistrement. Renvoie false si plafond atteint.
+   */
+  async saveClientCapped(slug: string | undefined, client: OAuthClient, max: number): Promise<boolean> {
+    const idx = this.key('clientidx', slug, 'all');
+    const now = Date.now();
+    await this.redis.zremrangebyscore(idx, 0, now);
+    if ((await this.redis.zcard(idx)) >= max) return false;
+    // Enregistré « à l'essai » (1 h) : ne compte durablement dans le plafond
+    // qu'une fois utilisé (`promoteClient`).
+    await this.redis.set(
+      this.key('client', slug, client.clientId),
+      JSON.stringify(client),
+      'EX',
+      OAuthStoreService.UNUSED_CLIENT_TTL,
+    );
+    await this.redis
+      .multi()
+      .zadd(idx, now + OAuthStoreService.UNUSED_CLIENT_TTL * 1000, client.clientId)
+      .expire(idx, OAuthStoreService.CLIENT_TTL)
+      .exec();
+    return true;
+  }
+
+  /** Premier échange de code réussi : le client DCR passe au TTL plein (90 j). */
+  async promoteClient(slug: string | undefined, clientId: string): Promise<void> {
+    await this.redis
+      .multi()
+      .expire(this.key('client', slug, clientId), OAuthStoreService.CLIENT_TTL)
+      // XX : ne met à jour que si l'entrée existe (jamais d'ajout ici).
+      .zadd(this.key('clientidx', slug, 'all'), 'XX', Date.now() + OAuthStoreService.CLIENT_TTL * 1000, clientId)
+      .exec();
+  }
 
   async saveClient(slug: string | undefined, client: OAuthClient): Promise<void> {
     await this.redis.set(
@@ -76,7 +121,18 @@ export class OAuthStoreService implements OnModuleDestroy {
   }
 
   async deletePreClient(slug: string | undefined, clientId: string): Promise<number> {
-    return this.redis.del(this.key('preclient', slug, clientId));
+    const n = await this.redis.del(this.key('preclient', slug, clientId));
+    // Marqueur de révocation (durée de vie max d'un refresh) : les clients DCR
+    // portent le même préfixe `vaks_mcpc_` — on ne peut donc PAS déduire la
+    // révocation de l'absence du client, il faut la noter explicitement.
+    if (n > 0) {
+      await this.redis.set(this.key('preclient-revoked', slug, clientId), '1', 'EX', OAuthStoreService.REFRESH_TTL);
+    }
+    return n;
+  }
+
+  async isPreClientRevoked(slug: string | undefined, clientId: string): Promise<boolean> {
+    return (await this.redis.exists(this.key('preclient-revoked', slug, clientId))) === 1;
   }
 
   async listPreClients(slug: string | undefined): Promise<OAuthClient[]> {
@@ -172,6 +228,14 @@ export class OAuthStoreService implements OnModuleDestroy {
   }
 
   /** Lit ET supprime un refresh (rotation = anti-replay). */
+  /** Lecture SANS consommation : permet d'authentifier le client AVANT de
+   *  brûler le refresh (un secret erroné ne doit pas tuer la chaîne). */
+  async peekRefresh(slug: string | undefined, secret: string): Promise<RefreshRecord | null> {
+    if (!secret) return null;
+    const raw = await this.redis.get(this.key('refresh', slug, OAuthStoreService.sha256(secret)));
+    return raw ? (JSON.parse(raw) as RefreshRecord) : null;
+  }
+
   async consumeRefresh(
     slug: string | undefined,
     secret: string,

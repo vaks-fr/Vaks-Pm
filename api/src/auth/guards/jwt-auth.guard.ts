@@ -5,25 +5,7 @@ import type { Request } from 'express';
 import { ApiTokensService } from '../../api-tokens/api-tokens.service';
 import { PUBLIC_API_KEY } from '../../rbac/require-permissions.decorator';
 import { SEAT_EXEMPT_KEY } from '../seat-exempt.decorator';
-
-/**
- * Extrait le jeton porteur d'une requête : `Authorization: Bearer …` en premier,
- * repli sur `X-Api-Key` (une passerelle comme Power Platform / Copilot strippe
- * parfois `Authorization` — même repli que le serveur MCP `mcp/src/main.ts`).
- * Le repli ne concerne QUE le transport du jeton : la validation (ApiTokens) et
- * le RBAC restent inchangés, et le gate `@PublicApi` s'applique toujours.
- */
-function extractBearer(req: Request): string | null {
-  const auth = req.headers['authorization'];
-  if (typeof auth === 'string' && auth.startsWith('Bearer ')) return auth.slice(7).trim() || null;
-  const rawKey = req.headers['x-api-key'];
-  const alt = Array.isArray(rawKey) ? rawKey[0] : rawKey;
-  if (typeof alt === 'string' && alt.trim()) {
-    const v = alt.trim();
-    return v.startsWith('Bearer ') ? v.slice(7).trim() || null : v;
-  }
-  return null;
-}
+import { extractBearer, isApiToken } from '../bearer.util';
 
 /**
  * Authentification : soit un JWT (session utilisateur, via passport-jwt), soit
@@ -46,7 +28,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     const req = context.switchToHttp().getRequest<Request>();
     const raw = extractBearer(req);
 
-    if (raw && raw.startsWith('vaks_')) {
+    if (isApiToken(raw)) {
       const principal = await this.apiTokens.verify(raw);
       if (!principal) throw new UnauthorizedException('Jeton API invalide ou révoqué');
       // Gate : un jeton API n'agit que sur l'API publique (`@PublicApi`).
@@ -63,8 +45,30 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
 
     // Sinon : JWT classique (passport).
     const ok = (await super.canActivate(context)) as boolean;
-    if (ok) this.enforceSeat(context, req);
+    if (ok) {
+      this.enforceDmzEdge(req);
+      this.enforceSeat(context, req);
+    }
     return ok;
+  }
+
+  /**
+   * **Frontière DMZ.** La box DMZ (`infra/dmz/`) pose `X-Vaks-Edge: dmz` sur
+   * tout ce qu'elle relaie (en écrasant toute valeur entrante). À travers elle,
+   * un humain ne fait que S'AUTHENTIFIER (login, MFA, consentement OAuth) — il
+   * ne consomme jamais l'API : l'allow-list DMZ borne un agent, pas une session.
+   * Sans ce gate, un JWT obtenu via la DMZ atteignait `/me/api-tokens` (mint
+   * d'un PAT 2 ans), `/me/export` (export RGPD)… depuis Internet.
+   * Les jetons d'API (branche au-dessus) ne sont pas concernés.
+   */
+  private enforceDmzEdge(req: Request): void {
+    const edge = req.headers['x-vaks-edge'];
+    if ((Array.isArray(edge) ? edge[0] : edge) !== 'dmz') return;
+    const path = (req.originalUrl || req.url || '').split('?')[0];
+    if (/^\/api\/v\d+\/auth\//.test(path)) return;
+    throw new ForbiddenException(
+      "Les sessions ouvertes via la passerelle IA ne donnent accès qu'à l'authentification.",
+    );
   }
 
   /**

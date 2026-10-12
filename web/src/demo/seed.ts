@@ -24,6 +24,10 @@ import {
   type AllocationDto,
   type TeamDto,
   type WorkspaceAgentDto,
+  type RiskDto,
+  type RiskCategory,
+  type RiskStatus,
+  type RiskSource,
 } from '@vaks-pm/shared';
 import type { DemoState } from './store';
 import { DEMO_STATE_VERSION } from './config';
@@ -60,7 +64,7 @@ const PM_PERMISSIONS = [
   'report:view', 'report:view_all', 'finance:view', 'finance:manage',
   'client:view', 'client:manage',
   'team:create', 'team:delete', 'team:manage_members',
-  'webhook:manage',
+  'webhook:manage', 'risk:manage',
 ];
 
 function mkUser(
@@ -598,6 +602,115 @@ function seedComments(tasks: TaskDto[], users: UserDto[]): CommentDto[] {
   return out;
 }
 
+/** Registre de risques (RAID) — surtout sur le projet WEB mis en avant, plus
+ *  quelques-uns sur SRV. Mélange MANUAL / AUTO (jalon, budget, prévision) avec
+ *  une répartition de sévérité crédible : 2 critiques, 3 hauts, 1 moyen, 1 bas. */
+function seedRisks(users: UserDto[]): RiskDto[] {
+  const byId = new Map(users.map((u) => [u.id, u]));
+  const owner = (id: string | null): RiskDto['owner'] => {
+    if (!id) return null;
+    const u = byId.get(id);
+    return u ? { id: u.id, name: u.name, email: u.email } : null;
+  };
+  type Spec = {
+    projectId: string;
+    title: string;
+    description: string | null;
+    probability: number;
+    impact: number;
+    category: RiskCategory;
+    mitigation: string | null;
+    ownerId: string | null;
+    status: RiskStatus;
+    source: RiskSource;
+    autoRuleKind: string | null;
+    createdOff: number;
+    resolvedOff?: number;
+  };
+  const specs: Spec[] = [
+    {
+      projectId: 'proj_web', title: 'La refonte du design system glisse après le gel de contenu',
+      description: 'Les tokens et composants ne seront pas figés à temps pour la mise en page finale.',
+      probability: 4, impact: 5, category: 'RISK', mitigation: 'Geler le design system une semaine avant le contenu ; revue quotidienne.',
+      ownerId: 'user_2', status: 'MITIGATING', source: 'AUTO', autoRuleKind: 'milestone_at_risk', createdOff: -12,
+    },
+    {
+      projectId: 'proj_web', title: 'Le budget prestataire dépasse l’enveloppe validée',
+      description: 'La sur-consommation intégration front approche le palier de coût réel.',
+      probability: 3, impact: 5, category: 'ISSUE', mitigation: 'Replanifier les lots non critiques ; arbitrage budgétaire au comité.',
+      ownerId: ME_ID, status: 'OPEN', source: 'AUTO', autoRuleKind: 'budget_threshold', createdOff: -9,
+    },
+    {
+      projectId: 'proj_web', title: 'Contenus multilingues (IT/DE) livrés en retard par les équipes locales',
+      description: null, probability: 4, impact: 3, category: 'DEPENDENCY',
+      mitigation: 'Kit de traduction + relances hebdo aux référents pays.',
+      ownerId: 'user_4', status: 'MITIGATING', source: 'MANUAL', autoRuleKind: null, createdOff: -14,
+    },
+    {
+      projectId: 'proj_web', title: 'Régression SEO au passage sur le nouveau CMS',
+      description: 'Les redirections et le balisage doivent être vérifiés avant bascule.',
+      probability: 3, impact: 4, category: 'RISK', mitigation: 'Plan de redirections 301 + audit technique pré-bascule.',
+      ownerId: 'user_3', status: 'OPEN', source: 'MANUAL', autoRuleKind: null, createdOff: -7,
+    },
+    {
+      projectId: 'proj_web', title: 'Prévision de charge dépassée sur le sprint de lancement',
+      description: 'La projection à terminaison franchit le budget d’heures restant.',
+      probability: 2, impact: 5, category: 'RISK', mitigation: 'Renfort ponctuel + réduction de périmètre du sprint.',
+      ownerId: 'user_6', status: 'OPEN', source: 'AUTO', autoRuleKind: 'forecast_overrun', createdOff: -5,
+    },
+    {
+      projectId: 'proj_web', title: 'Capacité QA insuffisante pour la matrice de tests navigateurs',
+      description: null, probability: 3, impact: 3, category: 'ASSUMPTION',
+      mitigation: 'Prioriser les navigateurs cibles ; automatiser les parcours clés.',
+      ownerId: 'user_5', status: 'OPEN', source: 'MANUAL', autoRuleKind: null, createdOff: -6,
+    },
+    {
+      projectId: 'proj_web', title: 'Résistance des éditeurs au nouveau back-office',
+      description: 'Adoption plus lente que prévu, formation à prévoir.',
+      probability: 2, impact: 2, category: 'ASSUMPTION', mitigation: 'Sessions de prise en main + documentation courte.',
+      ownerId: 'user_7', status: 'ACCEPTED', source: 'MANUAL', autoRuleKind: null, createdOff: -10,
+    },
+    // Quelques risques sur le projet SRV (migration serveurs).
+    {
+      projectId: 'proj_srv', title: 'Incompatibilité applicative avec Windows Server 2025',
+      description: 'Une application métier legacy pourrait ne pas démarrer après migration.',
+      probability: 3, impact: 5, category: 'RISK', mitigation: 'Banc de test iso-prod + plan de rollback par serveur.',
+      ownerId: 'user_8', status: 'MITIGATING', source: 'MANUAL', autoRuleKind: null, createdOff: -8,
+    },
+    {
+      projectId: 'proj_srv', title: 'Fenêtre de bascule trop courte pour le parc complet',
+      description: null, probability: 4, impact: 4, category: 'ISSUE',
+      mitigation: 'Découper la bascule en vagues ; automatiser le provisioning.',
+      ownerId: ME_ID, status: 'OPEN', source: 'AUTO', autoRuleKind: 'milestone_at_risk', createdOff: -4,
+    },
+    {
+      projectId: 'proj_srv', title: 'Certificats TLS expirés pendant la migration',
+      description: null, probability: 2, impact: 3, category: 'DEPENDENCY',
+      mitigation: 'Inventaire des certificats + renouvellement anticipé.',
+      ownerId: 'user_9', status: 'RESOLVED', source: 'MANUAL', autoRuleKind: null, createdOff: -20, resolvedOff: -3,
+    },
+  ];
+  return specs.map((s, i) => ({
+    id: `risk_${i + 1}`,
+    projectId: s.projectId,
+    title: s.title,
+    description: s.description,
+    probability: s.probability,
+    impact: s.impact,
+    score: s.probability * s.impact,
+    category: s.category,
+    mitigation: s.mitigation,
+    ownerId: s.ownerId,
+    owner: owner(s.ownerId),
+    status: s.status,
+    source: s.source,
+    autoRuleKind: s.autoRuleKind,
+    createdAt: iso(dayOffset(s.createdOff)),
+    updatedAt: iso(dayOffset(Math.min(0, s.createdOff + 2))),
+    resolvedAt: s.resolvedOff != null ? iso(dayOffset(s.resolvedOff)) : null,
+  }));
+}
+
 /** Construit un state seed complet et cohérent. */
 export function buildSeed(): DemoState {
   taskNum = 0;
@@ -634,5 +747,6 @@ export function buildSeed(): DemoState {
     watching: [],
     agents: seedAgents(),
     dependencies: seedDependencies(),
+    risks: seedRisks(users),
   };
 }

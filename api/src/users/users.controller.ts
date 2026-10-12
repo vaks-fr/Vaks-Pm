@@ -45,7 +45,16 @@ export class UsersController {
   findAll(@CurrentUser() user: AuthUser, @Query('includeAgents') includeAgents?: string) {
     // `includeAgents=1` : opt-in des pickers d'affectation (équipes, projets) —
     // un agent IA y est éligible « comme un humain ». Défaut : humains only.
-    return this.users.findAllInOrg(user.orgId, { includeAgents: includeAgents === '1' });
+    const rows = this.users.findAllInOrg(user.orgId, { includeAgents: includeAgents === '1' });
+    // Un agent IA n'a besoin que de quoi désigner quelqu'un (assignation,
+    // mention) : pas de l'annuaire complet (email, isAdmin, rôle, fuseau,
+    // siège). Minimisation des données — le chemin humain est inchangé.
+    if (user.actorKind === 'AGENT') {
+      return rows.then((list) =>
+        list.map((u) => ({ id: u.id, name: u.name, kind: u.kind, status: u.status, ownerId: u.ownerId })),
+      );
+    }
+    return rows;
   }
 
   /**

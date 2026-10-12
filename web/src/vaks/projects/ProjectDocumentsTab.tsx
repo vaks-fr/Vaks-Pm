@@ -11,6 +11,7 @@ import { api } from '../../api/client';
 import { Icon } from '../primitives';
 import { useFormat } from '../../lib/format';
 import { ConfirmDialog, fmtBytes } from './shared';
+import { DocumentViewerModal, isViewableDoc } from './DocumentViewerModal';
 import type { ProjectDocumentDto, ProjectDocumentFolderDto } from '@vaks-pm/shared';
 
 interface Props {
@@ -32,6 +33,7 @@ export function ProjectDocumentsTab({ projectId, pushToast }: Props) {
   const [renameVal, setRenameVal] = useState('');
   const [moving, setMoving] = useState<ProjectDocumentDto | null>(null);
   const [confirmDoc, setConfirmDoc] = useState<ProjectDocumentDto | null>(null);
+  const [viewing, setViewing] = useState<ProjectDocumentDto | null>(null);
   const [confirmFolder, setConfirmFolder] = useState<ProjectDocumentFolderDto | null>(null);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -335,8 +337,12 @@ export function ProjectDocumentsTab({ projectId, pushToast }: Props) {
           {/* Documents */}
           {childDocs.map((d) => (
             <div key={d.id} className="doc-row">
-              <button className="doc-name" onClick={() => download(d)} title={t('documents.downloadTitle')}>
-                <Icon name="download" size={14} />
+              <button
+                className="doc-name"
+                onClick={() => (isViewableDoc(d) ? setViewing(d) : download(d))}
+                title={isViewableDoc(d) ? t('documents.viewTitle') : t('documents.downloadTitle')}
+              >
+                <Icon name={isViewableDoc(d) ? 'eye' : 'download'} size={14} />
                 <span className="truncate">{d.filename}</span>
                 {d.kind === 'OFFER' && (
                   <span className="pill pill-role" style={{ marginLeft: 4 }}>{t('documents.offerTag')}</span>
@@ -392,6 +398,11 @@ export function ProjectDocumentsTab({ projectId, pushToast }: Props) {
                     </div>
                   )}
                 </div>
+                {isViewableDoc(d) && (
+                  <button className="icon-btn" title={t('documents.downloadTitle')} onClick={() => download(d)}>
+                    <Icon name="download" size={13} />
+                  </button>
+                )}
                 <button className="icon-btn" title={t('common:delete')} onClick={() => setConfirmDoc(d)}>
                   <Icon name="x" size={13} />
                 </button>
@@ -399,6 +410,17 @@ export function ProjectDocumentsTab({ projectId, pushToast }: Props) {
             </div>
           ))}
         </div>
+      )}
+
+      {viewing && (
+        <DocumentViewerModal
+          target={viewing}
+          fetchBlob={() =>
+            api.downloadProjectDocument(projectId, viewing.id, viewing.filename).then((r) => r.blob)
+          }
+          onClose={() => setViewing(null)}
+          onDownload={() => download(viewing)}
+        />
       )}
 
       <div className="md-hint" style={{ marginTop: 8 }}>
