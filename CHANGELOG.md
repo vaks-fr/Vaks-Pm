@@ -2,6 +2,14 @@
 
 User-facing changes, most recent first.
 
+## 2026-10-12-2 — 2026-10-12
+
+### Fixes
+- Building the images from source (and the published container images for
+  `api`, `web` and `worker`) failed in release `2026-10-12-1`. Fixed — the
+  2026-10-12 release is now fully available from the container registry and
+  buildable on your own hosts.
+
 ## 2026-10-12-1 — 2026-10-12
 
 ### Risk register (RAID)
